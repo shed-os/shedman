@@ -1,0 +1,5 @@
+schema = 1
+
+[services.postgresql]
+auto-init   = false
+per-user-db = true
