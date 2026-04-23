@@ -171,6 +171,7 @@ STUB
         SHEDOS_APPLY_ETC_ROOT=$etc \
         SHEDOS_APPLY_STATE_ROOT=$state \
         SHEDOS_APPLY_SYSTEMCTL="$stubdir/systemctl" \
+        SHEDOS_LIB_ROOT="$repo_root/packaging/shedos-system/tree/usr/lib/shedos" \
         NO_COLOR=1 \
         "$tool" --config "$etc/shedos/system.toml" $APPLY_ARGS 2>&1
     )
