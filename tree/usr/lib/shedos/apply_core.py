@@ -164,7 +164,8 @@ class SchemaError(ValueError):
     pass
 
 
-_ALLOWED_TOP = {"schema", "systemd", "drop-ins", "snapper"}
+_ALLOWED_TOP = {"schema", "systemd", "drop-ins", "snapper",
+                "pacman", "services"}
 _ALLOWED_SYSTEMD = {"system", "user"}
 _ALLOWED_SYSTEMD_SUB = {"enable", "disable"}
 _ALLOWED_SNAPPER = {"timeline", "cleanup"}
@@ -172,9 +173,14 @@ _ALLOWED_SNAPPER_TIMELINE = {"enabled", "hourly", "daily", "weekly",
                              "monthly", "yearly"}
 _ALLOWED_SNAPPER_CLEANUP = {"number"}
 _ALLOWED_SNAPPER_CLEANUP_NUMBER = {"limit"}
+_ALLOWED_PACMAN = {"repos"}
+_ALLOWED_PACMAN_REPO_KEYS = {"server", "siglevel"}
+_ALLOWED_SERVICES = {"postgresql"}
+_ALLOWED_SERVICES_POSTGRES = {"auto-init", "per-user-db"}
 
 UNIT_NAME_RE = re.compile(r"^[A-Za-z0-9@:_.\-\\x]+\.(service|timer|socket|target|mount|path|slice)$")
 DROPIN_KEY_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.\-/]*\.(conf|json|rules|nsswitch|hosts|cfg)$")
+REPO_NAME_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]*$")
 
 
 def _check_keys(section: str, got: dict, allowed: set[str]) -> None:
@@ -245,11 +251,46 @@ class SnapperSection:
 
 
 @dataclass
+class PacmanRepo:
+    name: str
+    server: str
+    siglevel: str = "Required DatabaseRequired"
+
+
+@dataclass
+class PacmanSection:
+    repos: dict[str, PacmanRepo] = field(default_factory=dict)
+    managed: bool = False  # True once [pacman.repos] appears at all
+
+    def is_empty(self) -> bool:
+        return not self.managed
+
+
+@dataclass
+class PostgresqlServices:
+    auto_init: Optional[bool] = None
+    per_user_db: Optional[bool] = None
+
+    def is_empty(self) -> bool:
+        return self.auto_init is None and self.per_user_db is None
+
+
+@dataclass
+class ServicesSection:
+    postgresql: PostgresqlServices = field(default_factory=PostgresqlServices)
+
+    def is_empty(self) -> bool:
+        return self.postgresql.is_empty()
+
+
+@dataclass
 class ValidatedConfig:
     schema_version: int = SCHEMA_VERSION
     systemd: SystemdSection = field(default_factory=SystemdSection)
     dropins: dict[str, str] = field(default_factory=dict)
     snapper: SnapperSection = field(default_factory=SnapperSection)
+    pacman: PacmanSection = field(default_factory=PacmanSection)
+    services: ServicesSection = field(default_factory=ServicesSection)
 
 
 def validate_doc(doc: dict) -> ValidatedConfig:
@@ -344,6 +385,60 @@ def validate_doc(doc: dict) -> ValidatedConfig:
             if "limit" in num:
                 cfg.snapper.cleanup_number_limit = _check_int(
                     "snapper.cleanup.number.limit", num["limit"])
+
+    pac_raw = doc.get("pacman", {})
+    if pac_raw:
+        if not isinstance(pac_raw, dict):
+            raise SchemaError("[pacman] must be a table")
+        _check_keys("pacman", pac_raw, _ALLOWED_PACMAN)
+        repos_raw = pac_raw.get("repos", {})
+        if not isinstance(repos_raw, dict):
+            raise SchemaError("[pacman.repos] must be a table")
+        cfg.pacman.managed = True
+        for name, stanza in repos_raw.items():
+            if not REPO_NAME_RE.match(name):
+                raise SchemaError(
+                    f"[pacman.repos.{name}] is not a valid pacman repo name "
+                    f"(alphanumerics/dot/dash/underscore only)"
+                )
+            if not isinstance(stanza, dict):
+                raise SchemaError(
+                    f"[pacman.repos.{name}] must be a table of key=value pairs"
+                )
+            _check_keys(f"pacman.repos.{name}", stanza,
+                        _ALLOWED_PACMAN_REPO_KEYS)
+            server = stanza.get("server")
+            if not isinstance(server, str) or not server.strip():
+                raise SchemaError(
+                    f"[pacman.repos.{name}].server is required and must be "
+                    f"a non-empty string"
+                )
+            siglevel = stanza.get("siglevel", "Required DatabaseRequired")
+            if not isinstance(siglevel, str):
+                raise SchemaError(
+                    f"[pacman.repos.{name}].siglevel must be a string"
+                )
+            cfg.pacman.repos[name] = PacmanRepo(
+                name=name, server=server.strip(), siglevel=siglevel.strip(),
+            )
+
+    svc_raw = doc.get("services", {})
+    if svc_raw:
+        if not isinstance(svc_raw, dict):
+            raise SchemaError("[services] must be a table")
+        _check_keys("services", svc_raw, _ALLOWED_SERVICES)
+        pg_raw = svc_raw.get("postgresql", {})
+        if pg_raw:
+            if not isinstance(pg_raw, dict):
+                raise SchemaError("[services.postgresql] must be a table")
+            _check_keys("services.postgresql", pg_raw,
+                        _ALLOWED_SERVICES_POSTGRES)
+            if "auto-init" in pg_raw:
+                cfg.services.postgresql.auto_init = _check_bool(
+                    "services.postgresql.auto-init", pg_raw["auto-init"])
+            if "per-user-db" in pg_raw:
+                cfg.services.postgresql.per_user_db = _check_bool(
+                    "services.postgresql.per-user-db", pg_raw["per-user-db"])
 
     return cfg
 
@@ -673,6 +768,131 @@ def plan_snapper(cfg: ValidatedConfig) -> list[Change]:
 
 
 # ---------------------------------------------------------------------------
+# Reconciler: pacman repos — fence-block rewrite of /etc/pacman.conf
+#
+# The fence markers below match those emitted by shedos-system.install so
+# existing installs upgrade smoothly: the install hook writes an initial
+# fence on first install, and shedos-apply takes over subsequent edits.
+# ---------------------------------------------------------------------------
+
+
+PACMAN_FENCE_OPEN = "# >>> shedos <<<"
+PACMAN_FENCE_CLOSE = "# <<< shedos >>>"
+PACMAN_FENCE_PREAMBLE = (
+    "# Managed by shedos-apply — do not edit between these markers.\n"
+    "# Declarative source: /etc/shedos/system.toml ([pacman.repos]).\n"
+)
+
+
+def _pacman_conf_path() -> Path:
+    return etc_root() / "pacman.conf"
+
+
+def _render_pacman_fence(repos: dict[str, PacmanRepo]) -> str:
+    """Generate the exact text (including open/close fence lines) that the
+    managed block should contain, given the declared repos."""
+    out = [PACMAN_FENCE_OPEN, PACMAN_FENCE_PREAMBLE.rstrip()]
+    for name in sorted(repos):
+        repo = repos[name]
+        out.append("")
+        out.append(f"[{name}]")
+        out.append(f"SigLevel = {repo.siglevel}")
+        out.append(f"Server = {repo.server}")
+    out.append(PACMAN_FENCE_CLOSE)
+    return "\n".join(out) + "\n"
+
+
+def _rewrite_pacman_conf(text: str, new_fence: str) -> str:
+    """Replace the existing fenced block in ``text`` (if any) with
+    ``new_fence``. If no fence exists, append one after a blank line."""
+    lines = text.splitlines(keepends=True)
+    start = end = None
+    for i, line in enumerate(lines):
+        if line.strip() == PACMAN_FENCE_OPEN and start is None:
+            start = i
+        elif line.strip() == PACMAN_FENCE_CLOSE and start is not None:
+            end = i
+            break
+    if start is not None and end is not None:
+        before = "".join(lines[:start])
+        after = "".join(lines[end + 1:])
+        return before + new_fence + after
+    base = text if text.endswith("\n") or not text else text + "\n"
+    sep = "\n" if base and not base.endswith("\n\n") else ""
+    return base + sep + new_fence
+
+
+def plan_pacman(cfg: ValidatedConfig) -> list[Change]:
+    if cfg.pacman.is_empty():
+        return []
+    conf = _pacman_conf_path()
+    current_text = conf.read_text(encoding="utf-8") if conf.exists() else ""
+    desired_fence = _render_pacman_fence(cfg.pacman.repos)
+    desired_text = _rewrite_pacman_conf(current_text, desired_fence)
+    if current_text == desired_text:
+        return []
+    repo_names = sorted(cfg.pacman.repos) or ["(none)"]
+    summary = (f"reconcile pacman fence block ({len(cfg.pacman.repos)} "
+               f"repo(s): {', '.join(repo_names)})")
+    diff_iter = difflib.unified_diff(
+        current_text.splitlines(keepends=True),
+        desired_text.splitlines(keepends=True),
+        fromfile="pacman.conf (current)",
+        tofile="pacman.conf (declared)",
+        lineterm="",
+    )
+    diff = "".join(l if l.endswith("\n") else l + "\n" for l in diff_iter)
+
+    def apply_fn() -> None:
+        atomic_write_text(conf, desired_text, mode=0o644)
+
+    def undo_fn() -> None:
+        atomic_write_text(conf, current_text, mode=0o644)
+
+    return [Change(
+        kind="~", section="pacman", summary=summary,
+        diff=diff, apply_fn=apply_fn, undo_fn=undo_fn,
+    )]
+
+
+# ---------------------------------------------------------------------------
+# Reconciler: services.postgresql — declarative wrapper over the two
+# existing bootstrap units. auto-init and per-user-db are user-facing knobs
+# that desugar to ordinary systemctl enable/disable calls, so the actual
+# mutation piggy-backs on _systemd_change.
+# ---------------------------------------------------------------------------
+
+
+POSTGRES_AUTO_INIT_UNIT = "shedos-pg-initdb.service"
+POSTGRES_PER_USER_DB_UNIT = "shedos-pg-user-bootstrap.service"
+
+
+def plan_services(cfg: ValidatedConfig) -> list[Change]:
+    if cfg.services.is_empty():
+        return []
+    current = _enabled_units("system")
+    out: list[Change] = []
+    flags = [
+        (cfg.services.postgresql.auto_init, POSTGRES_AUTO_INIT_UNIT,
+         "services.postgresql.auto-init"),
+        (cfg.services.postgresql.per_user_db, POSTGRES_PER_USER_DB_UNIT,
+         "services.postgresql.per-user-db"),
+    ]
+    for desired, unit, label in flags:
+        if desired is None:
+            continue
+        if desired and unit not in current:
+            c = _systemd_change("system", unit, "enable")
+            c.section = label
+            out.append(c)
+        elif not desired and unit in current:
+            c = _systemd_change("system", unit, "disable")
+            c.section = label
+            out.append(c)
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Aggregate planner
 # ---------------------------------------------------------------------------
 
@@ -684,6 +904,8 @@ def build_plan(cfg: ValidatedConfig,
     dropin_changes, new_manifest = plan_dropins(cfg, manifest)
     changes.extend(dropin_changes)
     changes.extend(plan_snapper(cfg))
+    changes.extend(plan_pacman(cfg))
+    changes.extend(plan_services(cfg))
     return Plan(changes=changes), new_manifest
 
 
