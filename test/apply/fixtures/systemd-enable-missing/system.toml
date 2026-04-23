@@ -1,0 +1,5 @@
+schema = 1
+
+[systemd.system]
+enable = ["bluetooth.service", "snapper-timeline.timer"]
+disable = ["cups.service"]

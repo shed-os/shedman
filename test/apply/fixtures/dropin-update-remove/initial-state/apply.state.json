@@ -1,0 +1,7 @@
+{
+  "schema": 1,
+  "dropins": {
+    "sysctl.d/99-shedos.conf": "da02063d0fea7cafbb5e49879a6b21ca16f506c4f4f8d00e31d68a54ef63eda1",
+    "sysctl.d/50-old-shedos.conf": "2dbf6dc3d10f4f42fcb88571ea07a2a8e5cf03a3a73da7d1b8fb55c54e5c3e30"
+  }
+}

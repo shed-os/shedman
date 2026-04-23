@@ -1,0 +1,9 @@
+schema = 1
+
+[snapper.timeline]
+enabled = true
+hourly  = 5
+daily   = 7
+
+[snapper.cleanup.number]
+limit = 20

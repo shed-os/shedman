@@ -1,0 +1,7 @@
+schema = 1
+
+[systemd.system]
+enable = ["snapper-timeline.timer", "snapper-cleanup.timer"]
+
+[systemd.user]
+enable = ["shedos-update-check.timer"]

@@ -1,0 +1,4 @@
+schema = 1
+
+[drop-ins]
+"sysctl.d/99-shedos.conf" = "vm.swappiness = 20\nkernel.sysrq = 1\n"

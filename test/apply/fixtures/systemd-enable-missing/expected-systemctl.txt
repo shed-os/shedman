@@ -1,0 +1,2 @@
+system enable bluetooth.service
+system disable cups.service
