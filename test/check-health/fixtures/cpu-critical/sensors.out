@@ -1,0 +1,11 @@
+coretemp-isa-0000
+Adapter: ISA adapter
+Package id 0:
+  temp1_input: 95.000
+  temp1_max: 100.000
+  temp1_crit: 100.000
+Core 0:
+  temp2_input: 82.000
+Core 1:
+  temp3_input: 88.000
+  fan1_input: 4357.000
