@@ -1,0 +1,33 @@
+{
+  "conflicts": {
+    "class": "no-conflicts",
+    "text": "",
+    "tooltip": "No unresolved dotfile conflicts"
+  },
+  "doctor": {
+    "alt": "drift",
+    "class": "drift",
+    "text": " 2",
+    "tooltip": "shedman doctor: 2 drift item(s)"
+  },
+  "health": {
+    "class": "warning",
+    "text": "",
+    "tooltip": "Memory 92 pct"
+  },
+  "schema": 1,
+  "summary": {
+    "attention": [
+      "updates",
+      "health",
+      "doctor"
+    ],
+    "status": "attention",
+    "unavailable": []
+  },
+  "updates": {
+    "class": "has-updates",
+    "text": " 5",
+    "tooltip": "5 update(s) available"
+  }
+}

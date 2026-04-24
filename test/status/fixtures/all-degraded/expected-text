@@ -1,0 +1,6 @@
+  updates     unavailable (updates exited 2: updates: pacman unavailable)  (unavailable)
+  conflicts   unavailable (conflicts exited 2: conflicts: defaults root missing)  (unavailable)
+  health      unavailable (health exited 1: health: cannot read /proc/meminfo)  (unavailable)
+  doctor      unavailable (doctor exited 2: doctor: schema missing)  (unavailable)
+
+Summary: 4 signal(s) unavailable (updates, conflicts, health, doctor)

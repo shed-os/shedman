@@ -1,0 +1,2 @@
+#!/bin/sh
+printf '{"text":"","tooltip":"Memory 92 pct","class":"warning"}\n'

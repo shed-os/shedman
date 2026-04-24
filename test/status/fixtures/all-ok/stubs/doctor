@@ -1,0 +1,2 @@
+#!/bin/sh
+printf '{"text":"","tooltip":"system state aligned","class":"aligned","alt":"aligned"}\n'

@@ -1,0 +1,2 @@
+#!/bin/sh
+printf '{"text":" 5","tooltip":"5 update(s) available","class":"has-updates"}\n'

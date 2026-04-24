@@ -1,0 +1,29 @@
+{
+  "conflicts": {
+    "error": "conflicts exited 2: conflicts: defaults root missing",
+    "status": "unavailable"
+  },
+  "doctor": {
+    "error": "doctor exited 2: doctor: schema missing",
+    "status": "unavailable"
+  },
+  "health": {
+    "error": "health exited 1: health: cannot read /proc/meminfo",
+    "status": "unavailable"
+  },
+  "schema": 1,
+  "summary": {
+    "attention": [],
+    "status": "degraded",
+    "unavailable": [
+      "updates",
+      "conflicts",
+      "health",
+      "doctor"
+    ]
+  },
+  "updates": {
+    "error": "updates exited 2: updates: pacman unavailable",
+    "status": "unavailable"
+  }
+}

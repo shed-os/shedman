@@ -107,7 +107,8 @@ if grep -q '^Available subcommands:' <<<"$out" \
         && grep -q '^  apply ' <<<"$out" \
         && grep -q '^  update ' <<<"$out" \
         && grep -q '^  doctor ' <<<"$out" \
-        && grep -q '^  config ' <<<"$out"; then
+        && grep -q '^  config ' <<<"$out" \
+        && grep -q '^  status ' <<<"$out"; then
     _ok T1_bare_lists_subcommands
 else
     _fail T1_bare_lists_subcommands "listing missing expected entries: $out"

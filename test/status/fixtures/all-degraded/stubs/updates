@@ -1,0 +1,3 @@
+#!/bin/sh
+echo "updates: pacman unavailable" >&2
+exit 2

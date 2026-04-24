@@ -1,0 +1,2 @@
+#!/bin/sh
+printf '{"text":"","tooltip":"No unresolved dotfile conflicts","class":"no-conflicts"}\n'

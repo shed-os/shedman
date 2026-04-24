@@ -1,0 +1,3 @@
+#!/bin/sh
+echo "health: cannot read /proc/meminfo" >&2
+exit 1

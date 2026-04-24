@@ -1,0 +1,29 @@
+{
+  "conflicts": {
+    "class": "no-conflicts",
+    "text": "",
+    "tooltip": "No unresolved dotfile conflicts"
+  },
+  "doctor": {
+    "alt": "aligned",
+    "class": "aligned",
+    "text": "",
+    "tooltip": "system state aligned"
+  },
+  "health": {
+    "class": "ok",
+    "text": "",
+    "tooltip": "All systems nominal"
+  },
+  "schema": 1,
+  "summary": {
+    "attention": [],
+    "status": "ok",
+    "unavailable": []
+  },
+  "updates": {
+    "class": "no-updates",
+    "text": "",
+    "tooltip": "System is up to date"
+  }
+}

@@ -1,0 +1,2 @@
+#!/bin/sh
+printf '{"text":" 2","tooltip":"shedman doctor: 2 drift item(s)","class":"drift","alt":"drift"}\n'

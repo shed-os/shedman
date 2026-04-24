@@ -1,0 +1,30 @@
+{
+  "conflicts": {
+    "class": "no-conflicts",
+    "text": "",
+    "tooltip": "No unresolved dotfile conflicts"
+  },
+  "doctor": {
+    "alt": "aligned",
+    "class": "aligned",
+    "text": "",
+    "tooltip": "system state aligned"
+  },
+  "health": {
+    "error": "health: binary missing",
+    "status": "unavailable"
+  },
+  "schema": 1,
+  "summary": {
+    "attention": [],
+    "status": "degraded",
+    "unavailable": [
+      "health"
+    ]
+  },
+  "updates": {
+    "class": "no-updates",
+    "text": "",
+    "tooltip": "System is up to date"
+  }
+}

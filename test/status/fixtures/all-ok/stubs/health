@@ -1,0 +1,2 @@
+#!/bin/sh
+printf '{"text":"","tooltip":"All systems nominal","class":"ok"}\n'

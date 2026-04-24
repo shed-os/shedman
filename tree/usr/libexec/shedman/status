@@ -1,0 +1,208 @@
+#!/usr/bin/env python3
+"""shedman status — aggregated dashboard across the four waybar signals.
+
+Runs ``updates``, ``conflicts``, ``health``, ``doctor`` in --waybar mode,
+parses each JSON blob, and prints a single-screen summary (or an
+aggregated JSON document with --json).
+
+The per-signal JSON is passed through verbatim under its signal key so
+tooling that already parses the waybar output for one signal can opt
+into the aggregator without learning a second schema. A ``summary``
+section at the top tallies "attention" items across the four signals.
+
+Exit code: 0 regardless of drift — the summary is in the output. Exit 2
+only on schema-violating input (e.g. can't find /usr/libexec/shedman).
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any
+
+
+SCHEMA_VERSION = 1
+SIGNALS = ("updates", "conflicts", "health", "doctor")
+DEFAULT_LIBEXEC = "/usr/libexec/shedman"
+SUBCOMMAND_TIMEOUT_SECONDS = 2.0
+
+
+# States that count as "attention needed". Each underlying signal
+# labels its `class` field differently, so we normalize with a lookup.
+ATTENTION_CLASSES = {
+    "updates":   {"has-updates"},
+    "conflicts": {"has-conflicts"},
+    "health":    {"warning", "critical"},
+    "doctor":    {"drift"},
+}
+
+
+def _help_summary() -> int:
+    print("aggregate dashboard: updates, conflicts, health, doctor")
+    return 0
+
+
+def _run_signal(libexec: Path, name: str) -> dict[str, Any]:
+    """Invoke one signal in --waybar mode. Returns either the parsed
+    waybar dict or {"status": "unavailable", "error": "..."} on any
+    failure (missing binary, non-zero exit, non-JSON output, timeout).
+    """
+    bin_path = libexec / name
+    if not bin_path.is_file() or not os.access(bin_path, os.X_OK):
+        return {"status": "unavailable", "error": f"{name}: binary missing"}
+    try:
+        proc = subprocess.run(
+            [str(bin_path), "--waybar"],
+            capture_output=True,
+            text=True,
+            timeout=SUBCOMMAND_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        return {"status": "unavailable",
+                "error": f"{name} --waybar timed out"}
+    except OSError as e:
+        return {"status": "unavailable", "error": f"{name}: {e}"}
+
+    if proc.returncode != 0:
+        return {"status": "unavailable",
+                "error": f"{name} exited {proc.returncode}: "
+                         f"{proc.stderr.strip() or proc.stdout.strip()}"}
+    payload = proc.stdout.strip()
+    if not payload:
+        return {"status": "unavailable",
+                "error": f"{name} produced no output"}
+    try:
+        doc = json.loads(payload)
+    except json.JSONDecodeError as e:
+        return {"status": "unavailable",
+                "error": f"{name}: invalid JSON ({e.msg})"}
+    if not isinstance(doc, dict):
+        return {"status": "unavailable",
+                "error": f"{name}: JSON is not an object"}
+    return doc
+
+
+def _needs_attention(name: str, doc: dict[str, Any]) -> bool:
+    if doc.get("status") == "unavailable":
+        return False  # don't count outages as attention; summary notes them
+    klass = str(doc.get("class", ""))
+    return klass in ATTENTION_CLASSES.get(name, set())
+
+
+_COUNT_RE = re.compile(r"(\d+)")
+
+
+def _humanize(name: str, doc: dict[str, Any]) -> str:
+    """Render a signal's one-line status for the text dashboard."""
+    if doc.get("status") == "unavailable":
+        return f"unavailable ({doc.get('error', '')})"
+    klass = str(doc.get("class", "")).strip()
+    text = str(doc.get("text", "")).strip()
+    if name == "updates":
+        if klass == "no-updates":
+            return "up to date"
+        m = _COUNT_RE.search(text)
+        n = m.group(1) if m else "?"
+        return f"{n} pending"
+    if name == "conflicts":
+        if klass == "no-conflicts":
+            return "no conflicts"
+        m = _COUNT_RE.search(text)
+        n = m.group(1) if m else "?"
+        return f"{n} unresolved"
+    if name == "health":
+        return klass or "unknown"
+    if name == "doctor":
+        if klass == "aligned":
+            return "aligned"
+        m = _COUNT_RE.search(text)
+        n = m.group(1) if m else "?"
+        return f"{n} drift item(s)"
+    return klass or "unknown"
+
+
+def _summarize(sections: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    attention = [n for n in SIGNALS if _needs_attention(n, sections[n])]
+    unavailable = [n for n in SIGNALS
+                   if sections[n].get("status") == "unavailable"]
+    if not attention and not unavailable:
+        status = "ok"
+    elif attention:
+        status = "attention"
+    else:
+        status = "degraded"  # only unavailability, no real drift
+    return {
+        "status": status,
+        "attention": attention,
+        "unavailable": unavailable,
+    }
+
+
+def _print_text(sections: dict[str, dict[str, Any]],
+                summary: dict[str, Any]) -> None:
+    width = max(len(n) for n in SIGNALS)
+    for name in SIGNALS:
+        flag = ""
+        if _needs_attention(name, sections[name]):
+            flag = "  (attention)"
+        elif sections[name].get("status") == "unavailable":
+            flag = "  (unavailable)"
+        print(f"  {name:<{width}}   {_humanize(name, sections[name])}{flag}")
+    # Trailing verdict line. Keep it short; humans scan the signal lines
+    # above for detail.
+    if summary["status"] == "ok":
+        print("\nSummary: OK")
+    elif summary["status"] == "attention":
+        n = len(summary["attention"])
+        print(f"\nSummary: Attention needed: {n} item(s) "
+              f"({', '.join(summary['attention'])})")
+    else:
+        n = len(summary["unavailable"])
+        print(f"\nSummary: {n} signal(s) unavailable "
+              f"({', '.join(summary['unavailable'])})")
+
+
+def _print_json(sections: dict[str, dict[str, Any]],
+                summary: dict[str, Any]) -> None:
+    doc: dict[str, Any] = {"schema": SCHEMA_VERSION, "summary": summary}
+    for name in SIGNALS:
+        doc[name] = sections[name]
+    print(json.dumps(doc, indent=2, sort_keys=True))
+
+
+def main(argv: list[str] | None = None) -> int:
+    av = argv if argv is not None else sys.argv[1:]
+    if av and av[0] == "--help-summary":
+        return _help_summary()
+
+    parser = argparse.ArgumentParser(
+        prog="shedman status",
+        description="Aggregate dashboard across the four waybar signals.",
+    )
+    parser.add_argument("--json", action="store_true",
+                        help="emit aggregated payload as JSON")
+    args = parser.parse_args(av)
+
+    libexec = Path(os.environ.get("SHEDOS_STATUS_LIBEXEC", DEFAULT_LIBEXEC))
+    if not libexec.is_dir():
+        print(f"shedman status: libexec dir missing: {libexec}",
+              file=sys.stderr)
+        return 2
+
+    sections = {name: _run_signal(libexec, name) for name in SIGNALS}
+    summary = _summarize(sections)
+
+    if args.json:
+        _print_json(sections, summary)
+    else:
+        _print_text(sections, summary)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
