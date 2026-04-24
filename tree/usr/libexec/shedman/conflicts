@@ -1,0 +1,135 @@
+#!/usr/bin/env bash
+# shedman conflicts — count unresolved .shedosnew dotfile conflicts
+# under $HOME. Mirror of `shedman updates` but for the other half of
+# the upgrade story: once pacman updates land, `shedman config --sync`
+# may drop <file>.shedosnew files the user hasn't reconciled yet.
+#
+# Modes:
+#   (no args)            Print a human summary.
+#   --waybar             Print JSON for waybar custom module.
+#   --refresh-waybar     Send SIGRTMIN+9 to waybar so its custom/conflicts
+#                        module re-polls immediately.
+#   --notify-if-new      Count conflicts; fire a desktop notification via
+#                        notify-send iff the count went up since the last
+#                        notification. Silent on count=0 or count<=last.
+#   --tick               One-shot entry point: count + notify-if-new +
+#                        waybar refresh.
+#   --reset-notify-state Forget the last-notified count.
+#
+# Triggered manually (no timer). The producers (`shedman config --sync`)
+# and consumer (`shedman config --review`) call --refresh-waybar / --tick
+# at the points where the count is known to change.
+
+set -u
+
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/shedos"
+NOTIFY_STATE="$STATE_DIR/last-notified-conflict-count"
+
+mode=${1:-text}
+
+_count_conflicts() {
+    # `-xdev` keeps us on the same filesystem as $HOME so we don't walk
+    # network mounts, bind-mounts, or /proc. `.shedosnew` is the only file
+    # suffix `shedman config --sync` produces for unreviewed upstream versions.
+    if [[ ! -d $HOME ]]; then
+        echo 0
+        return
+    fi
+    find "$HOME" -xdev -type f -name '*.shedosnew' -printf '.' 2>/dev/null | wc -c
+}
+
+_read_last_notified() {
+    local v=0
+    if [[ -f "$NOTIFY_STATE" ]]; then
+        v=$(<"$NOTIFY_STATE")
+        [[ "$v" =~ ^[0-9]+$ ]] || v=0
+    fi
+    echo "$v"
+}
+
+_write_last_notified() {
+    mkdir -p "$STATE_DIR"
+    printf '%s\n' "$1" > "$NOTIFY_STATE"
+}
+
+_notify_if_new() {
+    local current="$1"
+
+    if (( current == 0 )); then
+        _write_last_notified 0
+        return 0
+    fi
+
+    if ! command -v notify-send >/dev/null 2>&1; then
+        return 0
+    fi
+    if [[ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ]]; then
+        return 0
+    fi
+
+    local last
+    last=$(_read_last_notified)
+    (( current > last )) || return 0
+
+    local summary body
+    summary="ShedOS config conflicts"
+    if (( current == 1 )); then
+        body="1 dotfile conflict is waiting for review. Run \`shedman config --review\`."
+    else
+        body="$current dotfile conflicts are waiting for review. Run \`shedman config --review\`."
+    fi
+
+    timeout 2s notify-send \
+        --app-name=ShedOS \
+        --icon=dialog-warning \
+        --urgency=normal \
+        "$summary" \
+        "$body" 2>/dev/null || true
+
+    _write_last_notified "$current"
+}
+
+case "$mode" in
+    --help-summary)
+        echo "report unresolved .shedosnew dotfile conflicts"
+        exit 0
+        ;;
+    --refresh-waybar)
+        pkill -RTMIN+9 waybar 2>/dev/null || true
+        exit 0
+        ;;
+    --reset-notify-state)
+        _write_last_notified 0
+        exit 0
+        ;;
+    --check)
+        mode=--tick
+        ;;
+esac
+
+count=$(_count_conflicts)
+
+case "$mode" in
+    --waybar)
+        if (( count > 0 )); then
+            printf '{"text":" %d","tooltip":"%d dotfile conflict(s) need review\\n(click to open \`shedman config --review\`)","class":"has-conflicts"}\n' \
+                "$count" "$count"
+        else
+            printf '{"text":"","tooltip":"No unresolved dotfile conflicts","class":"no-conflicts"}\n'
+        fi
+        ;;
+    --notify-if-new)
+        _notify_if_new "$count"
+        ;;
+    --tick)
+        _notify_if_new "$count"
+        pkill -RTMIN+9 waybar 2>/dev/null || true
+        ;;
+    text|*)
+        if (( count == 0 )); then
+            echo "No unresolved dotfile conflicts."
+        else
+            echo "$count unresolved .shedosnew conflict(s) — run \`shedman config --review\` to resolve."
+        fi
+        ;;
+esac

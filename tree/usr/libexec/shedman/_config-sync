@@ -1,0 +1,419 @@
+#!/usr/bin/env bash
+# shedos-sync-configs — 3-way merge for $HOME dotfiles shipped by ShedOS.
+#
+# For each file under /usr/share/shedos/<pkg>/defaults/ we compare three
+# states:
+#   src      the pristine default shipped by the package
+#   dst      the user's live copy in $HOME
+#   last     the last-seen sha256 we wrote after the previous sync
+#
+# Case A (no dst)               seed  — copy src → dst, record last.
+# Case B (src == last)          noop  — nothing changed upstream.
+# Case C (dst == last, ≠ src)   auto  — backup dst → .shedosbak, copy src, record.
+# Case D (otherwise)            conflict — write src → dst.shedosnew, NO record.
+#
+# Case D never touches dst: a file the user edited is never clobbered. The
+# manifest is intentionally NOT updated on conflict so the next run re-offers
+# the same resolution.
+#
+# Per-package policy file /usr/share/shedos/<pkg>/sync-policy may contain:
+#   always-conflict   treat Case C as Case D (stricter — for shedos-nvim)
+#
+# Exclusion list: runtime state we must never track.
+#   .config/nvim/lazy-lock.json
+#   .config/nvim/lazyvim.json
+#   .local/state/**
+#   .cache/**
+#
+# Users can add their own excludes in $HOME/.config/shedos/sync-exclude:
+# one glob per line (matched against the relpath), `#` for full-line
+# comments, blank lines ignored. Example template shipped at
+# /usr/share/shedos/sync-exclude.example.
+
+set -uo pipefail
+
+if [[ "${1:-}" == "--help-summary" ]]; then
+    echo "3-way merge packaged defaults into \$HOME dotfiles"
+    exit 0
+fi
+
+# Defaults root is overridable via env for the test harness to point at a
+# synthetic pkg tree. Production systems leave it at /usr/share/shedos.
+SHEDOS_DEFAULTS_ROOT="${SHEDOS_DEFAULTS_ROOT:-/usr/share/shedos}"
+STATE_ROOT="${XDG_STATE_HOME:-$HOME/.local/state}/shedos/last-seen"
+CONTENT_ROOT="${XDG_STATE_HOME:-$HOME/.local/state}/shedos/last-seen-content"
+USER_EXCLUDE_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/shedos/sync-exclude"
+USER_EXCLUDES=()
+
+DRY_RUN=0
+REBUILD_MANIFEST=0
+LIST_DIFFS=0
+YES=0
+
+usage() {
+    cat <<'EOF'
+Usage: shedman config --sync [--dry-run] [--yes] [--rebuild-manifest] [--help]
+
+Synchronises $HOME dotfiles against ShedOS package defaults using an
+explicit 3-way merge. A file the user has edited is never overwritten; at
+worst a .shedosnew file is written alongside (exactly like pacman's .pacnew).
+
+Options:
+  --dry-run            Print what would happen, change nothing.
+  -y, --yes            Skip the apply prompt. Conflicts still drop
+                       .shedosnew files (NOT auto-resolved — the tool
+                       never silently picks between your edits and
+                       upstream). Intended for unattended upgrades.
+  --rebuild-manifest   Hash current $HOME files against current defaults and
+                       write the manifest. Use this if the state dir was
+                       lost — effectively says "trust me, I'm aligned now".
+                       Also scans for leftover .shedosnew/.shedosbak files
+                       and tells you how to clean them up.
+  -h, --help           This message.
+
+Run without flags to perform an interactive sync: prints a plan, asks for
+y/N, then applies. Default answer is N.
+EOF
+}
+
+for arg in "$@"; do
+    case "$arg" in
+        --dry-run) DRY_RUN=1 ;;
+        -y|--yes) YES=1 ;;
+        --rebuild-manifest) REBUILD_MANIFEST=1 ;;
+        -h|--help) usage; exit 0 ;;
+        *) echo "unknown option: $arg" >&2; usage >&2; exit 2 ;;
+    esac
+done
+
+_load_user_excludes() {
+    [[ -f $USER_EXCLUDE_FILE && -r $USER_EXCLUDE_FILE ]] || return 0
+    local line
+    while IFS= read -r line || [[ -n $line ]]; do
+        # Trim leading/trailing whitespace.
+        line=${line#"${line%%[![:space:]]*}"}
+        line=${line%"${line##*[![:space:]]}"}
+        # Skip blanks and full-line comments (gitignore-style).
+        [[ -z $line || ${line:0:1} == "#" ]] && continue
+        USER_EXCLUDES+=("$line")
+    done < "$USER_EXCLUDE_FILE"
+}
+
+_is_excluded() {
+    # $1 = relpath (no leading slash)
+    case "$1" in
+        .config/nvim/lazy-lock.json|.config/nvim/lazyvim.json) return 0 ;;
+        .local/state/*|.cache/*) return 0 ;;
+    esac
+    local pat
+    for pat in "${USER_EXCLUDES[@]}"; do
+        # shellcheck disable=SC2053  # deliberate unquoted RHS: pattern match.
+        [[ $1 == $pat ]] && return 0
+    done
+    return 1
+}
+
+_sha() {
+    # $1 = path. Print sha256 hex, or empty string if missing/unreadable.
+    [[ -f $1 && -r $1 ]] || { echo ""; return; }
+    sha256sum -- "$1" 2>/dev/null | awk '{print $1}'
+}
+
+_read_sha() {
+    # $1 = manifest file path. Print stored sha or "".
+    [[ -f $1 ]] || { echo ""; return; }
+    tr -d '[:space:]' < "$1"
+}
+
+_write_sha() {
+    # $1 = manifest file path, $2 = sha
+    install -Dm600 /dev/null "$1"
+    printf '%s' "$2" > "$1"
+}
+
+_write_content() {
+    # Snapshot a BASE content file. $1 = relpath (key), $2 = source to copy.
+    # shedos-review-configs needs BASE content — not just the hash — to show a
+    # real 3-way diff. We mirror the manifest layout under CONTENT_ROOT so the
+    # review tool can locate BASE via the same relpath key.
+    local dest="$CONTENT_ROOT/$1"
+    install -Dm600 /dev/null "$dest"
+    cp --preserve=mode -- "$2" "$dest"
+}
+
+_find_excluded_stale() {
+    # Emit NUL-separated relpaths that are currently excluded (by the hardcoded
+    # list or the user's sync-exclude) but still have manifest state or a
+    # leftover .shedosnew in $HOME. Callers dedup with `sort -uz`.
+    local f relpath
+    if [[ -d $STATE_ROOT ]]; then
+        while IFS= read -r -d '' f; do
+            relpath=${f#"$STATE_ROOT/"}
+            relpath=${relpath%.sha256}
+            _is_excluded "$relpath" && printf '%s\0' "$relpath"
+        done < <(find "$STATE_ROOT" -type f -name '*.sha256' -print0 2>/dev/null)
+    fi
+    while IFS= read -r -d '' f; do
+        relpath=${f#"$HOME/"}
+        relpath=${relpath%.shedosnew}
+        _is_excluded "$relpath" && printf '%s\0' "$relpath"
+    done < <(find "$HOME" -xdev -type f -name '*.shedosnew' -print0 2>/dev/null)
+}
+
+_purge_excluded_stale() {
+    # Delete manifest + BASE + .shedosnew for every path emitted by
+    # _find_excluded_stale. Echoes a count on stdout. Caller decides whether
+    # to invoke (apply mode does; --dry-run only lists).
+    local relpath n=0
+    while IFS= read -r -d '' relpath; do
+        rm -f -- "$STATE_ROOT/$relpath.sha256"
+        rm -f -- "$CONTENT_ROOT/$relpath"
+        rm -f -- "$HOME/$relpath.shedosnew"
+        ((n++))
+    done < <(_find_excluded_stale | sort -zu)
+    printf '%d' "$n"
+}
+
+_pkg_policy() {
+    # $1 = pkg name. Print policy line or "".
+    local f="$SHEDOS_DEFAULTS_ROOT/$1/sync-policy"
+    [[ -f $f ]] || return 0
+    awk 'NF && $1 !~ /^#/ { print; exit }' "$f"
+}
+
+# ---------------------------------------------------------------------------
+# Walk defaults and build a plan.
+# Each entry: "<case>\t<pkg>\t<relpath>\t<src>\t<dst>\t<last>"
+# case ∈ seed | noop | auto | conflict
+# ---------------------------------------------------------------------------
+_load_user_excludes
+
+plan=()
+
+shopt -s dotglob nullglob
+
+if [[ ! -d $SHEDOS_DEFAULTS_ROOT ]]; then
+    echo "No ShedOS defaults found under $SHEDOS_DEFAULTS_ROOT; nothing to sync."
+    exit 0
+fi
+
+for pkg_root in "$SHEDOS_DEFAULTS_ROOT"/*/defaults; do
+    [[ -d $pkg_root ]] || continue
+    pkg_name=$(basename "$(dirname "$pkg_root")")
+    policy=$(_pkg_policy "$pkg_name")
+
+    while IFS= read -r -d '' src; do
+        relpath=${src#"$pkg_root/"}
+        if _is_excluded "$relpath"; then continue; fi
+
+        dst=$HOME/$relpath
+        last=$STATE_ROOT/$relpath.sha256
+
+        src_sha=$(_sha "$src")
+        dst_sha=$(_sha "$dst")
+        last_sha=$(_read_sha "$last")
+
+        if [[ -z $dst_sha ]]; then
+            kind=seed
+        elif [[ $src_sha == "$last_sha" ]]; then
+            kind=noop
+        elif [[ $dst_sha == "$last_sha" ]]; then
+            if [[ $policy == always-conflict ]]; then
+                kind=conflict
+            else
+                kind=auto
+            fi
+        else
+            kind=conflict
+        fi
+
+        plan+=("$kind"$'\t'"$pkg_name"$'\t'"$relpath"$'\t'"$src"$'\t'"$dst"$'\t'"$last")
+    done < <(find "$pkg_root" -type f -print0)
+done
+
+# ---------------------------------------------------------------------------
+# --rebuild-manifest: hash current $HOME files against current defaults and
+# write last-seen = sha(src) unconditionally. Does NOT copy files.
+# ---------------------------------------------------------------------------
+if (( REBUILD_MANIFEST )); then
+    n=0
+    for entry in "${plan[@]}"; do
+        IFS=$'\t' read -r _ _ relpath src _ last <<<"$entry"
+        src_sha=$(_sha "$src")
+        [[ -n $src_sha ]] || continue
+        _write_sha "$last" "$src_sha"
+        _write_content "$relpath" "$src"
+        ((n++))
+    done
+    echo "Rebuilt manifest: $n entries under $STATE_ROOT"
+
+    # Also clean stale state for newly-excluded paths — rebuild-manifest is the
+    # "align my world" command, so dropping leftovers the user has opted out of
+    # fits the contract.
+    purged=$(_purge_excluded_stale)
+    if (( purged > 0 )); then
+        echo "Purged stale state for $purged excluded path(s)."
+    fi
+
+    # Scan for stranded conflict/backup artefacts the user may have forgotten
+    # about. After --rebuild-manifest the tool's view of the world is "aligned
+    # now", which means any remaining .shedosnew is definitionally a file the
+    # user hasn't reviewed yet — point them at it.
+    mapfile -t _new  < <(find "$HOME" -xdev -type f -name '*.shedosnew' 2>/dev/null)
+    mapfile -t _bak  < <(find "$HOME" -xdev -type f -name '*.shedosbak' 2>/dev/null)
+    if (( ${#_new[@]} + ${#_bak[@]} > 0 )); then
+        echo
+        echo "Leftover artefacts in \$HOME:"
+        if (( ${#_new[@]} > 0 )); then
+            echo "  ${#_new[@]} .shedosnew file(s) — unreviewed upstream versions"
+            printf '    %s\n' "${_new[@]}" | head -5
+            (( ${#_new[@]} > 5 )) && echo "    …and $(( ${#_new[@]} - 5 )) more"
+        fi
+        if (( ${#_bak[@]} > 0 )); then
+            echo "  ${#_bak[@]} .shedosbak file(s) — auto-update backups"
+            printf '    %s\n' "${_bak[@]}" | head -5
+            (( ${#_bak[@]} > 5 )) && echo "    …and $(( ${#_bak[@]} - 5 )) more"
+        fi
+        echo
+        echo "Review .shedosnew files interactively:"
+        echo "  shedman config --review          # TUI merge (IDE-style)"
+        echo
+        echo "Or merge by hand, then delete all of either type:"
+        echo "  find ~ -name '*.shedosnew' -delete"
+        echo "  find ~ -name '*.shedosbak' -delete"
+    fi
+    exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# Print plan.
+# ---------------------------------------------------------------------------
+seed_n=0 auto_n=0 conflict_n=0 noop_n=0
+for entry in "${plan[@]}"; do
+    IFS=$'\t' read -r kind pkg relpath _ _ _ <<<"$entry"
+    case $kind in
+        seed) ((seed_n++)) ;;
+        auto) ((auto_n++)) ;;
+        conflict) ((conflict_n++)) ;;
+        noop) ((noop_n++)) ;;
+    esac
+done
+
+if (( seed_n + auto_n + conflict_n == 0 )); then
+    echo "Nothing to sync ($noop_n files already in sync)."
+    # Still honour freshly-added excludes even when the defaults walk is a
+    # no-op. Otherwise users running sync solely to clean up after editing
+    # sync-exclude see nothing happen. Dry-run only previews; apply purges.
+    if (( DRY_RUN )); then
+        stale_any=0
+        while IFS= read -r -d '' relpath; do
+            if (( ! stale_any )); then
+                echo
+                echo "Excluded paths with leftover state (would purge on apply):"
+                stale_any=1
+            fi
+            printf '  %s\n' "$relpath"
+        done < <(_find_excluded_stale | sort -zu)
+    else
+        purged=$(_purge_excluded_stale)
+        if (( purged > 0 )); then
+            echo "Purged stale state for $purged excluded path(s)."
+        fi
+    fi
+    exit 0
+fi
+
+echo "ShedOS config sync plan:"
+for entry in "${plan[@]}"; do
+    IFS=$'\t' read -r kind pkg relpath _ _ _ <<<"$entry"
+    case $kind in
+        seed)     printf '  seed         %s  (first-time copy)\n' "$relpath" ;;
+        auto)     printf '  auto-update  %s  (no local changes)\n' "$relpath" ;;
+        conflict) printf '  conflict     %s  → will write %s.shedosnew\n' "$relpath" "$relpath" ;;
+    esac
+done
+echo
+echo "Summary: $seed_n seed, $auto_n auto-update, $conflict_n conflict, $noop_n noop"
+
+# Preview stale state for paths the user has newly excluded (e.g. added a
+# matcher to ~/.config/shedos/sync-exclude after the last sync). Normal apply
+# path purges these below — in dry-run, we only list.
+if (( DRY_RUN )); then
+    stale_any=0
+    while IFS= read -r -d '' relpath; do
+        if (( ! stale_any )); then
+            echo
+            echo "Excluded paths with leftover state (would purge on apply):"
+            stale_any=1
+        fi
+        printf '  %s\n' "$relpath"
+    done < <(_find_excluded_stale | sort -zu)
+    exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# Prompt (skipped in --yes mode; conflicts still produce .shedosnew).
+# ---------------------------------------------------------------------------
+if ! (( YES )); then
+    while :; do
+        read -rp "Apply this plan? [y/N/list-diffs] " yn
+        case "$yn" in
+            [yY]|[yY][eE][sS]) break ;;
+            list-diffs|diffs|l)
+                for entry in "${plan[@]}"; do
+                    IFS=$'\t' read -r kind _ relpath src dst _ <<<"$entry"
+                    [[ $kind == conflict ]] || continue
+                    echo
+                    echo "=== diff for $relpath ==="
+                    diff -u "$dst" "$src" || true
+                done
+                echo
+                ;;
+            *) echo "Cancelled."; exit 0 ;;
+        esac
+    done
+fi
+
+# ---------------------------------------------------------------------------
+# Apply.
+# ---------------------------------------------------------------------------
+for entry in "${plan[@]}"; do
+    IFS=$'\t' read -r kind pkg relpath src dst last <<<"$entry"
+
+    case $kind in
+        seed)
+            install -Dm644 /dev/null "$dst"
+            cp --preserve=mode "$src" "$dst"
+            _write_sha "$last" "$(_sha "$src")"
+            _write_content "$relpath" "$src"
+            ;;
+        auto)
+            cp -a "$dst" "$dst.shedosbak"
+            cp --preserve=mode "$src" "$dst"
+            _write_sha "$last" "$(_sha "$src")"
+            _write_content "$relpath" "$src"
+            ;;
+        conflict)
+            cp --preserve=mode "$src" "$dst.shedosnew"
+            # Intentionally do NOT update $last or CONTENT_ROOT — we want the
+            # previous BASE preserved so shedos-review-configs can render a
+            # real 3-way diff against it.
+            ;;
+        noop) ;;
+    esac
+done
+
+echo
+echo "Sync complete. Conflicts (if any) landed as <path>.shedosnew alongside"
+echo "your files — inspect with: find ~ -name '*.shedosnew'"
+
+# Clean up manifest + BASE + .shedosnew droppings for paths the user has newly
+# excluded. Silent unless at least one path was purged.
+purged=$(_purge_excluded_stale)
+if (( purged > 0 )); then
+    echo "Purged stale state for $purged excluded path(s)."
+fi
+
+# Refresh the waybar conflict indicator and notify if the count just went
+# up. Silent when there's nothing to see or no DBus session.
+/usr/bin/shedman conflicts --tick 2>/dev/null || true

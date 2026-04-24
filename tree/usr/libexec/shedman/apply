@@ -1,0 +1,142 @@
+#!/usr/bin/env python3
+"""shedman apply — reconcile /etc/shedos/system.toml against system state.
+
+Thin CLI on top of ``apply_core`` (shared with ``shedos-doctor``). All the
+schema validation, diff engine, and reconcilers live in
+``/usr/lib/shedos/apply_core.py``; this file just adds the prompt-and-apply
+loop and argparse surface.
+
+Env vars (all forwarded to apply_core):
+
+    SHEDOS_APPLY_ETC_ROOT          replaces /etc
+    SHEDOS_APPLY_STATE_ROOT        replaces /var/lib/shedos
+    SHEDOS_APPLY_SYSTEMCTL         replaces "systemctl" (split via shlex)
+    SHEDOS_LIB_ROOT                dir containing apply_core.py (dev/test)
+
+Exit codes:
+
+    0  applied cleanly (or plan was empty)
+    1  user aborted, or apply failed and was rolled back
+    2  config missing or schema error
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import sys
+from pathlib import Path
+
+
+if len(sys.argv) > 1 and sys.argv[1] == "--help-summary":
+    print("reconcile /etc/shedos/system.toml against live state")
+    sys.exit(0)
+
+_LIB_ROOT = os.environ.get("SHEDOS_LIB_ROOT", "/usr/lib/shedos")
+if _LIB_ROOT not in sys.path:
+    sys.path.insert(0, _LIB_ROOT)
+
+import apply_core as _core  # noqa: E402
+
+
+def _prompt(prompt: str) -> str:
+    try:
+        return input(prompt).strip().lower()
+    except EOFError:
+        return ""
+
+
+def run_apply(cfg_path: _core.Optional[Path] = None, *,
+              assume_yes: bool = False, dry_run: bool = False) -> int:
+    try:
+        cfg = _core.load_config(cfg_path)
+    except FileNotFoundError as e:
+        print(f"shedman apply: {e}", file=sys.stderr)
+        return 2
+    except _core.SchemaError as e:
+        print(f"shedman apply: {e}", file=sys.stderr)
+        return 2
+
+    manifest = _core.Manifest.load()
+    plan, new_manifest = _core.build_plan(cfg, manifest)
+
+    print(_core.colorize(f"Plan for {cfg_path or _core.config_path()}:", "bold"))
+    print(plan.render())
+
+    if plan.is_empty():
+        return 0
+    if dry_run:
+        return 0
+
+    if not assume_yes:
+        while True:
+            ans = _prompt("Apply? [y/N/diff] ")
+            if ans in ("", "n", "no"):
+                print("aborted.")
+                return 1
+            if ans in ("y", "yes"):
+                break
+            if ans in ("d", "diff"):
+                print(plan.render_diffs())
+                continue
+            print("please answer y, n, or diff")
+
+    applied: list[_core.Change] = []
+    try:
+        for change in plan.changes:
+            if change.apply_fn is None:
+                continue
+            change.apply_fn()
+            applied.append(change)
+    except Exception as e:
+        print(_core.colorize(f"\nFAIL during apply: {e}", "red"), file=sys.stderr)
+        print("rolling back …", file=sys.stderr)
+        for change in reversed(applied):
+            if change.undo_fn is None:
+                continue
+            try:
+                change.undo_fn()
+            except Exception as rollback_err:
+                print(f"  rollback of {change.section}:{change.summary} "
+                      f"failed: {rollback_err}", file=sys.stderr)
+        return 1
+
+    new_manifest.save()
+    print(_core.colorize(f"\napplied {len(applied)} change(s).", "green"))
+    return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        prog="shedman apply",
+        description="Reconcile /etc/shedos/system.toml against live state.",
+    )
+    parser.add_argument("--config", type=Path, default=None,
+                        help="path to system.toml (default: "
+                             "/etc/shedos/system.toml)")
+    parser.add_argument("--yes", "-y", action="store_true",
+                        help="apply without prompting")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="print the plan and exit (no prompt, no apply)")
+    parser.add_argument("--validate", action="store_true",
+                        help="parse + validate the TOML and exit 0 if OK, "
+                             "2 on schema error")
+    args = parser.parse_args()
+
+    if args.validate:
+        try:
+            _core.load_config(args.config)
+        except FileNotFoundError as e:
+            print(f"shedman apply: {e}", file=sys.stderr)
+            return 2
+        except _core.SchemaError as e:
+            print(f"shedman apply: {e}", file=sys.stderr)
+            return 2
+        print("OK")
+        return 0
+
+    return run_apply(args.config, assume_yes=args.yes, dry_run=args.dry_run)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

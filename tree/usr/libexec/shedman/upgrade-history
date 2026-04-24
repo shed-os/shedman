@@ -1,0 +1,745 @@
+#!/usr/bin/env python3
+"""shedos-upgrade-history — browse ShedOS upgrade runs and roll back.
+
+Every `shedos-update` run is bracketed by a snapper pre/post pair tagged
+``userdata={source: shedos-update, kind: pre|post}``. We read the
+snapper list, pair those snapshots by ``pre-number`` on the post entry,
+and render them as an interactive timeline. ``r`` on a pre-snapshot
+shells out to ``shedos-update --rollback <N>``; ``enter`` opens a diff
+pane listing packages installed/upgraded/removed between the two
+snapshots (parsed out of `snapper status <pre>..<post>` by filtering to
+``/var/lib/pacman/local/`` path changes).
+
+Manual snapshots (anything without ``userdata.source == shedos-update``)
+land in a separate "Manual snapshots" section so users aren't confused
+by a half-pair rendering as an orphan upgrade.
+
+Test hooks (full argv replacement via ``shlex.split``):
+
+    SHEDOS_HISTORY_SNAPPER_LIST_CMD    replaces `sudo snapper -c root list --jsonout`
+    SHEDOS_HISTORY_SNAPPER_STATUS_CMD  replaces `sudo snapper -c root status A..B`
+    SHEDOS_HISTORY_ROLLBACK_CMD        replaces `sudo shedos-update --rollback N`
+"""
+
+from __future__ import annotations
+
+import argparse
+import collections
+import json
+import os
+import shlex
+import shutil
+import subprocess
+import sys
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Optional
+
+
+# ---------------------------------------------------------------------------
+# Data model — kept importable without Textual so tests can exercise the
+# parser cheaply.
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class Snapshot:
+    number: int
+    type: str            # "single", "pre", or "post"
+    date: str            # ISO-ish string from snapper, displayed verbatim
+    description: str
+    source: Optional[str]      # userdata.source (e.g. "shedos-update")
+    kind: Optional[str]        # userdata.kind ("pre" / "post")
+    pre_number: Optional[int]  # set on post snapshots
+
+
+@dataclass
+class UpgradeRun:
+    pre: Snapshot
+    post: Snapshot
+    # Package counts are filled lazily by load_package_diff() when the user
+    # opens the diff pane — listing is cheap, `snapper status` isn't.
+    pacman_added: int = 0
+    pacman_removed: int = 0
+    pacman_updated: int = 0
+
+
+@dataclass
+class HistoryView:
+    runs: list[UpgradeRun] = field(default_factory=list)
+    orphans: list[Snapshot] = field(default_factory=list)  # pre without post or vice-versa
+    manual: list[Snapshot] = field(default_factory=list)   # non-shedos-update snapshots
+
+
+# ---------------------------------------------------------------------------
+# snapper JSON parsing
+# ---------------------------------------------------------------------------
+
+
+def _snapshot_from_obj(obj: dict) -> Snapshot:
+    ud = obj.get("userdata") or {}
+    if isinstance(ud, list):
+        # Some snapper versions emit userdata as ["key=value", ...]; flatten.
+        flat = {}
+        for entry in ud:
+            if isinstance(entry, str) and "=" in entry:
+                k, v = entry.split("=", 1)
+                flat[k.strip()] = v.strip()
+        ud = flat
+    return Snapshot(
+        number=int(obj.get("number", 0)),
+        type=str(obj.get("type", "")),
+        date=str(obj.get("date", "")),
+        description=str(obj.get("description", "")),
+        source=ud.get("source"),
+        kind=ud.get("kind"),
+        pre_number=(int(obj["pre-number"])
+                    if obj.get("pre-number") not in (None, 0, "", "-") else None),
+    )
+
+
+def parse_snapper_list(raw: str) -> list[Snapshot]:
+    """Parse ``snapper --jsonout list`` output into Snapshot objects.
+
+    snapper's JSON schema is ``{<config-name>: [...snapshot-objects...]}``.
+    We take the first config's list — ShedOS uses a single ``root`` config,
+    but fallback handles older snapper versions that nested differently."""
+    if not raw.strip():
+        return []
+    try:
+        doc = json.loads(raw)
+    except json.JSONDecodeError:
+        return []
+    if isinstance(doc, list):
+        entries = doc
+    elif isinstance(doc, dict):
+        # Prefer explicit "root" config; otherwise take the first list value.
+        entries = doc.get("root")
+        if entries is None:
+            for v in doc.values():
+                if isinstance(v, list):
+                    entries = v
+                    break
+        if entries is None:
+            return []
+    else:
+        return []
+    result: list[Snapshot] = []
+    for obj in entries:
+        if not isinstance(obj, dict):
+            continue
+        try:
+            result.append(_snapshot_from_obj(obj))
+        except (ValueError, TypeError):
+            continue
+    return result
+
+
+def group_into_runs(snapshots: list[Snapshot]) -> HistoryView:
+    """Pair pre/post snapshots by ``pre_number`` on the post entry; only
+    shedos-update snapshots get promoted to the runs list. Everything
+    without both halves tagged ``source == shedos-update`` stays out of
+    the pair view (manual snapshots) or is listed as an orphan (the rare
+    case where a pre ran but the post failed to emit, or vice versa)."""
+    by_number: dict[int, Snapshot] = {s.number: s for s in snapshots}
+    runs: list[UpgradeRun] = []
+    seen_in_pair: set[int] = set()
+
+    for snap in snapshots:
+        if snap.source != "shedos-update":
+            continue
+        if snap.kind != "post":
+            continue
+        if snap.pre_number is None:
+            continue
+        pre = by_number.get(snap.pre_number)
+        if pre is None or pre.source != "shedos-update":
+            continue
+        runs.append(UpgradeRun(pre=pre, post=snap))
+        seen_in_pair.add(pre.number)
+        seen_in_pair.add(snap.number)
+
+    # Order newest first for display.
+    runs.sort(key=lambda r: r.pre.number, reverse=True)
+
+    orphans: list[Snapshot] = []
+    manual: list[Snapshot] = []
+    for snap in snapshots:
+        if snap.number in seen_in_pair:
+            continue
+        # Snapper emits number 0 as a live-state marker ("current") — it
+        # isn't a real snapshot the user can roll back to, so drop it.
+        if snap.number == 0:
+            continue
+        if snap.source == "shedos-update":
+            orphans.append(snap)
+        else:
+            manual.append(snap)
+
+    orphans.sort(key=lambda s: s.number, reverse=True)
+    manual.sort(key=lambda s: s.number, reverse=True)
+    return HistoryView(runs=runs, orphans=orphans, manual=manual)
+
+
+# ---------------------------------------------------------------------------
+# snapper status → package diff
+# ---------------------------------------------------------------------------
+
+
+PACMAN_LOCAL = "/var/lib/pacman/local/"
+PKG_RE_SPLIT_VERSION = True  # split "foo-1.2.3-1" into ("foo", "1.2.3-1") for grouping
+
+
+@dataclass
+class PackageChange:
+    kind: str   # "added", "removed", "updated"
+    name: str
+    from_version: Optional[str] = None
+    to_version: Optional[str] = None
+
+
+def _split_pkg_entry(dirname: str) -> tuple[str, str]:
+    """``foo-bar-1.2.3-1`` → ``("foo-bar", "1.2.3-1")``. Pacman's pkg-version
+    scheme is ``<name>-<pkgver>-<pkgrel>``, where name itself can contain
+    hyphens. The convention we rely on: the last TWO hyphen-separated
+    tokens are ``<pkgver>-<pkgrel>``. Anything earlier is the package name."""
+    parts = dirname.rsplit("-", 2)
+    if len(parts) == 3:
+        return parts[0], f"{parts[1]}-{parts[2]}"
+    return dirname, ""
+
+
+def parse_snapper_status(raw: str) -> list[PackageChange]:
+    """Parse ``snapper status <A>..<B>`` restricted to pacman-local entries.
+
+    Each line is ``<flags> <path>``. The first flag column encodes the
+    change kind:
+      ``+`` created, ``-`` deleted, ``c`` content-changed, ``t`` type-changed.
+    We only care about entries under ``/var/lib/pacman/local/<pkg>-<ver>/``,
+    and then we pair +/- lines sharing the same package name into an
+    "updated" entry. Lone + is "added", lone − is "removed"."""
+    adds: dict[str, str] = {}    # name -> version added
+    rems: dict[str, str] = {}    # name -> version removed
+    for raw_line in raw.splitlines():
+        line = raw_line.rstrip()
+        if not line or PACMAN_LOCAL not in line:
+            continue
+        # snapper status format: `+..... /path`  (5 flag columns + space)
+        # Split at the first space after the flags block; simpler to just
+        # find the pacman-local prefix and treat the first char as the flag.
+        flag = line[0] if line else ""
+        idx = line.find(PACMAN_LOCAL)
+        if idx < 0:
+            continue
+        tail = line[idx + len(PACMAN_LOCAL):]
+        # Only care about the immediate subdirectory — e.g. "foo-1.2-1/desc".
+        seg = tail.split("/", 1)[0]
+        if not seg or seg in (".", ""):
+            continue
+        name, version = _split_pkg_entry(seg)
+        if flag == "+":
+            adds[name] = version
+        elif flag == "-":
+            rems[name] = version
+
+    changes: list[PackageChange] = []
+    for name in sorted(set(adds) | set(rems)):
+        if name in adds and name in rems:
+            changes.append(PackageChange(
+                kind="updated", name=name,
+                from_version=rems[name], to_version=adds[name],
+            ))
+        elif name in adds:
+            changes.append(PackageChange(
+                kind="added", name=name, to_version=adds[name],
+            ))
+        else:
+            changes.append(PackageChange(
+                kind="removed", name=name, from_version=rems[name],
+            ))
+    return changes
+
+
+def summarize_changes(changes: list[PackageChange]) -> tuple[int, int, int]:
+    added = sum(1 for c in changes if c.kind == "added")
+    removed = sum(1 for c in changes if c.kind == "removed")
+    updated = sum(1 for c in changes if c.kind == "updated")
+    return added, removed, updated
+
+
+# ---------------------------------------------------------------------------
+# subprocess wiring
+# ---------------------------------------------------------------------------
+
+
+def _run(cmd: list[str], env_override: Optional[str] = None) -> tuple[int, str]:
+    """Run a subprocess with an optional full-argv replacement hook. Returns
+    (returncode, stdout). Stderr is merged into stdout on failure so tests
+    and the UI can surface the reason without a second pipe."""
+    if env_override and os.environ.get(env_override):
+        cmd = shlex.split(os.environ[env_override])
+    try:
+        out = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=30, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return 127, f"(failed to run {cmd[0]}: {e})"
+    if out.returncode != 0 and not out.stdout.strip():
+        return out.returncode, (out.stderr.strip()
+                                or f"(exit {out.returncode} from {cmd[0]})")
+    return out.returncode, out.stdout
+
+
+def fetch_snapshots() -> list[Snapshot]:
+    rc, text = _run(
+        ["sudo", "-n", "snapper", "--jsonout", "-c", "root", "list"],
+        env_override="SHEDOS_HISTORY_SNAPPER_LIST_CMD",
+    )
+    if rc != 0:
+        return []
+    return parse_snapper_list(text)
+
+
+def fetch_package_diff(pre: int, post: int) -> list[PackageChange]:
+    rc, text = _run(
+        ["sudo", "-n", "snapper", "-c", "root", "status", f"{pre}..{post}"],
+        env_override="SHEDOS_HISTORY_SNAPPER_STATUS_CMD",
+    )
+    if rc != 0:
+        return []
+    return parse_snapper_status(text)
+
+
+def trigger_rollback(pre_number: int) -> tuple[int, str]:
+    return _run(
+        ["sudo", "-n", "/usr/bin/shedman", "update", "--rollback", str(pre_number)],
+        env_override="SHEDOS_HISTORY_ROLLBACK_CMD",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Date normalisation — snapper emits assorted formats depending on version
+# and the `--iso` flag. We show whatever we parse back as "YYYY-MM-DD HH:MM".
+# ---------------------------------------------------------------------------
+
+
+def _normalize_date(raw: str) -> str:
+    if not raw:
+        return "(no date)"
+    for fmt in ("%Y-%m-%d %H:%M:%S",
+                "%Y-%m-%dT%H:%M:%S",
+                "%Y-%m-%d %H:%M",
+                "%Y-%m-%d"):
+        try:
+            dt = datetime.strptime(raw.split(".")[0].split("+")[0], fmt)
+            return dt.strftime("%Y-%m-%d %H:%M")
+        except ValueError:
+            continue
+    return raw  # unrecognised format: hand it back verbatim
+
+
+def render_run_row(run: UpgradeRun) -> tuple[str, str, str]:
+    """Return (id_range, when, kind) columns for a DataTable row.
+
+    kind is the upgrade-scale badge — intentionally abstract until the
+    user opens the diff pane, because computing every package diff up
+    front would fire N `snapper status` calls."""
+    id_range = f"#{run.pre.number} → #{run.post.number}"
+    when = _normalize_date(run.pre.date)
+    desc = (run.post.description or run.pre.description).strip() or "—"
+    return id_range, when, desc
+
+
+# ---------------------------------------------------------------------------
+# Textual UI (lazy-loaded).
+# ---------------------------------------------------------------------------
+
+
+UpgradeHistoryApp = None  # populated by build_app_class(); test hook.
+
+
+def build_app_class():
+    global UpgradeHistoryApp
+    if UpgradeHistoryApp is not None:
+        return UpgradeHistoryApp
+    try:
+        from textual.app import App, ComposeResult
+        from textual.binding import Binding
+        from textual.containers import Horizontal, Vertical
+        from textual.screen import ModalScreen
+        from textual.widgets import (
+            DataTable, Footer, Header, Label, Static,
+        )
+        from textual import work
+        from rich.text import Text
+    except Exception as e:
+        raise RuntimeError(
+            f"shedman update --history: Textual not available ({e}). "
+            f"Install python-textual."
+        ) from e
+
+    PALETTE = {
+        "base": "#1e1e2e", "mantle": "#181825", "surface0": "#313244",
+        "text": "#cdd6f4", "overlay0": "#6c7086",
+        "green": "#a6e3a1", "red": "#f38ba8", "yellow": "#f9e2af",
+        "blue": "#89b4fa", "mauve": "#cba6f7", "peach": "#fab387",
+    }
+
+    APP_CSS = """
+    Screen { background: #1e1e2e; color: #cdd6f4; }
+    Header { background: #181825; color: #89b4fa; }
+    Footer { background: #181825; color: #6c7086; }
+
+    #body { height: 1fr; }
+    #runs-pane { border: round #313244; padding: 0; height: 1fr; }
+    #runs-pane.focus { border: round #89b4fa; }
+    DataTable { background: #1e1e2e; }
+    DataTable > .datatable--header { background: #181825; color: #89b4fa; }
+    DataTable > .datatable--cursor { background: #313244; color: #cdd6f4; }
+
+    #status-line {
+        dock: bottom; height: 1; background: #181825;
+        color: #6c7086; padding: 0 1;
+    }
+    #status-line.ok { color: #a6e3a1; }
+    #status-line.err { color: #f38ba8; }
+    #status-line.warn { color: #fab387; }
+
+    ModalScreen { align: center middle; }
+    .dialog { border: thick #89b4fa; background: #181825; width: 60;
+              height: auto; padding: 1 2; }
+    .dialog-title { color: #89b4fa; text-style: bold; }
+    .dialog-hint { color: #6c7086; }
+
+    #diff-box { width: 80%; height: 80%; }
+    #diff-body { height: 1fr; padding: 1 2; }
+    #help-box { width: 70; }
+    """
+
+    class HelpScreen(ModalScreen):
+        BINDINGS = [Binding("escape,?,q", "app.pop_screen", "close")]
+
+        HELP = """[b]shedman update --history[/b]  keybindings
+
+  [b]j / k[/b]        cursor down / up
+  [b]enter[/b]       show package diff for the selected run
+  [b]r[/b]           roll back to the pre-snapshot of the selected run
+  [b]R[/b]           force-refresh the snapshot list
+  [b]?[/b]           this help
+  [b]q[/b]           quit
+
+[#6c7086]esc closes help / modals.[/]
+"""
+
+        def compose(self) -> ComposeResult:
+            with Vertical(classes="dialog", id="help-box"):
+                yield Label(self.HELP)
+
+    class ConfirmScreen(ModalScreen):
+        BINDINGS = [
+            Binding("escape", "dismiss_no", "cancel"),
+            Binding("n", "dismiss_no", "no"),
+            Binding("y", "dismiss_yes", "yes"),
+        ]
+
+        def __init__(self, title: str, body: str) -> None:
+            super().__init__()
+            self._title = title
+            self._body = body
+
+        def compose(self) -> ComposeResult:
+            with Vertical(classes="dialog"):
+                yield Label(self._title, classes="dialog-title")
+                yield Label(self._body)
+                yield Label("[y] yes   [n/esc] no", classes="dialog-hint")
+
+        def action_dismiss_yes(self) -> None:
+            self.dismiss(True)
+
+        def action_dismiss_no(self) -> None:
+            self.dismiss(False)
+
+    class DiffScreen(ModalScreen):
+        BINDINGS = [Binding("escape,q", "app.pop_screen", "close")]
+
+        def __init__(self, run: UpgradeRun,
+                     changes: list[PackageChange]) -> None:
+            super().__init__()
+            self._run = run
+            self._changes = changes
+
+        def compose(self) -> ComposeResult:
+            with Vertical(classes="dialog", id="diff-box"):
+                yield Label(
+                    f"Package diff: #{self._run.pre.number} → #{self._run.post.number}",
+                    classes="dialog-title",
+                )
+                yield Static(self._render_body(), id="diff-body")
+                yield Label("[esc] close", classes="dialog-hint")
+
+        def _render_body(self) -> Text:
+            if not self._changes:
+                return Text("(no pacman package changes recorded)",
+                            style=PALETTE["overlay0"])
+            body = Text()
+            added, removed, updated = summarize_changes(self._changes)
+            body.append(
+                f"{added} added  {updated} updated  {removed} removed\n\n",
+                style=PALETTE["blue"],
+            )
+            for c in self._changes:
+                if c.kind == "added":
+                    body.append(f"+ {c.name} {c.to_version}\n",
+                                style=PALETTE["green"])
+                elif c.kind == "removed":
+                    body.append(f"- {c.name} {c.from_version}\n",
+                                style=PALETTE["red"])
+                else:  # updated
+                    body.append(
+                        f"~ {c.name} {c.from_version} → {c.to_version}\n",
+                        style=PALETTE["yellow"],
+                    )
+            return body
+
+    class _UpgradeHistoryApp(App):
+        CSS = APP_CSS
+        TITLE = "shedman update --history"
+        BINDINGS = [
+            Binding("q", "quit", "quit"),
+            Binding("ctrl+c", "quit", "quit", priority=True, show=False),
+            Binding("question_mark", "help", "help"),
+            Binding("r", "rollback", "rollback"),
+            Binding("R", "refresh", "refresh"),
+            # enter is consumed by DataTable and surfaces as RowSelected —
+            # see on_data_table_row_selected below.
+        ]
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.view: HistoryView = HistoryView()
+            self._row_lookup: dict[str, UpgradeRun] = {}
+            self._manual_rows: dict[str, Snapshot] = {}
+
+        def compose(self) -> ComposeResult:
+            yield Header(show_clock=False)
+            table = DataTable(id="runs-pane", cursor_type="row",
+                              zebra_stripes=True)
+            table.add_columns("id range", "when", "description")
+            yield table
+            yield Static("loading …", id="status-line")
+            yield Footer()
+
+        def on_mount(self) -> None:
+            self.query_one(DataTable).focus()
+            self.action_refresh()
+
+        # -------- refresh / populate ---------------------------------------
+
+        def action_refresh(self) -> None:
+            self._status("loading snapshots …")
+            snaps = fetch_snapshots()
+            self.view = group_into_runs(snaps)
+            self._populate_table()
+            total = len(self.view.runs)
+            manual = len(self.view.manual)
+            orphans = len(self.view.orphans)
+            self._status(
+                f"{total} upgrade runs, {manual} manual, {orphans} orphans",
+                kind="ok" if total else "warn",
+            )
+
+        def _populate_table(self) -> None:
+            table = self.query_one(DataTable)
+            table.clear()
+            self._row_lookup.clear()
+            self._manual_rows.clear()
+            if not self.view.runs and not self.view.manual:
+                table.add_row("—", "—", "(no snapshots)")
+                return
+            for run in self.view.runs:
+                key = f"run-{run.pre.number}"
+                id_range, when, desc = render_run_row(run)
+                table.add_row(id_range, when, desc, key=key)
+                self._row_lookup[key] = run
+            if self.view.manual:
+                table.add_row("—", "—", "── manual snapshots ──")
+                for s in self.view.manual:
+                    key = f"manual-{s.number}"
+                    table.add_row(f"#{s.number}", _normalize_date(s.date),
+                                  s.description or "(manual)", key=key)
+                    self._manual_rows[key] = s
+
+        # -------- actions --------------------------------------------------
+
+        def action_help(self) -> None:
+            self.push_screen(HelpScreen())
+
+        def on_data_table_row_selected(self, event) -> None:
+            self.action_show_diff()
+
+        def action_show_diff(self) -> None:
+            run = self._selected_run()
+            if run is None:
+                self._status("select an upgrade run first (manual "
+                             "snapshots have no diff).", kind="warn")
+                return
+            self._status(f"loading diff #{run.pre.number} → "
+                         f"#{run.post.number} …")
+            self._load_diff(run)
+
+        def action_rollback(self) -> None:
+            run = self._selected_run()
+            if run is None:
+                self._status("rollback needs an upgrade run "
+                             "(manual snapshots aren't paired).", kind="warn")
+                return
+            pre = run.pre.number
+            self.push_screen(
+                ConfirmScreen(
+                    "Roll back root filesystem?",
+                    f"This will restore @ from snapshot #{pre}\n"
+                    f"({_normalize_date(run.pre.date)}) and reboot the "
+                    f"system.\n\nThe current @ is renamed to\n"
+                    f"@.rollback-<ts> and remains available via\n"
+                    f"shedman rollback --undo.",
+                ),
+                self._rollback_confirmed,
+            )
+
+        # -------- internals ------------------------------------------------
+
+        def _selected_run(self) -> Optional[UpgradeRun]:
+            table = self.query_one(DataTable)
+            if table.cursor_row < 0:
+                return None
+            try:
+                row_key = table.coordinate_to_cell_key(
+                    (table.cursor_row, 0)).row_key
+            except Exception:
+                return None
+            if row_key is None:
+                return None
+            return self._row_lookup.get(str(row_key.value))
+
+        def _status(self, msg: str, *, kind: str = "ok") -> None:
+            line = self.query_one("#status-line", Static)
+            line.update(msg)
+            for k in ("ok", "err", "warn"):
+                line.remove_class(k)
+            line.add_class(kind)
+
+        @work(thread=True, exclusive=True, group="diff")
+        def _load_diff(self, run: UpgradeRun) -> None:
+            changes = fetch_package_diff(run.pre.number, run.post.number)
+            self.call_from_thread(self._show_diff_screen, run, changes)
+
+        def _show_diff_screen(self, run: UpgradeRun,
+                              changes: list[PackageChange]) -> None:
+            added, removed, updated = summarize_changes(changes)
+            run.pacman_added = added
+            run.pacman_removed = removed
+            run.pacman_updated = updated
+            self.push_screen(DiffScreen(run, changes))
+            self._status(
+                f"#{run.pre.number} → #{run.post.number}: "
+                f"{added} +, {updated} ~, {removed} −",
+                kind="ok",
+            )
+
+        def _rollback_confirmed(self, ans: Optional[bool]) -> None:
+            if not ans:
+                self._status("rollback cancelled.", kind="warn")
+                return
+            run = self._selected_run()
+            if run is None:
+                self._status("rollback target vanished.", kind="err")
+                return
+            self._status(f"rolling back to #{run.pre.number} …", kind="warn")
+            self._fire_rollback(run.pre.number)
+
+        @work(thread=True, exclusive=True, group="rollback")
+        def _fire_rollback(self, pre: int) -> None:
+            rc, output = trigger_rollback(pre)
+            self.call_from_thread(self._rollback_finished, pre, rc, output)
+
+        def _rollback_finished(self, pre: int, rc: int, output: str) -> None:
+            if rc == 0:
+                self._status(
+                    f"rollback to #{pre} queued — reboot to take effect.",
+                    kind="ok",
+                )
+            else:
+                short = output.strip().splitlines()[-1][:120] if output else "?"
+                self._status(f"rollback #{pre} failed: {short}", kind="err")
+
+        def action_quit(self) -> None:
+            self.exit()
+
+    UpgradeHistoryApp = _UpgradeHistoryApp
+    globals()["UpgradeHistoryApp"] = _UpgradeHistoryApp
+    return _UpgradeHistoryApp
+
+
+def _run_app() -> int:
+    try:
+        cls = build_app_class()
+    except RuntimeError as e:
+        print(str(e), file=sys.stderr)
+        return 2
+    cls().run()
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# Entrypoint
+# ---------------------------------------------------------------------------
+
+
+def _print_plain(view: HistoryView) -> None:
+    if not view.runs:
+        print("No ShedOS update snapshot pairs found.")
+    for run in view.runs:
+        print(f"#{run.pre.number} → #{run.post.number}\t"
+              f"{_normalize_date(run.pre.date)}\t"
+              f"{(run.post.description or run.pre.description).strip()}")
+    if view.manual:
+        print("\n── manual snapshots ──")
+        for s in view.manual:
+            print(f"#{s.number}\t{_normalize_date(s.date)}\t"
+                  f"{s.description or '(manual)'}")
+    if view.orphans:
+        print("\n── orphans (unpaired ShedOS update snapshots) ──")
+        for s in view.orphans:
+            print(f"#{s.number}\t{s.kind}\t{_normalize_date(s.date)}")
+
+
+def main() -> int:
+    if len(sys.argv) > 1 and sys.argv[1] == "--help-summary":
+        print("browse ShedOS upgrade history and roll back")
+        return 0
+    parser = argparse.ArgumentParser(
+        prog="shedman update --history",
+        description="Browse ShedOS upgrade runs and roll back.",
+    )
+    parser.add_argument("--list", action="store_true",
+                        help="Print runs in plain text and exit (no TUI). "
+                             "Useful for scripting / smoke tests.")
+    args = parser.parse_args()
+
+    if args.list:
+        snaps = fetch_snapshots()
+        view = group_into_runs(snaps)
+        _print_plain(view)
+        return 0
+
+    if not sys.stdout.isatty():
+        print("shedman update --history: stdout is not a TTY — this is an "
+              "interactive TUI. Use --list for scriptable output.",
+              file=sys.stderr)
+        return 2
+
+    return _run_app()
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

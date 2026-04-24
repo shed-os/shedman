@@ -1,0 +1,123 @@
+#!/usr/bin/env bash
+# shedman services — verify the services ShedOS expects to be running.
+#
+# Prints a table of unit / enabled-state / active-state. If something is
+# inactive or not enabled, use --fix to run the appropriate enable/start
+# commands. Safe to run any time.
+
+set -u
+
+if [[ "${1:-}" == "--help-summary" ]]; then
+    echo "verify ShedOS expected services are enabled + running"
+    exit 0
+fi
+
+EXPECTED=(
+    NetworkManager.service
+    bluetooth.service
+    iwd.service
+    sddm.service
+    fstrim.timer
+    postgresql.service
+    shedos-pg-user-bootstrap.service
+    docker.service
+    cronie.service
+    avahi-daemon.service
+    thermald.service
+    power-profiles-daemon.service
+    cups.socket
+    libvirtd.socket
+)
+
+FIX=0
+for arg in "$@"; do
+    case "$arg" in
+        --fix) FIX=1 ;;
+        -h|--help)
+            cat <<EOF
+Usage: shedman services [--fix]
+
+  --fix    Enable and start any expected unit that isn't currently enabled
+           or running. Requires sudo.
+           Also runs \`initdb\` if the postgres cluster is missing.
+
+Without --fix, just prints a status table.
+EOF
+            exit 0
+            ;;
+        *) echo "unknown option: $arg" >&2 ; exit 2 ;;
+    esac
+done
+
+_color() { if [[ -t 1 ]]; then printf '\033[%sm%s\033[0m' "$1" "$2"; else printf '%s' "$2"; fi; }
+_green()  { _color '1;32' "$1"; }
+_red()    { _color '1;31' "$1"; }
+_yellow() { _color '1;33' "$1"; }
+
+# /var/lib/postgres is 0700 postgres-owned, so a plain `[[ -f ]]` test of
+# PG_VERSION returns false for a regular user even when the file exists
+# (traversal denied). Use systemctl is-active as the authoritative signal
+# — a running postgresql.service proves the cluster is initialized.
+if systemctl is-active --quiet postgresql.service; then
+    pg_ok=1
+elif sudo -n test -f /var/lib/postgres/data/PG_VERSION 2>/dev/null; then
+    pg_ok=1
+else
+    pg_ok=0
+fi
+
+printf '%-35s %-12s %-10s\n' UNIT ENABLED ACTIVE
+printf '%-35s %-12s %-10s\n' ---- ------- ------
+bad=()
+for u in "${EXPECTED[@]}"; do
+    en=$(systemctl is-enabled "$u" 2>/dev/null || echo missing)
+    ac=$(systemctl is-active  "$u" 2>/dev/null || echo '-')
+    case "$en" in
+        enabled|enabled-runtime|static|alias|generated) en_str=$(_green "$en") ;;
+        *) en_str=$(_red "$en"); bad+=("$u") ;;
+    esac
+    case "$ac" in
+        active|listening) ac_str=$(_green "$ac") ;;
+        inactive|failed)  ac_str=$(_red   "$ac") ;;
+        *)                ac_str=$(_yellow "$ac") ;;
+    esac
+    printf '%-35s %-12s %-10s\n' "$u" "$en_str" "$ac_str"
+done
+
+echo
+if [[ $pg_ok -eq 0 ]]; then
+    _red "PostgreSQL cluster at /var/lib/postgres/data is NOT initialized.\n"
+    echo "  postgresql.service will fail to start until you run initdb."
+fi
+
+if [[ ${#bad[@]} -eq 0 && $pg_ok -eq 1 ]]; then
+    _green "All ShedOS services are enabled.\n"
+    exit 0
+fi
+
+if [[ $FIX -eq 0 ]]; then
+    echo
+    echo "To repair, run:  sudo shedman services --fix"
+    exit 1
+fi
+
+if [[ $EUID -ne 0 ]]; then
+    echo "--fix needs root. Re-run with sudo."
+    exit 1
+fi
+
+if [[ $pg_ok -eq 0 ]]; then
+    echo "== initializing PostgreSQL cluster =="
+    sudo -iu postgres initdb \
+        --locale=en_US.UTF-8 --encoding=UTF8 --data-checksums \
+        -D /var/lib/postgres/data
+fi
+
+if [[ ${#bad[@]} -gt 0 ]]; then
+    echo "== enabling + starting ${#bad[@]} service(s) =="
+    systemctl enable --now "${bad[@]}"
+fi
+
+echo
+echo "Re-checking..."
+exec "$0"

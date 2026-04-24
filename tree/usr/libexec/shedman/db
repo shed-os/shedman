@@ -1,0 +1,96 @@
+#!/usr/bin/env bash
+# shedman db — umbrella for database-service bootstrap/admin tools.
+#
+# Modes (flag-style dispatch; each mode is a self-contained action):
+#   --pg-bootstrap     Ensure each regular Linux user has a matching
+#                      postgres LOGIN+CREATEDB role and a same-named
+#                      database they own. Idempotent. Called on boot
+#                      by shedos-pg-user-bootstrap.service.
+#
+# Future siblings (--mariadb-bootstrap, etc.) slot in under the same
+# flag-dispatch pattern without needing a new top-level shedman subcommand.
+
+set -u
+
+_usage() {
+    cat <<'EOF'
+usage: shedman db --pg-bootstrap
+
+Database-service bootstrap/admin tools.
+
+Modes:
+  --pg-bootstrap   Bootstrap per-user postgres roles and databases.
+EOF
+}
+
+case "${1:-}" in
+    --help-summary)
+        echo "database-service bootstrap/admin tools"
+        exit 0
+        ;;
+    -h|--help|"")
+        _usage
+        [[ -z "${1:-}" ]] && exit 2 || exit 0
+        ;;
+    --pg-bootstrap)
+        : # fall through to the pg bootstrap body below
+        ;;
+    *)
+        echo "shedman db: unknown mode '$1'" >&2
+        _usage >&2
+        exit 2
+        ;;
+esac
+
+# ---------------------------------------------------------------------------
+# --pg-bootstrap implementation
+#
+# Belt-and-suspenders for the Calamares-time bootstrap in shedos_finalize:
+# if that fails silently for any reason, this oneshot unit catches it on
+# first (and every) boot. Idempotent: existing roles/databases are left
+# alone. No password is set — Arch's default pg_hba has `local all all
+# peer` so the OS user connects with no flags; they can set a password
+# later with psql \password if they want TCP auth.
+# ---------------------------------------------------------------------------
+
+# Type=notify on postgresql.service means the unit reports active only when
+# postgres is actually accepting connections — but we still do a short
+# pg_isready spin as belt-and-suspenders, because we're also reachable via
+# manual invocation.
+for _ in $(seq 1 30); do
+    if runuser -u postgres -- pg_isready -q -h /run/postgresql 2>/dev/null; then
+        break
+    fi
+    sleep 1
+done
+
+if ! runuser -u postgres -- pg_isready -q -h /run/postgresql 2>/dev/null; then
+    echo "shedman db --pg-bootstrap: postgresql not ready after 30s; aborting" >&2
+    exit 0   # don't fail the boot; postgres might simply be disabled
+fi
+
+# Regular users: UID 1000..59999 (system users are <1000, nobody is 65534).
+getent passwd | awk -F: '$3 >= 1000 && $3 < 60000 { print $1 }' | while IFS= read -r user; do
+    [[ -z "$user" ]] && continue
+
+    role_exists=$(runuser -u postgres -- psql -tAX \
+        -c "SELECT 1 FROM pg_roles WHERE rolname = '${user}'" 2>/dev/null || true)
+    if [[ "$role_exists" != "1" ]]; then
+        echo "shedman db --pg-bootstrap: creating role $user"
+        runuser -u postgres -- psql -v ON_ERROR_STOP=1 \
+            -c "CREATE ROLE \"$user\" WITH LOGIN CREATEDB;" || {
+                echo "shedman db --pg-bootstrap: CREATE ROLE $user failed" >&2
+                continue
+            }
+    fi
+
+    db_exists=$(runuser -u postgres -- psql -tAX \
+        -c "SELECT 1 FROM pg_database WHERE datname = '${user}'" 2>/dev/null || true)
+    if [[ "$db_exists" != "1" ]]; then
+        echo "shedman db --pg-bootstrap: creating database $user owner $user"
+        runuser -u postgres -- psql -v ON_ERROR_STOP=1 \
+            -c "CREATE DATABASE \"$user\" OWNER \"$user\";" || {
+                echo "shedman db --pg-bootstrap: CREATE DATABASE $user failed" >&2
+            }
+    fi
+done

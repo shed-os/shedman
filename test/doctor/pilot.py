@@ -30,7 +30,7 @@ from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-TOOL = REPO_ROOT / "packaging/shedos-system/tree/usr/bin/shedos-doctor"
+TOOL = REPO_ROOT / "packaging/shedos-system/tree/usr/libexec/shedman/doctor"
 LIB_ROOT = REPO_ROOT / "packaging/shedos-system/tree/usr/lib/shedos"
 
 

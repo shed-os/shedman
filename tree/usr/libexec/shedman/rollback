@@ -1,0 +1,220 @@
+#!/usr/bin/env bash
+# shedman rollback — restore the root subvolume (`@`) from a snapper snapshot.
+#
+# The btrfs-layout rollback model used by ShedOS:
+#   1. Mount the top-level btrfs (subvolid=5) at a tmpdir — this exposes
+#      every subvolume (@, @snapshots, etc.) by name.
+#   2. Validate the target snapshot exists at @snapshots/<N>/snapshot.
+#   3. Rename the live @ to @.rollback-<ts> (kept as a safety net; user can
+#      promote it back via `shedos-rollback --undo`).
+#   4. Snapshot the target into a new @.
+#   5. Prompt the user to reboot. The next boot mounts the fresh @ at /.
+#
+# Why rename + snapshot instead of snapper's built-in `rollback`:
+#   snapper's rollback assumes SUSE's "default subvolume is the live one"
+#   convention. ShedOS mounts `@` by name (subvol=@ in fstab and kernel
+#   cmdline), so replacing `@` in-place is cleaner than re-pointing the
+#   default subvolid and mutating fstab.
+#
+# kernel/initrd live under /boot inside @, so a rollback automatically
+# swaps them back to the matching set. The ESP (limine binary + config)
+# is untouched and stays compatible because limine.conf references the
+# kernel by filename (vmlinuz-linux), not subvolid.
+
+set -uo pipefail
+
+if [[ "${1:-}" == "--help-summary" ]]; then
+    echo "restore root subvolume from a snapper snapshot (reboot required)"
+    exit 0
+fi
+
+PROG="shedman rollback"
+
+usage() {
+    cat <<EOF
+Usage: shedman rollback [--yes] [--keep-current] <snapshot-number>
+       shedman rollback --list
+       shedman rollback --undo
+
+Restore the root filesystem from a snapper snapshot. Requires root.
+
+Arguments:
+  <snapshot-number>  Snapper snapshot number (see --list). Typically this
+                     is a "pre" snapshot from a `shedman update` run.
+
+Options:
+  --list             Show recent snapper snapshots and exit.
+  --undo             Roll the last rollback back — promotes the most recent
+                     @.rollback-<ts> backup to become @ again.
+  --keep-current     Don't delete the prior @.rollback-<ts> backup after
+                     confirming the rollback boot. Default is to keep it
+                     until the next rollback anyway; this flag is only
+                     meaningful paired with --undo.
+  --yes              Skip the "are you sure" confirmation prompt.
+  -h, --help         This message.
+
+Safety:
+  - The current @ is renamed (not deleted) to @.rollback-<timestamp> so you
+    can undo with \`shedman rollback --undo\`.
+  - A reboot is required before the rollback takes effect.
+  - Home (@home), logs (@log), caches (@cache) etc. are NOT rolled back —
+    this is a system-state rollback only, not a full point-in-time restore.
+EOF
+}
+
+die() { echo "$PROG: error: $*" >&2; exit 1; }
+note() { echo "$PROG: $*"; }
+
+require_root() {
+    if [[ $EUID -ne 0 ]]; then
+        die "must be run as root (try: sudo shedman rollback $*)"
+    fi
+}
+
+btrfs_root_device() {
+    # findmnt resolves / to its source device. Works through LUKS (maps to
+    # /dev/mapper/...) and bare partitions alike.
+    findmnt -n -o SOURCE /
+}
+
+btrfs_root_uuid() {
+    findmnt -n -o UUID /
+}
+
+mount_top_level() {
+    # $1 = target directory (mktemp'd)
+    local tmp=$1
+    local dev
+    dev=$(btrfs_root_device) || die "couldn't resolve / device"
+    mount -t btrfs -o subvolid=5 "$dev" "$tmp" \
+        || die "failed to mount $dev (subvolid=5) at $tmp"
+}
+
+list_snapshots() {
+    if ! command -v snapper >/dev/null 2>&1; then
+        die "snapper not installed"
+    fi
+    if ! snapper -c root list >/dev/null 2>&1; then
+        die "snapper config 'root' not set up — reinstall shedos-system"
+    fi
+    snapper -c root list --columns number,type,pre-number,date,description,userdata
+}
+
+do_undo() {
+    require_root
+    local tmp backup newest
+    tmp=$(mktemp -d -t shedos-rollback-undo.XXXXXX)
+    trap 'umount "$tmp" 2>/dev/null; rmdir "$tmp" 2>/dev/null' EXIT
+    mount_top_level "$tmp"
+
+    # Pick the newest @.rollback-* backup — filenames are ISO-8601ish so
+    # lexicographic sort is chronological.
+    mapfile -t backups < <(ls -1 "$tmp" 2>/dev/null | grep -E '^@\.rollback-' | sort)
+    if (( ${#backups[@]} == 0 )); then
+        die "no @.rollback-* backup present to undo"
+    fi
+    newest=${backups[-1]}
+    note "undoing rollback by restoring $newest as @"
+
+    local ts
+    ts=$(date -u +%Y%m%dT%H%M%SZ)
+    mv "$tmp/@" "$tmp/@.undone-rollback-$ts" \
+        || die "failed to move current @ aside"
+    mv "$tmp/$newest" "$tmp/@" \
+        || die "failed to promote $newest to @"
+
+    note "undone. reboot to apply."
+    note "the failed-rollback state is preserved at @.undone-rollback-$ts"
+}
+
+do_rollback() {
+    require_root
+    local target_num=$1 skip_confirm=$2
+    local tmp src
+
+    if ! command -v snapper >/dev/null 2>&1; then
+        die "snapper not installed"
+    fi
+
+    # Sanity-check the number via snapper before touching the filesystem.
+    if ! snapper -c root list --columns number 2>/dev/null \
+            | awk '{print $1}' | grep -qx "$target_num"; then
+        die "snapshot $target_num not found (try: shedman rollback --list)"
+    fi
+
+    tmp=$(mktemp -d -t shedos-rollback.XXXXXX)
+    trap 'umount "$tmp" 2>/dev/null; rmdir "$tmp" 2>/dev/null' EXIT
+    mount_top_level "$tmp"
+
+    src="$tmp/@snapshots/$target_num/snapshot"
+    [[ -d $src ]] || die "snapshot subvol missing at $src"
+
+    # Echo what we're about to do (description helps the user double-check
+    # they picked the right snapshot).
+    local desc
+    desc=$(snapper -c root list --columns number,date,description 2>/dev/null \
+           | awk -v n="$target_num" '$1==n { $1=""; print substr($0,2); exit }')
+    note "target snapshot $target_num: $desc"
+
+    if ! (( skip_confirm )); then
+        echo
+        read -rp "Roll back to snapshot $target_num? [y/N] " yn
+        case "$yn" in
+            [yY]|[yY][eE][sS]) ;;
+            *) note "cancelled."; exit 0 ;;
+        esac
+    fi
+
+    local ts
+    ts=$(date -u +%Y%m%dT%H%M%SZ)
+    local bak="@.rollback-$ts"
+
+    note "renaming live @ to $bak (kept for --undo)"
+    mv "$tmp/@" "$tmp/$bak" || die "failed to rename @"
+
+    note "creating new @ as a read-write snapshot of $target_num"
+    if ! btrfs subvolume snapshot "$src" "$tmp/@" >/dev/null; then
+        # Best-effort recovery: put @ back so we don't leave a broken system.
+        mv "$tmp/$bak" "$tmp/@" 2>/dev/null || true
+        die "btrfs snapshot failed; aborted without making changes"
+    fi
+
+    note "rollback staged. reboot to apply."
+    note "the pre-rollback state is preserved at subvolume $bak"
+    note "undo this rollback later with: shedman rollback --undo"
+}
+
+main() {
+    local action="" target="" yes=0 keep=0
+    while (( $# )); do
+        case $1 in
+            --list) action=list ;;
+            --undo) action=undo ;;
+            -y|--yes) yes=1 ;;
+            --keep-current) keep=1 ;;
+            -h|--help) usage; exit 0 ;;
+            --) shift; break ;;
+            -*) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
+            *)
+                if [[ -z $target ]]; then
+                    target=$1
+                else
+                    echo "unexpected argument: $1" >&2; exit 2
+                fi
+                ;;
+        esac
+        shift
+    done
+
+    case $action in
+        list) list_snapshots; exit 0 ;;
+        undo) do_undo; exit 0 ;;
+    esac
+
+    [[ -n $target ]] || { usage >&2; exit 2; }
+    [[ $target =~ ^[0-9]+$ ]] || die "snapshot number must be numeric, got: $target"
+
+    do_rollback "$target" "$yes"
+}
+
+main "$@"

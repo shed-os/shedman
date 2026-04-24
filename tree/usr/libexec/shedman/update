@@ -1,0 +1,363 @@
+#!/usr/bin/env bash
+# shedman update — interactive ShedOS upgrade flow.
+#
+# The user is prompted to confirm before ANYTHING is applied, and pacman /
+# yay re-prompt with their own package lists. No silent paths by default.
+#
+# Flow:
+#   1. checkupdates        → list pacman updates
+#   2. yay -Qua            → list AUR updates (if yay is installed)
+#   3. y/N                 → proceed?
+#   4. snapper pre         → pre-upgrade btrfs snapshot (tagged "shedos-update")
+#   5. pacman -Syu         → pacman's own confirmation
+#   6. yay -Sua            → yay's own confirmation (if needed)
+#   7. snapper post        → post-upgrade snapshot paired to the pre-snapshot
+#   8. shedman config --sync → 3-way merge for $HOME dotfiles (own prompt)
+#
+# --yes flips every prompt to auto-accept (noconfirm across the chain).
+# NOTE: --yes does NOT auto-resolve config conflicts — a "conflict" means
+# you AND upstream edited the same file, and silently picking a side is
+# exactly the data loss `shedman config --sync` exists to prevent. Conflicts
+# still land as <file>.shedosnew for you to reconcile by hand later.
+#
+# --rollback delegates to `shedman rollback` (reboot required after).
+# --list-snapshots shows the snapper log so you can pick a rollback target.
+
+set -uo pipefail
+
+if [[ "${1:-}" == "--help-summary" ]]; then
+    echo "interactive ShedOS upgrade (pacman + AUR + config sync)"
+    exit 0
+fi
+
+# `shedman update --history` hands off to the upgrade-history TUI so users
+# don't have to remember a second command. Detect early so the TUI owns its
+# own flags (tty guards, fixture env, ...). Stop scanning at `--`.
+for _a in "$@"; do
+    case "$_a" in
+        --) break ;;
+        --history|history)
+            _new=(); _dropped=0
+            for _x in "$@"; do
+                if (( ! _dropped )) && [[ "$_x" == --history || "$_x" == history ]]; then
+                    _dropped=1; continue
+                fi
+                _new+=("$_x")
+            done
+            exec /usr/libexec/shedman/upgrade-history "${_new[@]}"
+            ;;
+    esac
+done
+
+YES=0
+ACTION=upgrade      # upgrade | rollback | list-snapshots
+ROLLBACK_TARGET=""
+
+usage() {
+    cat <<'EOF'
+Usage: shedman update [--yes] [--help]
+       shedman update --list-snapshots
+       shedman update --rollback [N]
+       shedman update --history
+
+Interactive upgrade wrapper for ShedOS: pacman -Syu → yay -Sua → shedman config --sync.
+Every upgrade is bracketed by a snapper pre/post btrfs snapshot pair so you
+can roll back to the pre-upgrade state if something breaks.
+
+Options:
+  -y, --yes         Unattended mode. Skip prompts, pass --noconfirm to pacman/yay,
+                    and --yes to `shedman config --sync`. Conflicts still drop
+                    .shedosnew files instead of overwriting your edits — no
+                    silent data loss. Intended for cron/systemd-timer driven
+                    upgrades on trusted systems.
+  --list-snapshots  Print recent snapper snapshots. Use this to find a
+                    pre-upgrade snapshot number to pass to --rollback.
+  --rollback [N]    Roll back to snapshot N (or prompt interactively if N is
+                    omitted). Delegates to `shedman rollback`; requires root.
+                    Reboot is required before the rollback takes effect.
+  --history         Open the upgrade-history TUI (delegates to shedman upgrade-history).
+  -h, --help        This message.
+
+Run without flags for the normal interactive flow (default answer is N
+at every prompt).
+EOF
+}
+
+# Parse args. Support `--rollback <N>` (two tokens) and `--rollback=N`.
+while (( $# )); do
+    case "$1" in
+        -y|--yes) YES=1 ;;
+        -h|--help) usage; exit 0 ;;
+        --list-snapshots) ACTION=list-snapshots ;;
+        --rollback)
+            ACTION=rollback
+            # An optional positional number may follow.
+            if [[ ${2:-} =~ ^[0-9]+$ ]]; then
+                ROLLBACK_TARGET=$2
+                shift
+            fi
+            ;;
+        --rollback=*)
+            ACTION=rollback
+            ROLLBACK_TARGET=${1#--rollback=}
+            ;;
+        *) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
+    esac
+    shift
+done
+
+_hr() { printf '%s\n' "------------------------------------------------------------"; }
+
+# ----- helpers for snapper integration -----------------------------------
+
+_snapper_available() {
+    command -v snapper >/dev/null 2>&1 \
+        && snapper -c root list >/dev/null 2>&1
+}
+
+# Create a pre-snapshot. Emits the snapshot number on stdout; empty string
+# on failure or when snapper isn't configured.
+_snap_pre() {
+    local n
+    n=$(sudo snapper -c root create \
+            --type pre --cleanup-algorithm number \
+            --description 'shedos-update' \
+            --userdata 'source=shedos-update,kind=pre' \
+            --print-number 2>/dev/null) || return 0
+    printf '%s' "$n"
+}
+
+# Create the matching post-snapshot. $1 = pre-number (may be empty).
+_snap_post() {
+    local pre=$1
+    [[ -n $pre ]] || return 0
+    sudo snapper -c root create \
+        --type post --pre-number "$pre" \
+        --cleanup-algorithm number \
+        --description 'shedos-update' \
+        --userdata 'source=shedos-update,kind=post' >/dev/null 2>&1 || true
+}
+
+# ----- --list-snapshots --------------------------------------------------
+
+if [[ $ACTION == list-snapshots ]]; then
+    if ! _snapper_available; then
+        echo "snapper is not configured. Install/reinstall shedos-system to set it up." >&2
+        exit 1
+    fi
+    sudo snapper -c root list --columns number,type,pre-number,date,description,userdata
+    exit 0
+fi
+
+# ----- --rollback --------------------------------------------------------
+
+if [[ $ACTION == rollback ]]; then
+    if [[ ! -x /usr/libexec/shedman/rollback ]]; then
+        echo "rollback helper missing (reinstall shedos-system)." >&2
+        exit 1
+    fi
+    if ! _snapper_available; then
+        echo "snapper is not configured — nothing to roll back to." >&2
+        echo "Install/reinstall shedos-system and run at least one upgrade first." >&2
+        exit 1
+    fi
+
+    # If the user didn't pass a number, show the list and prompt.
+    if [[ -z $ROLLBACK_TARGET ]]; then
+        echo "Recent snapshots (pick a pre-upgrade number to roll back to):"
+        echo
+        sudo snapper -c root list --columns number,type,pre-number,date,description \
+            | tail -n 20
+        echo
+        read -rp "Snapshot number to restore: " ROLLBACK_TARGET
+    fi
+
+    [[ $ROLLBACK_TARGET =~ ^[0-9]+$ ]] || {
+        echo "rollback target must be numeric." >&2
+        exit 2
+    }
+
+    args=("$ROLLBACK_TARGET")
+    (( YES )) && args+=(--yes)
+    exec sudo /usr/bin/shedman rollback "${args[@]}"
+fi
+
+# ----- upgrade flow ------------------------------------------------------
+
+_hr
+if (( YES )); then
+    echo "ShedOS update (unattended — --yes)"
+else
+    echo "ShedOS update"
+fi
+_hr
+
+echo "Checking for pacman updates…"
+pac=$(checkupdates 2>/dev/null || true)
+
+aur=""
+if command -v yay >/dev/null 2>&1; then
+    echo "Checking for AUR updates…"
+    aur=$(yay -Qua 2>/dev/null || true)
+elif command -v paru >/dev/null 2>&1; then
+    echo "Checking for AUR updates (paru)…"
+    aur=$(paru -Qua 2>/dev/null || true)
+fi
+
+pac_n=$([[ -z $pac ]] && echo 0 || grep -c . <<<"$pac")
+aur_n=$([[ -z $aur ]] && echo 0 || grep -c . <<<"$aur")
+total=$(( pac_n + aur_n ))
+
+if (( total == 0 )); then
+    echo
+    echo "System is up to date."
+    exit 0
+fi
+
+echo
+if (( pac_n > 0 )); then
+    echo "Pacman updates ($pac_n):"
+    echo "$pac" | sed 's/^/  /'
+fi
+if (( aur_n > 0 )); then
+    echo
+    echo "AUR updates ($aur_n):"
+    echo "$aur" | sed 's/^/  /'
+fi
+
+if ! (( YES )); then
+    echo
+    read -rp "Proceed with upgrade? [y/N] " yn
+    case "$yn" in
+        [yY]|[yY][eE][sS]) ;;
+        *) echo "Cancelled."; exit 0 ;;
+    esac
+fi
+
+# Pre-upgrade btrfs snapshot — only on machines where snapper is configured
+# (which, on a standard ShedOS install, is everywhere after shedos-system is
+# installed). Skip silently in live/ISO environments where snapper may not be
+# usable against a live root.
+pre_snap=""
+if _snapper_available; then
+    pre_snap=$(_snap_pre)
+    if [[ -n $pre_snap ]]; then
+        echo
+        echo "Pre-upgrade snapshot created: #$pre_snap"
+    fi
+fi
+
+if (( pac_n > 0 )); then
+    echo
+    _hr
+    if (( YES )); then
+        echo "Running pacman -Syu --noconfirm…"
+    else
+        echo "Running pacman -Syu (pacman will prompt again with the full list)…"
+    fi
+    _hr
+    pacman_args=(-Syu)
+    (( YES )) && pacman_args+=(--noconfirm)
+    sudo pacman "${pacman_args[@]}" || {
+        echo "pacman exited non-zero; aborting before config sync." >&2
+        # Still create the post-snapshot so the pre/post pair is complete —
+        # snapper's cleanup will collapse empty pairs on its next run. Leaving
+        # an unpaired pre-snapshot around makes rollback listings confusing.
+        _snap_post "$pre_snap"
+        exit 1
+    }
+fi
+
+if (( aur_n > 0 )); then
+    echo
+    _hr
+    if (( YES )); then
+        echo "Running yay -Sua --noconfirm…"
+    else
+        echo "Running yay -Sua…"
+        echo
+        echo "yay will pause at a 'Packages to exclude:' prompt. This is the"
+        echo "main interactive gate — press ENTER to accept all $aur_n AUR"
+        echo "update(s), or type numbers (e.g. '1 3') to skip specific ones."
+        echo "After that, pacman will ask one more time to confirm the install."
+    fi
+    _hr
+    aur_args=(-Sua)
+    (( YES )) && aur_args+=(--noconfirm)
+    if command -v yay >/dev/null 2>&1; then
+        yay "${aur_args[@]}" || echo "yay exited non-zero; continuing." >&2
+    elif command -v paru >/dev/null 2>&1; then
+        paru "${aur_args[@]}" || echo "paru exited non-zero; continuing." >&2
+    fi
+fi
+
+# Post-upgrade snapshot pairs to the pre-snapshot so `snapper status <pre>..<post>`
+# shows exactly what the upgrade changed.
+_snap_post "$pre_snap"
+
+echo
+_hr
+if (( YES )); then
+    echo "Syncing ShedOS config defaults (--yes; conflicts → .shedosnew)…"
+else
+    echo "Syncing ShedOS config defaults (will prompt before applying)…"
+fi
+_hr
+if [[ -x /usr/libexec/shedman/_config-sync ]]; then
+    sync_args=()
+    (( YES )) && sync_args+=(--yes)
+    /usr/bin/shedman config --sync "${sync_args[@]}" || echo "config sync skipped or failed." >&2
+else
+    echo "config sync helper not installed; skipping config sync."
+fi
+
+# Refresh the waybar indicator so the user sees "up to date" right away,
+# and clear the notify watermark so the next 0→N transition re-fires.
+/usr/bin/shedman updates --refresh-waybar 2>/dev/null || true
+/usr/bin/shedman updates --reset-notify-state 2>/dev/null || true
+
+# Mirror for the conflict indicator: `config --sync` may have produced new
+# .shedosnew files during this run. --tick surfaces them on waybar + mako.
+/usr/bin/shedman conflicts --tick 2>/dev/null || true
+
+# Count leftover .shedosnew conflicts. A sync may have produced new ones, or
+# there may be old ones the user never resolved — either way they block the
+# "in sync" guarantee, so surface them now.
+conflict_n=0
+if [[ -x /usr/libexec/shedman/_config-review ]]; then
+    # shellcheck disable=SC2012
+    while IFS= read -r -d '' _; do ((conflict_n++)); done \
+        < <(find "$HOME" -xdev -type f -name '*.shedosnew' -print0 2>/dev/null)
+fi
+
+echo
+echo "Update complete."
+if [[ -n $pre_snap ]]; then
+    echo "Rollback to pre-upgrade state: shedman update --rollback $pre_snap"
+fi
+
+if (( conflict_n > 0 )); then
+    if (( YES )); then
+        # Unattended: never launch a TUI. Just tell the user how many are
+        # waiting — they'll see it in the journal and can resolve on their
+        # next interactive session.
+        echo
+        echo "$conflict_n config conflict(s) remain as .shedosnew files."
+        echo "Resolve interactively with: shedman config --review"
+    else
+        echo
+        read -rp "$conflict_n config conflict(s) remain. Review now with shedman config --review? [Y/n] " yn
+        case "$yn" in
+            ""|[yY]|[yY][eE][sS])
+                exec /usr/bin/shedman config --review
+                ;;
+            *)
+                echo "Skipped. Run 'shedman config --review' whenever you're ready."
+                ;;
+        esac
+    fi
+fi
+
+if ! (( YES )); then
+    read -rp "Press Enter to close… " _ || true
+fi

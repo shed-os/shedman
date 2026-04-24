@@ -1,0 +1,124 @@
+#!/usr/bin/env bash
+# shedman — unified dispatcher for ShedOS utilities.
+#
+# Git-style: every file under /usr/libexec/shedman/ is a subcommand.
+# `shedman foo args…` execs /usr/libexec/shedman/foo with argv preserved.
+# Packages drop additional subcommands by installing files to that
+# directory; `shedman help` lists everything it finds at runtime.
+#
+# Filenames starting with `_` are considered internal implementation
+# helpers and are hidden from `shedman help`, but are still invokable
+# via `shedman _name`. Subcommands with a `--help-summary` handler get
+# their summary shown next to their name.
+
+set -uo pipefail
+
+LIBEXEC=/usr/libexec/shedman
+PROG=$(basename "$0")
+
+_usage() {
+    cat <<EOF
+Usage: $PROG <command> [args…]
+       $PROG help [command]
+       $PROG version
+
+Run '$PROG help' to list all subcommands.
+EOF
+}
+
+_summary() {
+    # Print the one-line summary for a subcommand. Tries --help-summary
+    # first; falls back to the first non-blank line of --help output.
+    local bin=$1 line
+    if line=$("$bin" --help-summary 2>/dev/null); then
+        [[ -n $line ]] && { printf '%s\n' "$line"; return; }
+    fi
+    # --help fallback — strip usage prefixes so a "Usage: …" line doesn't
+    # become the summary.
+    if line=$("$bin" --help 2>/dev/null \
+            | awk 'NF && !/^[Uu]sage:/ { print; exit }'); then
+        [[ -n $line ]] && printf '%s\n' "$line"
+    fi
+}
+
+_list() {
+    local f name summary
+    printf 'Available subcommands:\n'
+    for f in "$LIBEXEC"/*; do
+        [[ -x $f && -f $f ]] || continue
+        name=$(basename "$f")
+        [[ $name == _* ]] && continue
+        summary=$(_summary "$f")
+        if [[ -n $summary ]]; then
+            printf '  %-16s  %s\n' "$name" "$summary"
+        else
+            printf '  %s\n' "$name"
+        fi
+    done
+}
+
+_did_you_mean() {
+    # Print the closest matches from the subcommand index. Uses a simple
+    # substring match — if the user typed `updat` we want to suggest
+    # `update` and `updates`. A full edit-distance pass isn't worth the
+    # awk dance for a handful of names.
+    local needle=$1 f name hits=()
+    for f in "$LIBEXEC"/*; do
+        [[ -x $f && -f $f ]] || continue
+        name=$(basename "$f")
+        [[ $name == _* ]] && continue
+        if [[ $name == *"$needle"* || $needle == *"$name"* ]]; then
+            hits+=("$name")
+        fi
+    done
+    if (( ${#hits[@]} > 0 )); then
+        printf '\nDid you mean:\n'
+        printf '  %s\n' "${hits[@]}"
+    fi
+}
+
+_version() {
+    # Read pkgver from the installed shedos-system package. Fall back to
+    # "unknown" in development when running from the repo tree.
+    local v
+    if v=$(pacman -Qi shedos-system 2>/dev/null | awk -F' *: *' '$1=="Version"{print $2; exit}'); then
+        [[ -n $v ]] && { printf '%s\n' "$v"; return; }
+    fi
+    printf 'unknown\n'
+}
+
+if (( $# == 0 )); then
+    _list
+    exit 0
+fi
+
+cmd=$1
+shift
+
+case "$cmd" in
+    -h|--help|help)
+        if (( $# == 0 )); then
+            _list
+            exit 0
+        fi
+        target=$LIBEXEC/$1
+        if [[ -x $target && -f $target ]]; then
+            exec "$target" --help
+        fi
+        printf '%s: no such subcommand: %s\n' "$PROG" "$1" >&2
+        exit 2
+        ;;
+    -V|--version|version)
+        _version
+        exit 0
+        ;;
+esac
+
+target=$LIBEXEC/$cmd
+if [[ -x $target && -f $target ]]; then
+    exec "$target" "$@"
+fi
+
+printf '%s: unknown command: %s\n' "$PROG" "$cmd" >&2
+_did_you_mean "$cmd" >&2
+exit 2

@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+# shedman config — umbrella for packaged-default dotfile operations.
+# `--sync` seeds/updates $HOME from /usr/share/shedos/*/defaults/ (non-interactive).
+# `--review` opens the IntelliJ-style merge TUI for `.shedosnew` conflicts.
+
+set -uo pipefail
+
+LIBEXEC=/usr/libexec/shedman
+
+usage() {
+    cat <<'EOF'
+Usage: shedman config --sync   [options]
+       shedman config --review [file]
+
+  --sync    Seed or refresh packaged defaults in $HOME via 3-way merge.
+            Conflicts land as `<file>.shedosnew` for later review.
+  --review  Open the merge TUI to resolve `.shedosnew` conflicts.
+
+Options pass through to the underlying tool; run
+`shedman config --sync --help` or `shedman config --review --help`
+for the full flag list.
+EOF
+}
+
+case "${1:-}" in
+    --help-summary)
+        echo "sync packaged defaults into \$HOME and review merge conflicts"
+        exit 0
+        ;;
+    -h|--help|help|"")
+        usage
+        exit 0
+        ;;
+    --sync|sync)
+        shift
+        exec "$LIBEXEC/_config-sync" "$@"
+        ;;
+    --review|review)
+        shift
+        exec "$LIBEXEC/_config-review" "$@"
+        ;;
+    *)
+        printf 'shedman config: unknown mode: %s\n\n' "$1" >&2
+        usage >&2
+        exit 2
+        ;;
+esac

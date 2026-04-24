@@ -1,0 +1,307 @@
+#!/usr/bin/env python3
+"""shedos-doctor — detect drift between /etc/shedos/system.toml and live state.
+
+Read-only counterpart to ``shedman apply``. Reuses the same validator and
+reconciler engine (``apply_core``) but never mutates — the planner returns
+a list of would-be changes, and shedos-doctor reports them.
+
+Modes:
+
+    (no flag)          human-readable drift report
+    --json             machine-readable drift report
+    --diff             unified-diff view of every drift entry
+    --fix              delegate to `shedman apply --yes`
+    --waybar           emit waybar-pill JSON (always exits 0)
+    --tick             timer entry: notify + refresh waybar
+    --notify-if-new    fire mako only if the drift fingerprint changed
+    --reset-notify-state   clear the hysteresis file
+
+Exit codes mirror the plan:
+
+    0  aligned (system.toml matches live state)
+    1  drift detected
+    2  error (missing config, schema violation, systemctl misbehavior)
+
+Hysteresis file: /var/lib/shedos/doctor.state.json stores the last
+plan fingerprint so ``--notify-if-new`` only fires once per drift
+(silent when the same drift persists across ticks).
+
+Env vars are forwarded to apply_core; ``SHEDOS_LIB_ROOT`` lets tests
+point at the repo tree instead of /usr/lib/shedos.
+
+Additional env hooks (tests only):
+
+    SHEDOS_DOCTOR_NOTIFY_CMD   argv override for the mako call
+    SHEDOS_DOCTOR_REFRESH_CMD  argv override for the waybar signal kick
+    SHEDOS_DOCTOR_APPLY_CMD    argv override for ``--fix`` (default:
+                               /usr/bin/shedman apply --yes)
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shlex
+import subprocess
+import sys
+from pathlib import Path
+
+
+if len(sys.argv) > 1 and sys.argv[1] == "--help-summary":
+    print("report drift between /etc/shedos/system.toml and live state")
+    sys.exit(0)
+
+_LIB_ROOT = os.environ.get("SHEDOS_LIB_ROOT", "/usr/lib/shedos")
+if _LIB_ROOT not in sys.path:
+    sys.path.insert(0, _LIB_ROOT)
+
+import apply_core as _core  # noqa: E402
+
+
+DOCTOR_STATE = "doctor.state.json"
+
+
+# ---------------------------------------------------------------------------
+# Hysteresis — remember which drift fingerprint we last notified about so
+# the timer-driven invocation doesn't spam the same message every 6 hours.
+# ---------------------------------------------------------------------------
+
+
+def _doctor_state_path() -> Path:
+    return _core.state_root() / DOCTOR_STATE
+
+
+def _load_last_hash() -> str:
+    p = _doctor_state_path()
+    if not p.exists():
+        return ""
+    try:
+        doc = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return ""
+    if isinstance(doc, dict):
+        last = doc.get("last_notified_hash", "")
+        return last if isinstance(last, str) else ""
+    return ""
+
+
+def _save_last_hash(hash_value: str) -> None:
+    p = _doctor_state_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    _core.atomic_write_text(
+        p,
+        json.dumps({"last_notified_hash": hash_value}, indent=2) + "\n",
+        mode=0o644,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Plan acquisition — shared entry for every mode. Returns (rc, plan) where
+# rc is 0=aligned, 1=drift, 2=error. On rc==2 plan is None and an error has
+# already been printed to stderr.
+# ---------------------------------------------------------------------------
+
+
+def _compute_plan(cfg_path: "_core.Optional[Path]") -> tuple[int, "_core.Optional[_core.Plan]"]:
+    try:
+        cfg = _core.load_config(cfg_path)
+    except FileNotFoundError as e:
+        print(f"shedman doctor: {e}", file=sys.stderr)
+        return 2, None
+    except _core.SchemaError as e:
+        print(f"shedman doctor: {e}", file=sys.stderr)
+        return 2, None
+    try:
+        manifest = _core.Manifest.load()
+        plan, _ = _core.build_plan(cfg, manifest)
+    except Exception as e:
+        print(f"shedman doctor: plan failed: {e}", file=sys.stderr)
+        return 2, None
+    return (0 if plan.is_empty() else 1), plan
+
+
+# ---------------------------------------------------------------------------
+# Subprocess hooks — env-overridable for tests.
+# ---------------------------------------------------------------------------
+
+
+def _notify_send(title: str, body: str) -> None:
+    override = os.environ.get("SHEDOS_DOCTOR_NOTIFY_CMD")
+    if override is not None:
+        cmd = shlex.split(override) + [title, body]
+    else:
+        cmd = ["notify-send", "-a", "shedman doctor", "-u", "normal",
+               title, body]
+    try:
+        subprocess.run(cmd, check=False, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+
+def _refresh_waybar() -> None:
+    override = os.environ.get("SHEDOS_DOCTOR_REFRESH_CMD")
+    if override is not None:
+        cmd = shlex.split(override)
+    else:
+        # SIGRTMIN+11 — slot 11 (updates=8, conflicts=9, health=10, doctor=11).
+        cmd = ["pkill", "-RTMIN+11", "waybar"]
+    try:
+        subprocess.run(cmd, check=False, timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+
+def _delegate_apply(cfg_path: "_core.Optional[Path]") -> int:
+    override = os.environ.get("SHEDOS_DOCTOR_APPLY_CMD")
+    if override is not None:
+        cmd = shlex.split(override)
+    else:
+        cmd = ["/usr/bin/shedman", "apply", "--yes"]
+    if cfg_path is not None:
+        cmd += ["--config", str(cfg_path)]
+    try:
+        r = subprocess.run(cmd, check=False)
+    except OSError as e:
+        print(f"shedman doctor: cannot exec shedman apply: {e}", file=sys.stderr)
+        return 2
+    return r.returncode
+
+
+# ---------------------------------------------------------------------------
+# Output modes
+# ---------------------------------------------------------------------------
+
+
+def _emit_human(plan: _core.Plan) -> None:
+    if plan.is_empty():
+        print(_core.colorize("aligned — no drift detected.", "green"))
+        return
+    n = len(plan.changes)
+    print(_core.colorize(
+        f"drift — {n} item(s) differ from /etc/shedos/system.toml:",
+        "yellow"))
+    print(plan.render())
+    print()
+    print(_core.colorize(
+        "Run `shedman doctor --diff` for unified diffs, "
+        "or `shedman doctor --fix` to apply.",
+        "dim"))
+
+
+def _emit_json(plan: _core.Plan) -> None:
+    doc = plan.to_json()
+    doc["plan_hash"] = _core.plan_hash(plan)
+    print(json.dumps(doc, indent=2, sort_keys=True))
+
+
+def _emit_diff(plan: _core.Plan) -> None:
+    if plan.is_empty():
+        print("aligned — no drift.")
+        return
+    print(plan.render_diffs())
+
+
+def _waybar_payload(plan: _core.Plan) -> dict[str, str]:
+    """Waybar JSON contract: {text, tooltip, class, alt}.
+    Class flips to 'drift' when there's anything to reconcile.
+    Empty `text` hides the pill — same pattern as shedos-check-updates."""
+    if plan.is_empty():
+        return {"text": "", "tooltip": "system state aligned",
+                "class": "aligned", "alt": "aligned"}
+    n = len(plan.changes)
+    # One-per-line tooltip mirroring shedos-check-health's style.
+    lines = [f"{c.kind} [{c.section}] {c.summary}" for c in plan.changes[:8]]
+    if len(plan.changes) > 8:
+        lines.append(f"… and {len(plan.changes) - 8} more")
+    tooltip = r"\n".join(lines).replace('"', r'\"')
+    return {
+        "text": f" {n}",
+        "tooltip": f"shedman doctor: {n} drift item(s)\\n{tooltip}",
+        "class": "drift",
+        "alt": "drift",
+    }
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        prog="shedman doctor",
+        description="Report drift between /etc/shedos/system.toml and live state.",
+    )
+    parser.add_argument("--config", type=Path, default=None,
+                        help="path to system.toml "
+                             "(default: /etc/shedos/system.toml)")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--json", action="store_true",
+                      help="emit drift report as JSON")
+    mode.add_argument("--diff", action="store_true",
+                      help="emit unified diffs for each drift entry")
+    mode.add_argument("--fix", action="store_true",
+                      help="delegate to `shedman apply --yes`")
+    mode.add_argument("--waybar", action="store_true",
+                      help="emit waybar custom-module JSON (always exits 0)")
+    mode.add_argument("--tick", action="store_true",
+                      help="timer entry: notify-if-new + refresh waybar "
+                           "(always exits 0)")
+    mode.add_argument("--notify-if-new", action="store_true",
+                      help="fire mako iff the drift fingerprint changed")
+    mode.add_argument("--reset-notify-state", action="store_true",
+                      help="clear the hysteresis state file")
+    args = parser.parse_args()
+
+    if args.reset_notify_state:
+        _save_last_hash("")
+        return 0
+
+    if args.fix:
+        return _delegate_apply(args.config)
+
+    rc, plan = _compute_plan(args.config)
+    if rc == 2:
+        return 2
+    assert plan is not None
+
+    if args.waybar:
+        print(json.dumps(_waybar_payload(plan)))
+        return 0
+
+    if args.json:
+        _emit_json(plan)
+        return rc
+
+    if args.diff:
+        _emit_diff(plan)
+        return rc
+
+    if args.notify_if_new or args.tick:
+        current_hash = _core.plan_hash(plan)
+        last = _load_last_hash()
+        if not plan.is_empty() and current_hash != last:
+            n = len(plan.changes)
+            body_lines = [f"{c.kind} {c.summary}" for c in plan.changes[:4]]
+            if len(plan.changes) > 4:
+                body_lines.append(f"… and {len(plan.changes) - 4} more")
+            _notify_send(
+                f"ShedOS: {n} config item(s) have drifted",
+                "\n".join(body_lines) +
+                "\n\nRun `shedman apply` or `shedman doctor --diff`.",
+            )
+            _save_last_hash(current_hash)
+        elif plan.is_empty() and last:
+            # Drift cleared — clear the state so the next drift fires.
+            _save_last_hash("")
+        if args.tick:
+            _refresh_waybar()
+        return 0
+
+    _emit_human(plan)
+    return rc
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

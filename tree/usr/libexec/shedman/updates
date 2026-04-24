@@ -1,0 +1,149 @@
+#!/usr/bin/env bash
+# shedman updates — count pending pacman + AUR updates.
+#
+# Modes:
+#   (no args)            Print a human summary.
+#   --waybar             Print JSON for waybar custom module.
+#   --refresh-waybar     Send SIGRTMIN+8 to waybar so its custom/updates
+#                        module re-polls immediately. Does not re-count.
+#   --notify-if-new      Count updates; fire a desktop notification via
+#                        notify-send iff the count went up since the last
+#                        notification. Silent on count=0 or count<=last.
+#   --tick               Periodic-timer entry point. Runs the count,
+#                        fires notify-if-new, and kicks waybar. This is
+#                        what shedos-update-check.service calls hourly.
+#   --reset-notify-state Forget the "last notified" count (so the next
+#                        --tick fires at the first non-zero count).
+#                        Called by `shedman update` after a successful run.
+#
+# Runs as an unprivileged user. checkupdates(8) uses fakeroot on an
+# isolated temp DB so it's safe to call hourly.
+
+set -u
+
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/shedos"
+NOTIFY_STATE="$STATE_DIR/last-notified-count"
+
+mode=${1:-text}
+
+_pacman_count() {
+    checkupdates 2>/dev/null | grep -c . || true
+}
+
+_aur_count() {
+    if command -v yay >/dev/null 2>&1; then
+        yay -Qua 2>/dev/null | grep -c . || true
+    elif command -v paru >/dev/null 2>&1; then
+        paru -Qua 2>/dev/null | grep -c . || true
+    else
+        echo 0
+    fi
+}
+
+_read_last_notified() {
+    local v=0
+    if [[ -f "$NOTIFY_STATE" ]]; then
+        v=$(<"$NOTIFY_STATE")
+        [[ "$v" =~ ^[0-9]+$ ]] || v=0
+    fi
+    echo "$v"
+}
+
+_write_last_notified() {
+    mkdir -p "$STATE_DIR"
+    printf '%s\n' "$1" > "$NOTIFY_STATE"
+}
+
+_notify_if_new() {
+    # Fire a desktop notification when `current` is greater than the last
+    # count we already notified about. Reset state when current drops to 0
+    # so a future 0→N transition fires again. Silently no-op when the
+    # notification stack isn't reachable (e.g. TTY login, SSH session with
+    # no DBus, notify-send missing) — the waybar badge stays authoritative.
+    local current="$1"
+
+    if (( current == 0 )); then
+        _write_last_notified 0
+        return 0
+    fi
+
+    if ! command -v notify-send >/dev/null 2>&1; then
+        return 0
+    fi
+    if [[ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ]]; then
+        return 0
+    fi
+
+    local last
+    last=$(_read_last_notified)
+    (( current > last )) || return 0
+
+    local summary body
+    summary="ShedOS updates available"
+    if (( current == 1 )); then
+        body="1 package update is ready. Run \`shedman update\` to review."
+    else
+        body="$current package updates are ready. Run \`shedman update\` to review."
+    fi
+
+    # `timeout` guards against a misbehaving DBus — this runs on a user
+    # timer and must never block the service forever.
+    timeout 2s notify-send \
+        --app-name=ShedOS \
+        --icon=system-software-update \
+        --urgency=normal \
+        "$summary" \
+        "$body" 2>/dev/null || true
+
+    _write_last_notified "$current"
+}
+
+case "$mode" in
+    --help-summary)
+        echo "report pending pacman + AUR updates"
+        exit 0
+        ;;
+    --refresh-waybar)
+        pkill -RTMIN+8 waybar 2>/dev/null || true
+        exit 0
+        ;;
+    --reset-notify-state)
+        _write_last_notified 0
+        exit 0
+        ;;
+    --check)
+        # alias for --tick so the roadmap/plan wording works
+        mode=--tick
+        ;;
+esac
+
+pac=$(_pacman_count)
+aur=$(_aur_count)
+total=$(( pac + aur ))
+
+case "$mode" in
+    --waybar)
+        if (( total > 0 )); then
+            printf '{"text":" %d","tooltip":"%d update(s) available\\n(click to review & upgrade)","class":"has-updates"}\n' \
+                "$total" "$total"
+        else
+            printf '{"text":"","tooltip":"System is up to date","class":"no-updates"}\n'
+        fi
+        ;;
+    --notify-if-new)
+        _notify_if_new "$total"
+        ;;
+    --tick)
+        _notify_if_new "$total"
+        pkill -RTMIN+8 waybar 2>/dev/null || true
+        ;;
+    text|*)
+        if (( total == 0 )); then
+            echo "System is up to date."
+        else
+            echo "$total update(s) available — run \`shedman update\` to review."
+            echo "  pacman: $pac"
+            echo "  AUR:    $aur"
+        fi
+        ;;
+esac

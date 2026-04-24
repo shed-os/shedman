@@ -1,0 +1,274 @@
+#!/usr/bin/env bash
+# shedos-check-health — aggregate hardware health signals for waybar.
+#
+# Modes mirror shedos-check-updates:
+#   (no args)            Human summary.
+#   --waybar             JSON for waybar custom module.
+#   --refresh-waybar     Send SIGRTMIN+10 to waybar so its custom/health
+#                        module re-polls immediately.
+#   --notify-if-new      Fire a desktop notification on ok→warning or
+#                        any→critical transitions. 10-min hysteresis keeps
+#                        a flapping metric from chattering.
+#   --tick               Periodic-timer entry: refresh + notify + kick waybar.
+#   --reset-notify-state Forget the last-notified class.
+#
+# Signal numbers (see shedos-check-{updates,conflicts}): updates=8,
+# conflicts=9, health=10.
+#
+# Metrics (each resolves to ok|warning|critical|unavailable):
+#   disk    — df free% on / and $HOME (warn <20% free, crit <5% free)
+#   memory  — /proc/pressure/memory 'some' avg10 (warn >10%, crit >60%)
+#   battery — energy_full / energy_full_design on BAT* (warn <80%, crit <60%)
+#   cpu     — `sensors -u` max temp*_input (warn >=80°C, crit >=90°C)
+#
+# Overall class is worst-of non-unavailable. A machine where every metric
+# is unavailable (no PSI, no battery, no sensors) reports "ok" — we don't
+# paint a pill yellow just because something is missing.
+
+set -u
+
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/shedos"
+NOTIFY_STATE="$STATE_DIR/last-notified-health"
+HYSTERESIS_FILE="$STATE_DIR/last-health-notified-at"
+HYSTERESIS_SECONDS=600
+
+# Test hooks — every input source is overridable so test/check-health/run.sh
+# can feed synthetic data without mocking /proc or /sys at the kernel level.
+# Production never sets these; the defaults read the real paths.
+PSI_FILE="${SHEDOS_HEALTH_PSI_FILE:-/proc/pressure/memory}"
+POWER_SUPPLY="${SHEDOS_HEALTH_POWER_SUPPLY:-/sys/class/power_supply}"
+SENSORS_CMD="${SHEDOS_HEALTH_SENSORS_CMD:-sensors -u}"
+DF_TARGETS="${SHEDOS_HEALTH_DF_TARGETS:-/ $HOME}"
+
+mode=${1:-text}
+
+if [[ "$mode" == "--help-summary" ]]; then
+    echo "aggregate hardware health signals (battery, temp, storage, …)"
+    exit 0
+fi
+
+# --- Metric helpers ------------------------------------------------------
+
+_classify() {
+    local v=$1 warn=$2 crit=$3 dir=$4
+    if [[ $dir == above ]]; then
+        awk -v v="$v" -v w="$warn" -v c="$crit" \
+            'BEGIN { if (v+0 >= c+0) print "critical"; else if (v+0 >= w+0) print "warning"; else print "ok" }'
+    else
+        awk -v v="$v" -v w="$warn" -v c="$crit" \
+            'BEGIN { if (v+0 <= c+0) print "critical"; else if (v+0 <= w+0) print "warning"; else print "ok" }'
+    fi
+}
+
+_merge_worst() {
+    local a=$1 b=$2
+    if [[ $a == critical || $b == critical ]]; then echo critical
+    elif [[ $a == warning || $b == warning ]]; then echo warning
+    elif [[ $a == ok || $b == ok ]]; then echo ok
+    else echo unavailable
+    fi
+}
+
+_disk() {
+    local mp pct free worst=unavailable summary="" c
+    # shellcheck disable=SC2086  # DF_TARGETS is an intentional word-split list.
+    for mp in $DF_TARGETS; do
+        [[ -d $mp ]] || continue
+        pct=$(df --output=pcent "$mp" 2>/dev/null | awk 'NR==2 {gsub(/[% ]/,""); print}')
+        [[ -n $pct ]] || continue
+        free=$(( 100 - pct ))
+        c=$(_classify "$free" 20 5 below)
+        [[ -n $summary ]] && summary+="; "
+        summary+="$mp ${free}% free"
+        worst=$(_merge_worst "$worst" "$c")
+    done
+    [[ -z $summary ]] && { printf 'unavailable\tdisk: no readable mount\n'; return; }
+    printf '%s\tdisk: %s\n' "$worst" "$summary"
+}
+
+_memory() {
+    if [[ ! -r $PSI_FILE ]]; then
+        printf 'unavailable\tmemory: no PSI support\n'
+        return
+    fi
+    local avg10 class
+    avg10=$(awk '/^some / { for (i=1;i<=NF;i++) if ($i ~ /^avg10=/) { split($i,a,"="); print a[2]; exit } }' "$PSI_FILE")
+    [[ -n $avg10 ]] || { printf 'unavailable\tmemory: PSI parse failed\n'; return; }
+    class=$(_classify "$avg10" 10 60 above)
+    printf '%s\tmemory: PSI avg10 %s%%\n' "$class" "$avg10"
+}
+
+_battery() {
+    local bat full design health class worst=unavailable summary=""
+    shopt -s nullglob
+    for bat in "$POWER_SUPPLY"/BAT*; do
+        [[ -d $bat ]] || continue
+        if [[ -r "$bat/energy_full" && -r "$bat/energy_full_design" ]]; then
+            full=$(<"$bat/energy_full"); design=$(<"$bat/energy_full_design")
+        elif [[ -r "$bat/charge_full" && -r "$bat/charge_full_design" ]]; then
+            full=$(<"$bat/charge_full"); design=$(<"$bat/charge_full_design")
+        else
+            continue
+        fi
+        (( design > 0 )) || continue
+        health=$(( full * 100 / design ))
+        class=$(_classify "$health" 80 60 below)
+        [[ -n $summary ]] && summary+="; "
+        summary+="$(basename "$bat") ${health}% health"
+        worst=$(_merge_worst "$worst" "$class")
+    done
+    shopt -u nullglob
+    [[ -z $summary ]] && { printf 'unavailable\tbattery: none detected\n'; return; }
+    printf '%s\tbattery: %s\n' "$worst" "$summary"
+}
+
+_cpu() {
+    # SENSORS_CMD may be "sensors -u" (prod) or a path to a fixture file
+    # preceded by "cat" (tests). Resolve first word to decide availability.
+    local first
+    first=${SENSORS_CMD%% *}
+    if ! command -v "$first" >/dev/null 2>&1; then
+        printf 'unavailable\tcpu: sensors(1) missing\n'
+        return
+    fi
+    local max class
+    # shellcheck disable=SC2086  # SENSORS_CMD intentionally word-split for args.
+    max=$($SENSORS_CMD 2>/dev/null \
+        | awk '/^[[:space:]]*temp[0-9]+_input:/ { if ($2+0 > m) m=$2 } END { if (m > 0) printf "%d\n", m }')
+    [[ -n $max ]] || { printf 'unavailable\tcpu: no temp readings\n'; return; }
+    class=$(_classify "$max" 80 90 above)
+    printf '%s\tcpu: max %d°C\n' "$class" "$max"
+}
+
+_metrics() {
+    _disk
+    _memory
+    _battery
+    _cpu
+}
+
+_overall() {
+    awk -F'\t' '
+        BEGIN { w = "unavailable" }
+        $1 == "critical" { w = "critical"; exit }
+        $1 == "warning" && w != "critical" { w = "warning" }
+        $1 == "ok" && w != "critical" && w != "warning" { w = "ok" }
+        END { print (w == "unavailable" ? "ok" : w) }
+    '
+}
+
+# --- State + notify ------------------------------------------------------
+
+_read_state() {
+    [[ -f $1 ]] && { cat "$1"; return; }
+    echo "$2"
+}
+
+_write_state() {
+    mkdir -p "$STATE_DIR"
+    printf '%s\n' "$2" > "$1"
+}
+
+_notify_if_new() {
+    local class=$1 summary=$2
+    local last now cleared
+    last=$(_read_state "$NOTIFY_STATE" "ok")
+    now=$(date +%s)
+
+    if [[ $class == ok ]]; then
+        _write_state "$NOTIFY_STATE" "ok"
+        return 0
+    fi
+
+    # Suppress re-fire while still at the same non-ok class unless the
+    # hysteresis window has elapsed — otherwise a chattering metric spams
+    # mako every tick.
+    cleared=$(_read_state "$HYSTERESIS_FILE" 0)
+    if [[ $class == "$last" ]] && (( now - cleared < HYSTERESIS_SECONDS )); then
+        return 0
+    fi
+
+    # critical → warning is a downgrade; track silently.
+    if [[ $last == critical && $class == warning ]]; then
+        _write_state "$NOTIFY_STATE" "$class"
+        return 0
+    fi
+
+    if ! command -v notify-send >/dev/null 2>&1 || [[ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ]]; then
+        _write_state "$NOTIFY_STATE" "$class"
+        return 0
+    fi
+
+    local urgency icon
+    case "$class" in
+        warning)  urgency=normal;   icon=dialog-warning ;;
+        critical) urgency=critical; icon=dialog-error   ;;
+        *)        urgency=normal;   icon=dialog-information ;;
+    esac
+
+    timeout 2s notify-send \
+        --app-name=ShedOS \
+        --icon="$icon" \
+        --urgency="$urgency" \
+        "ShedOS health: $class" \
+        "$summary" 2>/dev/null || true
+
+    _write_state "$NOTIFY_STATE" "$class"
+    _write_state "$HYSTERESIS_FILE" "$now"
+}
+
+# --- Main ----------------------------------------------------------------
+
+case "$mode" in
+    --refresh-waybar)
+        pkill -RTMIN+10 waybar 2>/dev/null || true
+        exit 0
+        ;;
+    --reset-notify-state)
+        _write_state "$NOTIFY_STATE" "ok"
+        _write_state "$HYSTERESIS_FILE" "$(date +%s)"
+        exit 0
+        ;;
+esac
+
+metrics_raw=$(_metrics)
+overall=$(printf '%s\n' "$metrics_raw" | _overall)
+
+case "$mode" in
+    --waybar)
+        # Build a JSON-safe tooltip by escaping each metric label and
+        # joining with literal "\n" sequences (waybar's JSON parser
+        # decodes them to real newlines).
+        tooltip=""
+        while IFS=$'\t' read -r _ label; do
+            [[ -z $label ]] && continue
+            label=${label//\\/\\\\}
+            label=${label//\"/\\\"}
+            [[ -n $tooltip ]] && tooltip+='\n'
+            tooltip+="$label"
+        done <<< "$metrics_raw"
+        case "$overall" in
+            critical) text=" !" ;;
+            warning)  text=""  ;;
+            *)        text=""    ;;
+        esac
+        printf '{"text":"%s","tooltip":"%s","class":"%s"}\n' "$text" "$tooltip" "$overall"
+        ;;
+    --notify-if-new)
+        summary=$(printf '%s\n' "$metrics_raw" \
+            | awk -F'\t' '$1 == "critical" || $1 == "warning" { print $2 }' \
+            | head -n 4 | paste -sd'; ' -)
+        _notify_if_new "$overall" "$summary"
+        ;;
+    --tick)
+        summary=$(printf '%s\n' "$metrics_raw" \
+            | awk -F'\t' '$1 == "critical" || $1 == "warning" { print $2 }' \
+            | head -n 4 | paste -sd'; ' -)
+        _notify_if_new "$overall" "$summary"
+        pkill -RTMIN+10 waybar 2>/dev/null || true
+        ;;
+    text|*)
+        printf '%s\n' "$metrics_raw" | awk -F'\t' '{ printf "  [%-11s] %s\n", $1, $2 }'
+        echo "Overall: $overall"
+        ;;
+esac

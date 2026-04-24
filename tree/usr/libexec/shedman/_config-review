@@ -1,0 +1,2672 @@
+#!/usr/bin/env python3
+"""shedos-review-configs — premium merge TUI for .shedosnew conflicts.
+
+When shedos-sync-configs detects that both the user and upstream have edited
+the same dotfile, it drops the upstream version as `<file>.shedosnew` and
+leaves the live file untouched. This tool resolves those conflicts with an
+IntelliJ-IDEA-style per-hunk merge UI (3-way when BASE content is on record,
+2-way fallback when it isn't), plus whole-file shortcuts for the simple cases.
+
+Data surface:
+  YOURS  = $HOME/<relpath>
+  THEIRS = $HOME/<relpath>.shedosnew
+  src    = /usr/share/shedos/<pkg>/defaults/<relpath>     (current upstream)
+  BASE   = $XDG_STATE_HOME/shedos/last-seen-content/<relpath>  (may be absent)
+
+The tool NEVER overwrites YOURS without an explicit 'save', and it always
+writes a rolling .shedosbak alongside before replacing YOURS. On successful
+save it updates both the last-seen sha and the BASE content snapshot so the
+next conflict on this file is a clean 3-way.
+"""
+
+from __future__ import annotations
+
+import argparse
+import enum
+import errno
+import fcntl
+import hashlib
+import json
+import os
+import re
+import shutil
+import signal
+import stat as _stat
+import subprocess
+import sys
+import tempfile
+import time
+import unicodedata
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from difflib import SequenceMatcher, unified_diff
+from pathlib import Path
+from typing import Optional
+
+# ---------------------------------------------------------------------------
+# Constants and paths
+# ---------------------------------------------------------------------------
+
+HOME = Path(os.environ.get("HOME", os.path.expanduser("~")))
+STATE_ROOT = Path(os.environ.get("XDG_STATE_HOME", HOME / ".local/state")) / "shedos"
+MANIFEST_ROOT = STATE_ROOT / "last-seen"
+CONTENT_ROOT = STATE_ROOT / "last-seen-content"
+DRAFT_ROOT = STATE_ROOT / "review-drafts"
+LOCK_PATH = STATE_ROOT / "review.lock"
+LOG_PATH = STATE_ROOT / "review-log"
+DEFAULTS_ROOT = Path(os.environ.get("SHEDOS_DEFAULTS_ROOT", "/usr/share/shedos"))
+
+NEW_SUFFIX = ".shedosnew"
+BAK_SUFFIX = ".shedosbak"
+TMP_SUFFIX = ".shedosmerge.tmp"
+DRAFT_SUFFIX = ".draft.json"
+DRAFT_SCHEMA = 1
+
+EXCLUDED_RES = (
+    re.compile(r"^\.config/nvim/lazy-lock\.json$"),
+    re.compile(r"^\.config/nvim/lazyvim\.json$"),
+    re.compile(r"^\.local/state/"),
+    re.compile(r"^\.cache/"),
+)
+
+MIN_COLS, MIN_ROWS = 70, 24
+NARROW_BASE_COLS = 100
+VERY_NARROW_COLS = 70
+BINARY_SNIFF_BYTES = 8192
+LARGE_FILE_BYTES = 1 * 1024 * 1024
+LARGE_FILE_LINES = 20_000
+UNDO_DEPTH = 32
+LONG_LINE_HL_CUTOFF = 2000
+
+
+# ---------------------------------------------------------------------------
+# Data types
+# ---------------------------------------------------------------------------
+
+
+class Side(str, enum.Enum):
+    YOURS = "Y"
+    THEIRS = "T"
+    BOTH_YT = "BYT"
+    BOTH_TY = "BTY"
+    SKIP = "X"
+
+
+@dataclass
+class Hunk:
+    index: int
+    base_start: int
+    base_end: int
+    yours_start: int
+    yours_end: int
+    theirs_start: int
+    theirs_end: int
+    yours_lines: list[str] = field(default_factory=list)
+    theirs_lines: list[str] = field(default_factory=list)
+    base_lines: list[str] = field(default_factory=list)
+    kind: str = "both-changed"
+    decision: Optional[Side] = None
+
+
+@dataclass
+class Conflict:
+    relpath: str
+    pkg: str
+    yours_path: Path
+    theirs_path: Path
+    src_path: Optional[Path]
+    base_path: Optional[Path]
+    kind: str        # "text" | "binary" | "orphan" | "symlink" | "missing-yours"
+    has_base: bool
+    size: int
+    hunk_count: int = -1
+
+
+@dataclass
+class MergeState:
+    relpath: str
+    pkg: str
+    yours_path: Path
+    theirs_path: Path
+    src_path: Optional[Path]
+    base_path: Optional[Path]
+    base_content: Optional[list[str]]
+    yours_lines: list[str]
+    theirs_lines: list[str]
+    hunks: list[Hunk]
+    encoding: str = "utf-8"
+    newline: str = "\n"
+    trailing_newline: bool = True
+    yours_mode: int = 0o644
+    yours_sha_at_load: str = ""
+    theirs_sha_at_load: str = ""
+    base_sha_at_load: str = ""
+    src_sha_at_load: str = ""
+    undo_stack: list[tuple[int, Optional[Side]]] = field(default_factory=list)
+
+    @property
+    def is_2way(self) -> bool:
+        return self.base_content is None
+
+    def unresolved_count(self) -> int:
+        return sum(1 for h in self.hunks if h.decision is None)
+
+
+class UnresolvedHunk(Exception):
+    def __init__(self, hunk: Hunk) -> None:
+        super().__init__(f"hunk {hunk.index} unresolved")
+        self.hunk = hunk
+
+
+# ---------------------------------------------------------------------------
+# Low-level helpers
+# ---------------------------------------------------------------------------
+
+
+def _char_width(ch: str) -> int:
+    """Monospace cell width of a single character.
+
+    East Asian wide and full-width characters occupy 2 cells; combining
+    marks and zero-width formatters occupy 0; everything else is 1.
+    ``unicodedata.east_asian_width`` returns 'W'/'F' for 2-cell and
+    'A' (ambiguous) for characters whose width is terminal-dependent —
+    we conservatively treat 'A' as 1 cell because every common TUI
+    terminal (kitty, foot, alacritty, xterm, tmux) does.
+    """
+    if not ch:
+        return 0
+    if unicodedata.category(ch) in ("Mn", "Me", "Cf"):
+        return 0
+    if unicodedata.east_asian_width(ch) in ("W", "F"):
+        return 2
+    return 1
+
+
+def display_width(s: str) -> int:
+    """Sum of ``_char_width`` across the string. Ignores Rich-markup tags."""
+    # Strip Rich markup [foo] / [/foo] so the caller can pass already-styled
+    # text without double-counting the markup as layout width.
+    out = 0
+    i = 0
+    n = len(s)
+    while i < n:
+        ch = s[i]
+        if ch == "[":
+            end = s.find("]", i + 1)
+            if end != -1:
+                i = end + 1
+                continue
+        out += _char_width(ch)
+        i += 1
+    return out
+
+
+def truncate_to_width(s: str, limit: int, ellipsis: str = "…") -> str:
+    """Truncate ``s`` so its display width does not exceed ``limit``.
+
+    Markup-aware: Rich markup tags don't count toward display width. The
+    ellipsis is appended only when truncation actually occurs.
+    """
+    if limit <= 0:
+        return ""
+    if display_width(s) <= limit:
+        return s
+    budget = max(0, limit - _char_width(ellipsis[0]) if ellipsis else 0)
+    out_chars: list[str] = []
+    used = 0
+    i = 0
+    n = len(s)
+    while i < n and used < budget:
+        ch = s[i]
+        if ch == "[":
+            end = s.find("]", i + 1)
+            if end != -1:
+                out_chars.append(s[i:end + 1])
+                i = end + 1
+                continue
+        w = _char_width(ch)
+        if used + w > budget:
+            break
+        out_chars.append(ch)
+        used += w
+        i += 1
+    return "".join(out_chars) + (ellipsis if ellipsis else "")
+
+
+def _log(msg: str) -> None:
+    try:
+        LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with LOG_PATH.open("a") as f:
+            f.write(f"{datetime.now(timezone.utc).isoformat()}  {msg}\n")
+    except OSError:
+        pass
+
+
+def sha256_file(path: Path) -> str:
+    try:
+        h = hashlib.sha256()
+        with path.open("rb") as f:
+            for chunk in iter(lambda: f.read(1 << 16), b""):
+                h.update(chunk)
+        return h.hexdigest()
+    except OSError:
+        return ""
+
+
+def sniff_binary(path: Path, sniff_bytes: int = BINARY_SNIFF_BYTES) -> bool:
+    try:
+        with path.open("rb") as f:
+            chunk = f.read(sniff_bytes)
+        return b"\x00" in chunk
+    except OSError:
+        return False
+
+
+def read_lines_any(path: Path) -> tuple[list[str], str, str, bool]:
+    """Read a text file, returning (lines, encoding, newline, trailing_newline).
+
+    Tries utf-8 then falls back to latin-1 (which never errors). Preserves
+    whichever newline sequence is dominant in the file.
+    """
+    raw = path.read_bytes()
+    encoding = "utf-8"
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        encoding = "latin-1"
+        text = raw.decode("latin-1")
+    # Detect newline: majority rule with LF as default.
+    crlf = text.count("\r\n")
+    lf = text.count("\n") - crlf
+    newline = "\r\n" if crlf > lf else "\n"
+    trailing_newline = text.endswith("\n") or text.endswith("\r\n")
+    lines = text.splitlines()
+    return lines, encoding, newline, trailing_newline
+
+
+def write_lines_preserving(path: Path, lines: list[str], encoding: str,
+                           newline: str, trailing_newline: bool, mode: int) -> None:
+    body = newline.join(lines)
+    if trailing_newline and not body.endswith(newline):
+        body += newline
+    data = body.encode(encoding, errors="replace")
+    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
+    try:
+        os.write(fd, data)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def atomic_rename(src: Path, dst: Path) -> None:
+    os.rename(str(src), str(dst))
+    try:
+        fd = os.open(str(dst.parent), os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    except OSError:
+        pass
+
+
+def is_excluded(relpath: str) -> bool:
+    return any(r.search(relpath) for r in EXCLUDED_RES)
+
+
+def safe_relpath(relpath: str) -> str:
+    # relpaths under $HOME are benign in practice; we mirror them verbatim.
+    # Guard only against absolute paths and ".." segments.
+    if relpath.startswith("/") or ".." in Path(relpath).parts:
+        raise ValueError(f"unsafe relpath: {relpath!r}")
+    return relpath
+
+
+def manifest_path_for(relpath: str) -> Path:
+    return MANIFEST_ROOT / f"{relpath}.sha256"
+
+
+def base_content_path_for(relpath: str) -> Path:
+    return CONTENT_ROOT / relpath
+
+
+def draft_path_for(relpath: str) -> Path:
+    return DRAFT_ROOT / f"{relpath}{DRAFT_SUFFIX}"
+
+
+# ---------------------------------------------------------------------------
+# Scan — discover .shedosnew conflicts under $HOME and classify each.
+# ---------------------------------------------------------------------------
+
+
+def find_pkg_and_src(relpath: str) -> tuple[Optional[str], Optional[Path]]:
+    """Locate which shedos-* package owns this relpath.
+
+    Returns (pkg_name, src_path) or (None, None) if no package ships a default
+    at this relpath (orphan case).
+    """
+    if not DEFAULTS_ROOT.is_dir():
+        return None, None
+    for pkg_dir in sorted(DEFAULTS_ROOT.iterdir()):
+        if not pkg_dir.is_dir():
+            continue
+        candidate = pkg_dir / "defaults" / relpath
+        if candidate.is_file():
+            return pkg_dir.name, candidate
+    return None, None
+
+
+def scan_conflicts() -> tuple[list[Conflict], list[str]]:
+    """Walk $HOME for *.shedosnew files and classify each conflict.
+
+    Returns (conflicts, excluded_relpaths). The second list is purely
+    advisory — `.shedosnew` files that live under an excluded tree like
+    ``.cache/`` or ``.local/state/`` are not actionable through the TUI,
+    but the user deserves to know they exist so they can decide to
+    delete them manually.
+    """
+    conflicts: list[Conflict] = []
+    excluded: list[str] = []
+    if not HOME.is_dir():
+        return conflicts, excluded
+    for dirpath, dirnames, filenames in os.walk(HOME, followlinks=False):
+        # Prune excluded trees early for speed — but first check if they
+        # contain any .shedosnew files so we can surface them.
+        rel_dir = os.path.relpath(dirpath, HOME)
+        if rel_dir != "." and is_excluded(rel_dir.replace(os.sep, "/") + "/"):
+            for name in filenames:
+                if name.endswith(NEW_SUFFIX):
+                    yours = Path(dirpath) / name[: -len(NEW_SUFFIX)]
+                    rel = os.path.relpath(yours, HOME).replace(os.sep, "/")
+                    excluded.append(rel)
+            dirnames[:] = []
+            continue
+        for name in filenames:
+            if not name.endswith(NEW_SUFFIX):
+                continue
+            theirs = Path(dirpath) / name
+            yours = theirs.with_name(name[: -len(NEW_SUFFIX)])
+            rel = os.path.relpath(yours, HOME).replace(os.sep, "/")
+            if is_excluded(rel):
+                excluded.append(rel)
+                continue
+            conflicts.append(_classify(rel, yours, theirs))
+    conflicts.sort(key=lambda c: c.relpath)
+    excluded.sort()
+    return conflicts, excluded
+
+
+def _classify(relpath: str, yours: Path, theirs: Path) -> Conflict:
+    pkg, src = find_pkg_and_src(relpath)
+    base = base_content_path_for(relpath)
+    has_base = base.is_file()
+    size = 0
+    try:
+        size = theirs.stat().st_size
+    except OSError:
+        pass
+
+    # symlink? Check YOURS first since we'd be writing to it.
+    if yours.exists() and yours.is_symlink():
+        kind = "symlink"
+    elif not yours.exists():
+        kind = "missing-yours"
+    elif pkg is None or src is None:
+        kind = "orphan"
+    elif sniff_binary(theirs) or (yours.is_file() and sniff_binary(yours)):
+        kind = "binary"
+    else:
+        kind = "text"
+
+    return Conflict(
+        relpath=relpath,
+        pkg=pkg or "unknown",
+        yours_path=yours,
+        theirs_path=theirs,
+        src_path=src,
+        base_path=base if has_base else None,
+        kind=kind,
+        has_base=has_base,
+        size=size,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Auto-resolve at scan: identical content (byte-for-byte) should just delete
+# .shedosnew and bump the manifest — never surfaced to the user.
+# ---------------------------------------------------------------------------
+
+
+def auto_resolve_identical(conflicts: list[Conflict]) -> tuple[list[Conflict], int]:
+    """Return (remaining, auto_resolved_count)."""
+    remaining: list[Conflict] = []
+    auto_n = 0
+    for c in conflicts:
+        if c.kind != "text" or c.src_path is None:
+            remaining.append(c)
+            continue
+        try:
+            if sha256_file(c.yours_path) == sha256_file(c.theirs_path):
+                # Identical: delete .shedosnew, update manifest to current src.
+                c.theirs_path.unlink()
+                _update_manifest(c.relpath, c.src_path)
+                auto_n += 1
+                continue
+        except OSError:
+            pass
+        remaining.append(c)
+    return remaining, auto_n
+
+
+def _update_manifest(relpath: str, src_path: Path) -> None:
+    sha = sha256_file(src_path)
+    if not sha:
+        return
+    mp = manifest_path_for(relpath)
+    mp.parent.mkdir(parents=True, exist_ok=True)
+    mp.write_text(sha)
+    try:
+        mp.chmod(0o600)
+    except OSError:
+        pass
+    bp = base_content_path_for(relpath)
+    bp.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(src_path, bp)
+    try:
+        bp.chmod(0o600)
+    except OSError:
+        pass
+
+
+# ---------------------------------------------------------------------------
+# Hunk extraction (3-way + 2-way)
+# ---------------------------------------------------------------------------
+
+
+def extract_hunks_3way(base: list[str], yours: list[str],
+                       theirs: list[str]) -> list[Hunk]:
+    """diff3-style hunk extraction.
+
+    Walk base positions once, using SequenceMatcher opcodes (base↔yours)
+    and (base↔theirs) in lockstep. Emit a hunk for every base range that
+    YOURS or THEIRS touched. Context ranges (neither changed) are dropped.
+    """
+    ops_y = SequenceMatcher(a=base, b=yours, autojunk=False).get_opcodes()
+    ops_t = SequenceMatcher(a=base, b=theirs, autojunk=False).get_opcodes()
+
+    # Build per-base-line annotations: for each base index, the corresponding
+    # yours / theirs ranges if "equal", or None if modified.
+    # Then coalesce runs.
+    # Materialise an event list: (base_idx, 'y'|'t', 'equal'|'change', (other_lo, other_hi))
+    # Simpler: build two arrays y_map and t_map each of length len(base)+1
+    #   y_map[i] = 'equal' -> yours idx, else None meaning modified
+    # and also track the changed regions explicitly as list of (base_lo, base_hi, yours_lo, yours_hi).
+
+    y_changes = _change_regions(ops_y)
+    t_changes = _change_regions(ops_t)
+
+    # Merge change regions by base range. Any overlap in base range means a
+    # "both-changed" hunk; non-overlapping produce their own hunks.
+    merged = _merge_change_regions(y_changes, t_changes, len(base), len(yours), len(theirs))
+
+    hunks: list[Hunk] = []
+    for idx, region in enumerate(merged):
+        bs, be, ys, ye, ts, te, kind = region
+        h = Hunk(
+            index=idx,
+            base_start=bs, base_end=be,
+            yours_start=ys, yours_end=ye,
+            theirs_start=ts, theirs_end=te,
+            yours_lines=yours[ys:ye],
+            theirs_lines=theirs[ts:te],
+            base_lines=base[bs:be],
+            kind=kind,
+        )
+        # Pre-mark sensible defaults.
+        if kind == "yours-only":
+            h.decision = Side.YOURS
+        elif kind == "theirs-only":
+            h.decision = Side.THEIRS
+        hunks.append(h)
+    return hunks
+
+
+def _change_regions(opcodes) -> list[tuple[int, int, int, int]]:
+    """Return non-equal opcode regions as (a_lo, a_hi, b_lo, b_hi)."""
+    out = []
+    for tag, a_lo, a_hi, b_lo, b_hi in opcodes:
+        if tag != "equal":
+            out.append((a_lo, a_hi, b_lo, b_hi))
+    return out
+
+
+def _merge_change_regions(y_changes, t_changes, n_base, n_yours, n_theirs):
+    """Merge YOURS and THEIRS change regions over BASE into unified hunks.
+
+    Returns a list of (base_start, base_end, yours_start, yours_end,
+                       theirs_start, theirs_end, kind).
+    kind ∈ {'yours-only', 'theirs-only', 'both-changed'}.
+    """
+    # Sort and walk; coalesce overlapping or touching regions.
+    y_idx = 0
+    t_idx = 0
+    merged = []
+    while y_idx < len(y_changes) or t_idx < len(t_changes):
+        y = y_changes[y_idx] if y_idx < len(y_changes) else None
+        t = t_changes[t_idx] if t_idx < len(t_changes) else None
+        if y is None:
+            merged.append(("t", t)); t_idx += 1; continue
+        if t is None:
+            merged.append(("y", y)); y_idx += 1; continue
+        if y[1] <= t[0]:
+            merged.append(("y", y)); y_idx += 1
+        elif t[1] <= y[0]:
+            merged.append(("t", t)); t_idx += 1
+        else:
+            # Overlap — coalesce into a both-changed block. Extend as needed
+            # by sweeping forward until the combined base range no longer
+            # overlaps the next region from either side.
+            bs = min(y[0], t[0])
+            be = max(y[1], t[1])
+            ys_lo, ys_hi = y[2], y[3]
+            ts_lo, ts_hi = t[2], t[3]
+            y_idx += 1; t_idx += 1
+            changed = True
+            while changed:
+                changed = False
+                if y_idx < len(y_changes) and y_changes[y_idx][0] < be:
+                    yy = y_changes[y_idx]
+                    be = max(be, yy[1])
+                    ys_hi = max(ys_hi, yy[3]); ys_lo = min(ys_lo, yy[2])
+                    y_idx += 1; changed = True
+                if t_idx < len(t_changes) and t_changes[t_idx][0] < be:
+                    tt = t_changes[t_idx]
+                    be = max(be, tt[1])
+                    ts_hi = max(ts_hi, tt[3]); ts_lo = min(ts_lo, tt[2])
+                    t_idx += 1; changed = True
+            merged.append(("both", (bs, be, ys_lo, ys_hi, ts_lo, ts_hi)))
+
+    # Now convert tagged entries to canonical tuples with full (ys, ye, ts, te).
+    # For "yours-only" entries we must compute the THEIRS projection of the
+    # base range (which is "equal" in THEIRS, so theirs_start/end track base
+    # positions offset by any earlier edits). Similarly for "theirs-only".
+    # We compute this by doing a cumulative-offset pass over the opcodes.
+    # Simpler approach: re-run SequenceMatcher to get offsets, but for our
+    # purposes the "equal" projection can be derived from opcodes directly.
+
+    out = []
+    for tag, reg in merged:
+        if tag == "y":
+            a_lo, a_hi, b_lo, b_hi = reg
+            # THEIRS is unchanged across this base range — project base→theirs
+            # by identity offset from the t_changes we've already walked. Do
+            # this with a helper.
+            ts_lo = _project_base_to_side(a_lo, t_changes, n_base, n_theirs)
+            ts_hi = _project_base_to_side(a_hi, t_changes, n_base, n_theirs)
+            out.append((a_lo, a_hi, b_lo, b_hi, ts_lo, ts_hi, "yours-only"))
+        elif tag == "t":
+            a_lo, a_hi, b_lo, b_hi = reg
+            ys_lo = _project_base_to_side(a_lo, y_changes, n_base, n_yours)
+            ys_hi = _project_base_to_side(a_hi, y_changes, n_base, n_yours)
+            out.append((a_lo, a_hi, ys_lo, ys_hi, b_lo, b_hi, "theirs-only"))
+        else:
+            bs, be, ys_lo, ys_hi, ts_lo, ts_hi = reg
+            out.append((bs, be, ys_lo, ys_hi, ts_lo, ts_hi, "both-changed"))
+    return out
+
+
+def _project_base_to_side(base_pos: int, side_changes, n_base: int, n_side: int) -> int:
+    """Given a base index, compute the corresponding SIDE index.
+
+    side_changes are the non-equal regions in (base, side). Anywhere outside
+    those regions is an 'equal' stretch whose offset is the running delta of
+    (side_hi - base_hi) through the preceding regions.
+    """
+    offset = 0
+    for a_lo, a_hi, b_lo, b_hi in side_changes:
+        if base_pos <= a_lo:
+            break
+        if base_pos >= a_hi:
+            offset += (b_hi - b_lo) - (a_hi - a_lo)
+        else:
+            # base_pos falls inside a changed region — snap to b_lo.
+            return b_lo
+    return base_pos + offset
+
+
+def extract_hunks_2way(yours: list[str], theirs: list[str]) -> list[Hunk]:
+    ops = SequenceMatcher(a=yours, b=theirs, autojunk=False).get_opcodes()
+    hunks: list[Hunk] = []
+    idx = 0
+    for tag, y_lo, y_hi, t_lo, t_hi in ops:
+        if tag == "equal":
+            continue
+        hunks.append(Hunk(
+            index=idx,
+            base_start=-1, base_end=-1,
+            yours_start=y_lo, yours_end=y_hi,
+            theirs_start=t_lo, theirs_end=t_hi,
+            yours_lines=yours[y_lo:y_hi],
+            theirs_lines=theirs[t_lo:t_hi],
+            base_lines=[],
+            kind="both-changed",
+            decision=None,
+        ))
+        idx += 1
+    return hunks
+
+
+# ---------------------------------------------------------------------------
+# Assembly
+# ---------------------------------------------------------------------------
+
+
+def assemble(state: MergeState) -> list[str]:
+    if state.base_content is None:
+        return _assemble_2way(state)
+    return _assemble_3way(state)
+
+
+def _apply_decision(out: list[str], h: Hunk) -> None:
+    dec = h.decision
+    if dec == Side.YOURS:
+        out.extend(h.yours_lines)
+    elif dec == Side.THEIRS:
+        out.extend(h.theirs_lines)
+    elif dec == Side.BOTH_YT:
+        out.extend(h.yours_lines); out.extend(h.theirs_lines)
+    elif dec == Side.BOTH_TY:
+        out.extend(h.theirs_lines); out.extend(h.yours_lines)
+    elif dec == Side.SKIP:
+        out.extend(h.yours_lines)
+    else:
+        raise UnresolvedHunk(h)
+
+
+def _assemble_3way(state: MergeState) -> list[str]:
+    assert state.base_content is not None
+    out: list[str] = []
+    cursor = 0
+    for h in state.hunks:
+        out.extend(state.base_content[cursor:h.base_start])
+        _apply_decision(out, h)
+        cursor = h.base_end
+    out.extend(state.base_content[cursor:])
+    return out
+
+
+def _assemble_2way(state: MergeState) -> list[str]:
+    # Walk YOURS; hunks appear in yours-space order from extract_hunks_2way.
+    out: list[str] = []
+    cursor = 0
+    for h in state.hunks:
+        out.extend(state.yours_lines[cursor:h.yours_start])
+        _apply_decision(out, h)
+        cursor = h.yours_end
+    out.extend(state.yours_lines[cursor:])
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Aligned-row model for the 3-pane merge viewer.
+#
+# The merge UI shows YOURS | BASE | THEIRS as three parallel columns with the
+# lines lined up: context regions occupy the same visual row in all three
+# panes, and a hunk region is padded with blank cells on the shorter sides so
+# the three pane heights stay equal. This is the data model IntelliJ's merge
+# viewer shows; we need the alignment here so vertical scroll stays in sync
+# without the reader having to cross-reference line numbers.
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class Cell:
+    # lineno is 1-based; None for padding rows inside a hunk.
+    lineno: Optional[int]
+    text: Optional[str]
+    # Per-cell diff classification vs BASE (in 3-way) or vs the counterpart
+    # side (in 2-way). Renderer turns this into a git-style marker + color:
+    #   "equal"   → neutral, no marker  (line unchanged from BASE)
+    #   "add"     → green "+"           (line the side introduced)
+    #   "del"     → red "-"             (line the side deleted from BASE;
+    #                                    cell.text holds the deleted content)
+    #   "ctx"     → neutral, no marker  (context row outside any hunk)
+    tag: str = "ctx"
+
+
+@dataclass
+class AlignedRow:
+    yours: Cell
+    base: Cell
+    theirs: Cell
+    # None for context rows, otherwise the hunk index this row is part of.
+    hunk_index: Optional[int]
+
+    @property
+    def is_hunk(self) -> bool:
+        return self.hunk_index is not None
+
+
+def _align_pair_vs_base(base: list[str], side: list[str]
+                        ) -> tuple[list[tuple[str, Optional[int]]],
+                                   list[list[int]]]:
+    """Pairwise-align one side (YOURS or THEIRS) against BASE.
+
+    Returns a pair ``(at, inserts_before)`` where:
+
+    - ``at`` has length ``len(base)``. Each entry is ``(tag, side_idx)`` where
+      tag is ``"equal"`` (side has this base line unchanged, side_idx is the
+      matching index into ``side``) or ``"del"`` (side deleted this base
+      line; side_idx is None).
+    - ``inserts_before`` has length ``len(base) + 1``. Entry ``k`` is a list
+      of ``side`` indices that the side inserted anchored just before
+      ``base[k]`` (or at end-of-file when k == len(base)).
+
+    "Replace" opcodes are decomposed into the base-range becoming ``"del"``
+    plus the side-range becoming inserts anchored at the start of the
+    replaced base range — that way the pane can render each changed line as
+    a distinct green "+" or red "-" in the git-diff tradition.
+    """
+    at: list[tuple[str, Optional[int]]] = [("del", None)] * len(base)
+    inserts_before: list[list[int]] = [[] for _ in range(len(base) + 1)]
+    sm = SequenceMatcher(None, base, side, autojunk=False)
+    for op, b1, b2, s1, s2 in sm.get_opcodes():
+        if op == "equal":
+            for k in range(b2 - b1):
+                at[b1 + k] = ("equal", s1 + k)
+        elif op == "delete":
+            for k in range(b2 - b1):
+                at[b1 + k] = ("del", None)
+        elif op == "insert":
+            for k in range(s2 - s1):
+                inserts_before[b1].append(s1 + k)
+        elif op == "replace":
+            for k in range(b2 - b1):
+                at[b1 + k] = ("del", None)
+            for k in range(s2 - s1):
+                inserts_before[b1].append(s1 + k)
+    return at, inserts_before
+
+
+def _hunk_rows_3way(hunk, state_hunk_index: int) -> list[AlignedRow]:
+    """Emit aligned rows for one 3-way hunk.
+
+    The algorithm walks BASE linearly. At each base position it first drains
+    any inserts (anchored just before that base line) from YOURS and THEIRS,
+    pairing them visually row-by-row. Then it emits the row for ``base[b]``
+    itself: each side's cell is either the kept YOURS/THEIRS line ("equal")
+    or a red "-" showing the deleted base content ("del"). Pure inserts get
+    a tilde placeholder in the BASE pane so the three columns stay aligned.
+    """
+    base = hunk.base_lines
+    yours = hunk.yours_lines
+    theirs = hunk.theirs_lines
+    y_base_ln_start = hunk.yours_start + 1
+    b_base_ln_start = hunk.base_start + 1
+    t_base_ln_start = hunk.theirs_start + 1
+
+    y_at, y_ins = _align_pair_vs_base(base, yours)
+    t_at, t_ins = _align_pair_vs_base(base, theirs)
+
+    rows: list[AlignedRow] = []
+    for b in range(len(base) + 1):
+        # Drain inserts anchored before base[b]. Pair yours vs theirs
+        # row-by-row and pad the shorter side with a blank cell so both
+        # panes scroll in sync.
+        y_list = y_ins[b]
+        t_list = t_ins[b]
+        for k in range(max(len(y_list), len(t_list))):
+            if k < len(y_list):
+                y_i = y_list[k]
+                y_cell = Cell(y_base_ln_start + y_i,
+                              yours[y_i], tag="add")
+            else:
+                y_cell = Cell(None, None, tag="equal")
+            if k < len(t_list):
+                t_i = t_list[k]
+                t_cell = Cell(t_base_ln_start + t_i,
+                              theirs[t_i], tag="add")
+            else:
+                t_cell = Cell(None, None, tag="equal")
+            rows.append(AlignedRow(
+                yours=y_cell,
+                base=Cell(None, None, tag="equal"),
+                theirs=t_cell,
+                hunk_index=state_hunk_index,
+            ))
+
+        if b >= len(base):
+            break
+
+        # Emit the row anchored on base[b].
+        y_tag, y_idx = y_at[b]
+        t_tag, t_idx = t_at[b]
+        if y_tag == "equal":
+            y_cell = Cell(y_base_ln_start + y_idx,
+                          yours[y_idx], tag="equal")
+        else:
+            # yours removed base[b]: show base content in red "-" column.
+            y_cell = Cell(None, base[b], tag="del")
+        if t_tag == "equal":
+            t_cell = Cell(t_base_ln_start + t_idx,
+                          theirs[t_idx], tag="equal")
+        else:
+            t_cell = Cell(None, base[b], tag="del")
+        b_cell = Cell(b_base_ln_start + b, base[b], tag="equal")
+        rows.append(AlignedRow(
+            yours=y_cell, base=b_cell, theirs=t_cell,
+            hunk_index=state_hunk_index,
+        ))
+    return rows
+
+
+def _hunk_rows_2way(hunk, state_hunk_index: int) -> list[AlignedRow]:
+    """Emit aligned rows for one 2-way hunk (no BASE available).
+
+    Uses the same pairwise alignment against YOURS as the implicit base, so
+    "add" rows are lines THEIRS introduced (green "+") and "del" rows are
+    lines THEIRS removed from YOURS (red "-"). YOURS is neutral equal except
+    where the counterpart side marks a row as removed.
+    """
+    yours = hunk.yours_lines
+    theirs = hunk.theirs_lines
+    y_base_ln_start = hunk.yours_start + 1
+    t_base_ln_start = hunk.theirs_start + 1
+
+    # In 2-way we pretend YOURS is the baseline and align THEIRS against it.
+    t_at, t_ins = _align_pair_vs_base(yours, theirs)
+
+    rows: list[AlignedRow] = []
+    for y in range(len(yours) + 1):
+        t_list = t_ins[y]
+        for k in range(len(t_list)):
+            t_i = t_list[k]
+            rows.append(AlignedRow(
+                yours=Cell(None, None, tag="equal"),
+                base=Cell(None, None, tag="equal"),
+                theirs=Cell(t_base_ln_start + t_i,
+                            theirs[t_i], tag="add"),
+                hunk_index=state_hunk_index,
+            ))
+        if y >= len(yours):
+            break
+        t_tag, t_idx = t_at[y]
+        if t_tag == "equal":
+            # YOURS line kept in THEIRS too: both neutral, no marker.
+            y_cell = Cell(y_base_ln_start + y, yours[y], tag="equal")
+            t_cell = Cell(t_base_ln_start + t_idx,
+                          theirs[t_idx], tag="equal")
+        else:
+            # THEIRS deleted this YOURS line: show it red on the THEIRS side.
+            y_cell = Cell(y_base_ln_start + y, yours[y], tag="equal")
+            t_cell = Cell(None, yours[y], tag="del")
+        rows.append(AlignedRow(
+            yours=y_cell,
+            base=Cell(None, None, tag="equal"),
+            theirs=t_cell,
+            hunk_index=state_hunk_index,
+        ))
+    return rows
+
+
+def build_aligned_rows(state: MergeState) -> list[AlignedRow]:
+    """Produce per-row triples that align YOURS/BASE/THEIRS in the viewport.
+
+    For a 3-way merge, equal regions sit at the same (base) line position in
+    all three files, so they emit one row per equal line. Inside a hunk we
+    do proper per-side alignment against BASE (see ``_hunk_rows_3way``):
+    each row's YOURS/THEIRS cell is tagged ``equal``/``add``/``del`` so the
+    renderer can draw git-style green "+" / red "-" per line while the BASE
+    pane stays neutral.
+
+    For a 2-way merge (no BASE), the BASE cell is always blank and we align
+    THEIRS against YOURS inside each hunk the same way.
+    """
+    rows: list[AlignedRow] = []
+    yours = state.yours_lines
+    theirs = state.theirs_lines
+
+    if state.base_content is not None:
+        base = state.base_content
+        cb = cy = ct = 0
+        for i, h in enumerate(state.hunks):
+            # Context preceding the hunk: equal across all three files.
+            n_ctx = h.base_start - cb
+            for j in range(n_ctx):
+                rows.append(AlignedRow(
+                    yours=Cell(cy + j + 1, yours[cy + j], tag="ctx"),
+                    base=Cell(cb + j + 1, base[cb + j], tag="ctx"),
+                    theirs=Cell(ct + j + 1, theirs[ct + j], tag="ctx"),
+                    hunk_index=None,
+                ))
+            cb, cy, ct = h.base_start, h.yours_start, h.theirs_start
+            rows.extend(_hunk_rows_3way(h, i))
+            cb, cy, ct = h.base_end, h.yours_end, h.theirs_end
+
+        # Trailing context.
+        while cb < len(base):
+            rows.append(AlignedRow(
+                yours=Cell(cy + 1, yours[cy], tag="ctx")
+                      if cy < len(yours) else Cell(None, None, tag="ctx"),
+                base=Cell(cb + 1, base[cb], tag="ctx"),
+                theirs=Cell(ct + 1, theirs[ct], tag="ctx")
+                       if ct < len(theirs) else Cell(None, None, tag="ctx"),
+                hunk_index=None,
+            ))
+            cb += 1; cy += 1; ct += 1
+        return rows
+
+    # 2-way.
+    cy = ct = 0
+    for i, h in enumerate(state.hunks):
+        n_ctx = h.yours_start - cy
+        for j in range(n_ctx):
+            rows.append(AlignedRow(
+                yours=Cell(cy + j + 1, yours[cy + j], tag="ctx"),
+                base=Cell(None, None, tag="ctx"),
+                theirs=Cell(ct + j + 1, theirs[ct + j], tag="ctx")
+                       if ct + j < len(theirs) else Cell(None, None, tag="ctx"),
+                hunk_index=None,
+            ))
+        cy, ct = h.yours_start, h.theirs_start
+        rows.extend(_hunk_rows_2way(h, i))
+        cy, ct = h.yours_end, h.theirs_end
+    while cy < len(yours):
+        rows.append(AlignedRow(
+            yours=Cell(cy + 1, yours[cy], tag="ctx"),
+            base=Cell(None, None, tag="ctx"),
+            theirs=Cell(ct + 1, theirs[ct], tag="ctx")
+                   if ct < len(theirs) else Cell(None, None, tag="ctx"),
+            hunk_index=None,
+        ))
+        cy += 1; ct += 1
+    return rows
+
+
+# ---------------------------------------------------------------------------
+# Load a merge state for one conflict.
+# ---------------------------------------------------------------------------
+
+
+def load_merge_state(c: Conflict, force_2way: bool = False) -> MergeState:
+    yours_lines, encoding, newline, trailing_newline = read_lines_any(c.yours_path)
+    theirs_lines, t_enc, t_nl, t_tn = read_lines_any(c.theirs_path)
+    # Encoding disagreement is rare; prefer YOURS.
+    base_content: Optional[list[str]] = None
+    base_sha = ""
+    if not force_2way and c.base_path is not None and c.base_path.is_file():
+        try:
+            bl, _, _, _ = read_lines_any(c.base_path)
+            base_content = bl
+            base_sha = sha256_file(c.base_path)
+        except OSError as e:
+            _log(f"base unreadable for {c.relpath}: {e}")
+
+    if base_content is not None:
+        hunks = extract_hunks_3way(base_content, yours_lines, theirs_lines)
+    else:
+        hunks = extract_hunks_2way(yours_lines, theirs_lines)
+
+    yours_mode = 0o644
+    try:
+        yours_mode = _stat.S_IMODE(c.yours_path.lstat().st_mode)
+    except OSError:
+        pass
+
+    return MergeState(
+        relpath=c.relpath,
+        pkg=c.pkg,
+        yours_path=c.yours_path,
+        theirs_path=c.theirs_path,
+        src_path=c.src_path,
+        base_path=c.base_path,
+        base_content=base_content,
+        yours_lines=yours_lines,
+        theirs_lines=theirs_lines,
+        hunks=hunks,
+        encoding=encoding,
+        newline=newline,
+        trailing_newline=trailing_newline,
+        yours_mode=yours_mode,
+        yours_sha_at_load=sha256_file(c.yours_path),
+        theirs_sha_at_load=sha256_file(c.theirs_path),
+        base_sha_at_load=base_sha,
+        src_sha_at_load=sha256_file(c.src_path) if c.src_path else "",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Atomic write-back
+# ---------------------------------------------------------------------------
+
+
+class ConcurrentModification(Exception):
+    def __init__(self, which: str) -> None:
+        super().__init__(f"{which} changed on disk since load")
+        self.which = which
+
+
+def save_merged(state: MergeState, force: bool = False) -> None:
+    # 1. Re-hash YOURS and THEIRS.
+    if not force:
+        cur_yours = sha256_file(state.yours_path)
+        if cur_yours and cur_yours != state.yours_sha_at_load:
+            raise ConcurrentModification("YOURS")
+        cur_theirs = sha256_file(state.theirs_path)
+        if cur_theirs and cur_theirs != state.theirs_sha_at_load:
+            raise ConcurrentModification("THEIRS")
+
+    # 2. Assemble (raises UnresolvedHunk if any decision is None).
+    out_lines = assemble(state)
+
+    # 3. Determine target mode.
+    mode = state.yours_mode or 0o644
+
+    # 4. Write to tmp with O_EXCL.
+    tmp = state.yours_path.with_name(state.yours_path.name + TMP_SUFFIX + f".{os.getpid()}")
+    if tmp.exists():
+        tmp.unlink()
+    write_lines_preserving(tmp, out_lines, state.encoding, state.newline,
+                           state.trailing_newline, mode)
+
+    # 5. Copy YOURS → .shedosbak (rolling).
+    bak = state.yours_path.with_name(state.yours_path.name + BAK_SUFFIX)
+    try:
+        shutil.copy2(state.yours_path, bak)
+    except OSError as e:
+        _log(f"backup failed for {state.relpath}: {e}")
+
+    # 6. Atomic rename tmp → YOURS.
+    atomic_rename(tmp, state.yours_path)
+
+    # 7. Remove .shedosnew.
+    try:
+        state.theirs_path.unlink()
+    except OSError:
+        pass
+
+    # 8. Update manifest (sha + content).
+    if state.src_path and state.src_path.is_file():
+        _update_manifest(state.relpath, state.src_path)
+
+    # 9. Clear draft.
+    delete_draft(state.relpath)
+
+    # 10. Kick the waybar conflict indicator. Best-effort: we've already
+    # changed the live file; the badge is decoration. Keep the timeout
+    # tight so a misbehaving signal path never blocks the save flow.
+    try:
+        subprocess.run(
+            ["/usr/bin/shedman", "conflicts", "--refresh-waybar"],
+            check=False,
+            timeout=2,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
+def sweep_leftover_tmps() -> int:
+    """Remove stale <path>.shedosmerge.tmp.* artefacts from crashed runs."""
+    removed = 0
+    for dirpath, _, filenames in os.walk(HOME, followlinks=False):
+        for name in filenames:
+            if TMP_SUFFIX in name and ".shedosmerge.tmp." in name:
+                try:
+                    (Path(dirpath) / name).unlink()
+                    removed += 1
+                except OSError:
+                    pass
+    return removed
+
+
+# ---------------------------------------------------------------------------
+# Drafts
+# ---------------------------------------------------------------------------
+
+
+def save_draft(state: MergeState, current_hunk: int) -> None:
+    try:
+        safe_relpath(state.relpath)
+    except ValueError:
+        return
+    dp = draft_path_for(state.relpath)
+    dp.parent.mkdir(parents=True, exist_ok=True)
+    data = {
+        "schema": DRAFT_SCHEMA,
+        "saved_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "relpath": state.relpath,
+        "pkg": state.pkg,
+        "yours_sha_at_load": state.yours_sha_at_load,
+        "theirs_sha_at_load": state.theirs_sha_at_load,
+        "base_sha_at_load": state.base_sha_at_load,
+        "src_sha_at_load": state.src_sha_at_load,
+        "decisions": [
+            {"index": h.index, "decision": h.decision.value if h.decision else None}
+            for h in state.hunks
+        ],
+        "current_hunk": current_hunk,
+    }
+    tmp = dp.with_suffix(dp.suffix + ".tmp")
+    tmp.write_text(json.dumps(data, indent=2))
+    os.rename(str(tmp), str(dp))
+
+
+def load_draft(relpath: str) -> Optional[dict]:
+    dp = draft_path_for(relpath)
+    if not dp.is_file():
+        return None
+    try:
+        data = json.loads(dp.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    if data.get("schema") != DRAFT_SCHEMA:
+        return None
+    return data
+
+
+def delete_draft(relpath: str) -> None:
+    dp = draft_path_for(relpath)
+    try:
+        dp.unlink()
+    except OSError:
+        pass
+
+
+# Module-level reference to the currently-active merge so a signal handler
+# (SIGTERM / SIGHUP) can flush the in-progress decisions to a draft before
+# the process is killed. Populated from MergeScreen.on_mount and cleared in
+# on_unmount. A list is used so subordinate scopes can mutate it without
+# the `global` keyword.
+_active_merge_ref: list = []
+
+
+def _signal_save_and_exit(signum, frame) -> None:  # noqa: ARG001
+    if _active_merge_ref:
+        screen = _active_merge_ref[0]
+        try:
+            # Read state + current live off the screen so the snapshot is
+            # whatever the user had on screen at the moment of the signal.
+            save_draft(screen.state, screen.current)
+        except Exception as e:  # noqa: BLE001
+            _log(f"signal {signum}: draft save failed: {e}")
+    # Conventional exit code for signal-terminated processes.
+    sys.exit(128 + int(signum))
+
+
+def install_signal_handlers() -> None:
+    """Install SIGTERM + SIGHUP handlers that flush a draft on forced exit.
+
+    SIGINT (Ctrl-C) is owned by Textual — its priority binding routes to
+    ``action_quit``, which in turn triggers ``MergeScreen.action_cancel``
+    on the active screen and already saves a draft. This function covers
+    only the non-interactive kills.
+    """
+    for sig_name in ("SIGTERM", "SIGHUP"):
+        sig = getattr(signal, sig_name, None)
+        if sig is None:
+            continue
+        try:
+            signal.signal(sig, _signal_save_and_exit)
+        except (OSError, ValueError) as e:
+            _log(f"install {sig_name} handler failed: {e}")
+
+
+def apply_draft(state: MergeState, draft: dict) -> bool:
+    """Try to apply decisions from a draft. Returns True if applied."""
+    # Only apply if load-time SHAs still match — otherwise the world moved.
+    checks = [
+        ("yours_sha_at_load", state.yours_sha_at_load),
+        ("theirs_sha_at_load", state.theirs_sha_at_load),
+        ("base_sha_at_load", state.base_sha_at_load),
+        ("src_sha_at_load", state.src_sha_at_load),
+    ]
+    for key, cur in checks:
+        if draft.get(key, "") != cur:
+            return False
+    by_idx = {d["index"]: d["decision"] for d in draft.get("decisions", [])}
+    for h in state.hunks:
+        dec = by_idx.get(h.index)
+        if dec is None:
+            continue
+        try:
+            h.decision = Side(dec)
+        except ValueError:
+            pass
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Process lock
+# ---------------------------------------------------------------------------
+
+
+class LockAcquireError(Exception):
+    pass
+
+
+def acquire_lock() -> int:
+    LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(LOCK_PATH), os.O_WRONLY | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        os.close(fd)
+        raise LockAcquireError()
+    os.write(fd, f"{os.getpid()}\n".encode())
+    return fd
+
+
+def release_lock(fd: int) -> None:
+    try:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+    except OSError:
+        pass
+    os.close(fd)
+
+
+# ---------------------------------------------------------------------------
+# CLI entry + dispatch
+# ---------------------------------------------------------------------------
+
+
+def _human_size(n: int) -> str:
+    if n < 1024:
+        return f"{n} B"
+    if n < 1024 * 1024:
+        return f"{n / 1024:.1f} KB"
+    return f"{n / (1024 * 1024):.2f} MB"
+
+
+def cmd_list(conflicts: list[Conflict]) -> int:
+    print("# path\tkind\thunks\tsize\tbase")
+    text_n = bin_n = no_base_n = 0
+    for c in conflicts:
+        if c.kind == "binary":
+            bin_n += 1
+            hunks = "-"
+        elif c.kind == "text":
+            text_n += 1
+            hunks = str(c.hunk_count) if c.hunk_count >= 0 else "?"
+        else:
+            hunks = "-"
+        if not c.has_base and c.kind == "text":
+            no_base_n += 1
+        base = "yes" if c.has_base else ("-" if c.kind == "binary" else "no")
+        print(f"{c.relpath}\t{c.kind}\t{hunks}\t{c.size}\t{base}")
+    print(f"# summary: {len(conflicts)} conflicts ({text_n} text, {bin_n} binary, {no_base_n} no-base)")
+    return 0
+
+
+def populate_hunk_counts(conflicts: list[Conflict], force_2way: bool = False) -> None:
+    for c in conflicts:
+        if c.kind != "text":
+            continue
+        try:
+            state = load_merge_state(c, force_2way=force_2way)
+            c.hunk_count = len(state.hunks)
+        except OSError:
+            c.hunk_count = -1
+
+
+def cmd_dry_run(conflicts: list[Conflict], force_2way: bool = False) -> int:
+    for c in conflicts:
+        print(f"== {c.relpath} ({c.kind}, {'3-way' if c.has_base and not force_2way else '2-way'}) ==")
+        if c.kind != "text":
+            print(f"  (would open {c.kind}-file modal)")
+            continue
+        try:
+            state = load_merge_state(c, force_2way=force_2way)
+        except OSError as e:
+            print(f"  load failed: {e}")
+            continue
+        for h in state.hunks:
+            base_range = f"base {h.base_start}..{h.base_end}" if not state.is_2way else "(2-way)"
+            print(f"  hunk {h.index} [{h.kind}] {base_range} "
+                  f"yours {h.yours_start}..{h.yours_end} theirs {h.theirs_start}..{h.theirs_end} "
+                  f"default={h.decision.value if h.decision else '-'}")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# Textual app (lazy-imported)
+# ---------------------------------------------------------------------------
+
+
+def _run_textual(conflicts: list[Conflict], *, start_file: Optional[str] = None,
+                 walk_all: bool = False, force_2way: bool = False) -> int:
+    try:
+        from .review_configs_ui import run_app  # type: ignore
+    except Exception:
+        # Inline the Textual app below; import it from this same module.
+        # We resolve the runner via globals to keep everything in one file.
+        runner = globals().get("_run_app_inline")
+        if runner is None:
+            print("shedman config --review: Textual UI module unavailable. "
+                  "Install python-textual and python-rich, or run with --list "
+                  "and resolve conflicts manually.", file=sys.stderr)
+            return 1
+        return runner(conflicts, start_file=start_file, walk_all=walk_all,
+                      force_2way=force_2way)
+    return run_app(conflicts, start_file=start_file, walk_all=walk_all,
+                   force_2way=force_2way)
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    av = argv if argv is not None else sys.argv[1:]
+    if av and av[0] == "--help-summary":
+        print("resolve .shedosnew dotfile conflicts with a merge TUI")
+        return 0
+    p = argparse.ArgumentParser(
+        prog="shedman config --review",
+        description="Resolve .shedosnew config conflicts with a merge TUI.",
+    )
+    p.add_argument("--list", action="store_true",
+                   help="Print a tab-separated list of conflicts and exit.")
+    p.add_argument("--all", action="store_true",
+                   help="Walk every conflict sequentially (skip the file list).")
+    p.add_argument("--file", metavar="PATH",
+                   help="Open merge screen for one file (relpath under $HOME).")
+    p.add_argument("--dry-run", action="store_true",
+                   help="Load each conflict, print the computed merge plan, "
+                        "change nothing.")
+    p.add_argument("--no-color", action="store_true",
+                   help="Force plain output (same as NO_COLOR=1).")
+    p.add_argument("--2way-only", dest="two_way", action="store_true",
+                   help="Ignore BASE content on disk; always run 2-way.")
+    # Hidden test hook: read decisions from stdin instead of running the TUI.
+    p.add_argument("--stdin-decisions", action="store_true",
+                   help=argparse.SUPPRESS)
+    args = p.parse_args(argv)
+
+    if args.no_color:
+        os.environ["NO_COLOR"] = "1"
+
+    if os.geteuid() == 0:
+        print("shedman config --review: refusing to run as root "
+              "(this tool edits $HOME, which must remain user-owned).",
+              file=sys.stderr)
+        return 2
+
+    # Acquire the process lock for any mutating operation.
+    if not args.list and not args.dry_run:
+        try:
+            lock_fd = acquire_lock()
+        except LockAcquireError:
+            print(f"shedman config --review: another instance is running "
+                  f"(lock at {LOCK_PATH}).", file=sys.stderr)
+            return 1
+    else:
+        lock_fd = None
+
+    try:
+        swept = sweep_leftover_tmps()
+        if swept and not args.list:
+            print(f"Cleaned up {swept} stale .shedosmerge.tmp file(s) from a previous run.",
+                  file=sys.stderr)
+
+        conflicts, excluded = scan_conflicts()
+        conflicts, auto_n = auto_resolve_identical(conflicts)
+        if auto_n and not args.list:
+            print(f"Auto-resolved {auto_n} identical-content conflict(s).",
+                  file=sys.stderr)
+        if excluded and not args.list:
+            print(f"Note: {len(excluded)} .shedosnew file(s) live under "
+                  f"excluded paths (e.g. ~/.cache, ~/.local/state) and "
+                  f"won't appear in the review list.", file=sys.stderr)
+            for rel in excluded[:5]:
+                print(f"  ~/{rel}.shedosnew", file=sys.stderr)
+            if len(excluded) > 5:
+                print(f"  … and {len(excluded) - 5} more. "
+                      "Delete them manually with `rm`.", file=sys.stderr)
+
+        if args.list:
+            populate_hunk_counts(conflicts, force_2way=args.two_way)
+            return cmd_list(conflicts)
+
+        if args.dry_run:
+            return cmd_dry_run(conflicts, force_2way=args.two_way)
+
+        if args.stdin_decisions:
+            return _run_stdin_decisions(conflicts, force_2way=args.two_way,
+                                        start_file=args.file)
+
+        if not conflicts:
+            print("Nothing to review. All configs are in sync.")
+            return 0
+
+        if args.file:
+            rel = args.file
+            if rel.startswith(str(HOME) + "/"):
+                rel = rel[len(str(HOME)) + 1:]
+            if rel.startswith("~/"):
+                rel = rel[2:]
+            conflicts = [c for c in conflicts if c.relpath == rel]
+            if not conflicts:
+                print(f"shedman config --review: no conflict found for {args.file!r}.",
+                      file=sys.stderr)
+                return 1
+
+        if not sys.stdin.isatty() or not sys.stdout.isatty():
+            print("shedman config --review: interactive TUI requires a terminal. "
+                  "Try --list for a scriptable summary.", file=sys.stderr)
+            return 2
+
+        populate_hunk_counts(conflicts, force_2way=args.two_way)
+        return _run_textual(conflicts, start_file=args.file, walk_all=args.all,
+                            force_2way=args.two_way)
+    finally:
+        if lock_fd is not None:
+            release_lock(lock_fd)
+
+
+def _run_stdin_decisions(conflicts: list[Conflict], *, force_2way: bool,
+                         start_file: Optional[str]) -> int:
+    """Test harness: read tokens from stdin, apply them, save.
+
+    Tokens (one per line): Y T BYT BTY X  → per-hunk decisions
+                           A T            → whole-file shortcuts
+                           s              → save current file
+                           n              → next file
+                           q              → quit
+    Unknown tokens are ignored.
+    """
+    if start_file:
+        conflicts = [c for c in conflicts if c.relpath == start_file]
+    if not conflicts:
+        print("no conflicts to process", file=sys.stderr)
+        return 0
+    tokens = iter(sys.stdin.read().split())
+    for c in conflicts:
+        if c.kind != "text":
+            continue
+        state = load_merge_state(c, force_2way=force_2way)
+        hunk_idx = 0
+        while True:
+            try:
+                tok = next(tokens)
+            except StopIteration:
+                break
+            if tok == "q":
+                return 0
+            if tok == "n":
+                break
+            if tok == "s":
+                try:
+                    save_merged(state)
+                    print(f"saved {c.relpath}")
+                except UnresolvedHunk as e:
+                    print(f"unresolved hunk {e.hunk.index} in {c.relpath}",
+                          file=sys.stderr)
+                    return 1
+                break
+            if tok == "A":
+                for h in state.hunks:
+                    h.decision = Side.YOURS
+                continue
+            if tok == "T":
+                # Ambiguous (THEIRS single-hunk vs take-all-THEIRS); in stdin
+                # harness we treat 'T' as per-hunk take-theirs and 'TT' as
+                # take-all-theirs to avoid the clash.
+                if hunk_idx < len(state.hunks):
+                    state.hunks[hunk_idx].decision = Side.THEIRS
+                    hunk_idx += 1
+                continue
+            if tok == "TT":
+                for h in state.hunks:
+                    h.decision = Side.THEIRS
+                continue
+            try:
+                side = Side(tok)
+            except ValueError:
+                continue
+            if hunk_idx < len(state.hunks):
+                state.hunks[hunk_idx].decision = side
+                hunk_idx += 1
+    return 0
+
+
+# Placeholder runner — overwritten later if Textual UI loads.
+def _run_app_inline(*args, **kwargs) -> int:  # noqa: ARG001
+    print("shedman config --review: Textual UI not available. "
+          "Install python-textual + python-rich.", file=sys.stderr)
+    return 1
+
+
+# ---------------------------------------------------------------------------
+# Textual UI — lazy-loaded so --list / --dry-run / --stdin-decisions don't
+# pay the import cost. Everything below this point requires python-textual
+# and python-rich.
+# ---------------------------------------------------------------------------
+
+
+def _load_textual_ui() -> None:
+    """Install the real _run_app_inline implementation."""
+    try:
+        from textual.app import App, ComposeResult
+        from textual.binding import Binding
+        from textual.containers import Horizontal, Vertical, VerticalScroll
+        from textual.screen import ModalScreen, Screen
+        from textual.widget import Widget
+        from textual.widgets import (
+            DataTable, Footer, Header, Input, Label, Static,
+        )
+        from textual.reactive import reactive
+        from rich.syntax import Syntax
+        from rich.text import Text
+    except Exception as e:
+        _log(f"textual import failed: {e}")
+        return
+
+    # --- Theme (Catppuccin Mocha) -----------------------------------------
+    PALETTE = {
+        "base": "#1e1e2e", "mantle": "#181825", "surface0": "#313244",
+        "text": "#cdd6f4", "overlay0": "#6c7086",
+        "green": "#a6e3a1", "red": "#f38ba8", "yellow": "#f9e2af",
+        "blue": "#89b4fa", "mauve": "#cba6f7",
+    }
+
+    APP_CSS = """
+    Screen { background: #1e1e2e; color: #cdd6f4; }
+    Header { background: #181825; color: #89b4fa; }
+    Footer { background: #181825; color: #6c7086; }
+
+    #banner { dock: top; height: 1; background: #181825; color: #89b4fa; padding: 0 1; }
+    #banner.two-way { background: #f9e2af; color: #1e1e2e; }
+
+    #hunk-strip { dock: bottom; height: 1; background: #181825; color: #cdd6f4; padding: 0 1; }
+    #hint-bar  { dock: bottom; height: 1; background: #181825; color: #6c7086; padding: 0 1; }
+
+    .pane { border: round #313244; padding: 0; width: 1fr; height: 1fr;
+            overflow-x: auto; overflow-y: auto; }
+    .pane.wrap { overflow-x: hidden; }
+    .pane.focus { border: round #89b4fa; }
+    .pane-title { background: #313244; color: #89b4fa; padding: 0 1; }
+    #merge-row { height: 1fr; }
+    .pane-yours  { border-title-color: #a6e3a1; border-title-align: left; }
+    .pane-base   { border-title-color: #f9e2af; border-title-align: left; }
+    .pane-theirs { border-title-color: #f38ba8; border-title-align: left; }
+
+    .add { color: #a6e3a1; }
+    .del { color: #f38ba8; }
+    .ctx { color: #cdd6f4; }
+    .ctx-dim { color: #6c7086; }
+    .cursor-line { background: #313244; }
+    .decided-yours { color: #a6e3a1; }
+    .decided-theirs { color: #f38ba8; }
+    .decided-both { color: #cba6f7; }
+
+    DataTable { background: #1e1e2e; }
+    DataTable > .datatable--header { background: #181825; color: #89b4fa; }
+    DataTable > .datatable--cursor { background: #313244; color: #cdd6f4; }
+
+    ModalScreen { align: center middle; }
+    .dialog { border: thick #89b4fa; background: #181825; width: 60; height: auto;
+              padding: 1 2; }
+    .dialog-title { color: #89b4fa; text-style: bold; }
+    .dialog-hint { color: #6c7086; }
+
+    #raw-diff-scroll {
+        border: thick #89b4fa;
+        background: #181825;
+        width: 95%;
+        height: 90%;
+        padding: 1 2;
+    }
+    """
+
+    class Banner(Static):
+        def __init__(self, text: str = "") -> None:
+            super().__init__(text, id="banner")
+
+        def set_mode(self, two_way: bool) -> None:
+            self.set_class(two_way, "two-way")
+
+    class HunkStrip(Static):
+        def __init__(self) -> None:
+            super().__init__("", id="hunk-strip")
+
+        def update_from(self, state: MergeState, current: int) -> None:
+            chars = []
+            for i, h in enumerate(state.hunks):
+                if i == current:
+                    chars.append("[b]◉[/b]")
+                elif h.decision is None:
+                    chars.append("○")
+                elif h.decision in (Side.BOTH_YT, Side.BOTH_TY):
+                    chars.append("[#cba6f7]●[/]")
+                elif h.decision == Side.YOURS:
+                    chars.append("[#a6e3a1]●[/]")
+                elif h.decision == Side.THEIRS:
+                    chars.append("[#f38ba8]●[/]")
+                else:
+                    chars.append("[#6c7086]●[/]")
+            dots = " ".join(chars)
+            legend = "  (● resolved  ◉ current  ○ pending)"
+            # Cap total width to terminal columns using east-asian-aware math
+            # (the dot glyphs render ambiguous-width; spaces + ASCII legend
+            # are single-cell). The widget itself is a one-line Static, so
+            # overflow would silently clip — do it ourselves so the user sees
+            # an ellipsis instead of a mystery cut.
+            term_cols = self.size.width or shutil.get_terminal_size((80, 24)).columns
+            padding = 2
+            dots_budget = max(10, term_cols - display_width(legend) - padding)
+            if display_width(dots) > dots_budget:
+                # Keep the current hunk visible: slice the dot list around it
+                # and truncate the edges of the result.
+                dots = truncate_to_width(dots, dots_budget)
+            self.update(dots + legend)
+
+    # ----- Per-row rendering for the aligned 3-pane viewer -----------------
+    #
+    # The left (YOURS) and right (THEIRS) panes always show their own side's
+    # content. The middle pane is a LIVE RESULT PREVIEW: for every hunk it
+    # reflects the user's current decision (y/t/b/B/x) — its cells mirror
+    # the chosen side so the user sees the merged output take shape as they
+    # make calls. Undecided hunks are marked with a yellow "?" so pending
+    # work is obvious. Outside hunks the middle pane shows base (ancestor)
+    # content unchanged.
+    #
+    # Per-cell ``tag`` (set by ``build_aligned_rows`` or substituted by the
+    # decision logic) drives the color/marker in git-diff fashion:
+    #   equal / ctx    →  neutral text, no marker
+    #   add            →  green "+" + green text   (side introduced this line)
+    #   del            →  red   "-" + red   text   (side deleted this base line)
+    #   und            →  yellow "?" + yellow text (hunk still undecided — only
+    #                                              ever appears in middle pane)
+    #
+    # Padding rows (cells with ``text is None``) draw a dim "~" placeholder
+    # so the three panes stay vertically aligned when one side of a hunk has
+    # fewer lines than another. The current hunk (the one decision keys
+    # affect) gets a surface0 background across every pane so the user always
+    # knows where focus is.
+
+    GUTTER_WIDTH = 4   # columns for line number
+    MARKER_WIDTH = 3   # columns for " + " / " - " / "   "
+
+    def _effective_middle_cell(row: AlignedRow,
+                               decisions: dict[int, Optional[Side]]
+                               ) -> Cell:
+        """Compute what the middle (RESULT) pane should show for this row.
+
+        - Context rows (no hunk): base cell unchanged.
+        - Undecided hunk: base content with tag="und" so user sees yellow "?".
+        - YOURS / SKIP: mirror yours cell.
+        - THEIRS: mirror theirs cell.
+        - BOTH_YT: prefer yours; fall back to theirs when yours is padding.
+        - BOTH_TY: prefer theirs; fall back to yours when theirs is padding.
+
+        The fallback matters on rows where only one side has an insert — we
+        don't want to drop it to padding when the user has said "take both".
+        """
+        if row.hunk_index is None:
+            return row.base
+        decision = decisions.get(row.hunk_index)
+        if decision is None:
+            if row.base.text is None:
+                # Pure insert row with nothing to show from base; leave blank.
+                return Cell(None, None, tag="equal")
+            return Cell(lineno=row.base.lineno, text=row.base.text, tag="und")
+        if decision in (Side.YOURS, Side.SKIP):
+            return row.yours
+        if decision == Side.THEIRS:
+            return row.theirs
+        if decision == Side.BOTH_YT:
+            return row.yours if row.yours.text is not None else row.theirs
+        if decision == Side.BOTH_TY:
+            return row.theirs if row.theirs.text is not None else row.yours
+        return row.base
+
+    def _render_cell(cell: Cell, is_hunk: bool, is_current: bool) -> Text:
+        line = Text()
+        bg = PALETTE["surface0"] if is_current else None
+
+        # Pick foreground + marker by tag.
+        if cell.tag == "add":
+            fg, marker = PALETTE["green"],  " + "
+        elif cell.tag == "del":
+            fg, marker = PALETTE["red"],    " - "
+        elif cell.tag == "und":
+            fg, marker = PALETTE["yellow"], " ? "
+        elif cell.tag == "ctx":
+            fg, marker = PALETTE["overlay0"], "   "
+        else:  # "equal"
+            fg, marker = (PALETTE["text"] if is_hunk else PALETTE["overlay0"]), "   "
+
+        style = f"{fg} on {bg}" if bg else fg
+
+        if cell.text is None:
+            dim_fg = PALETTE["overlay0"]
+            dim_style = f"{dim_fg} on {bg}" if bg else dim_fg
+            line.append(" " * GUTTER_WIDTH, style=dim_style)
+            line.append(" ~ ", style=dim_style)
+            line.append("\n", style=dim_style)
+            return line
+
+        body = cell.text
+        if len(body) > LONG_LINE_HL_CUTOFF:
+            body = body[:LONG_LINE_HL_CUTOFF] + "…"
+
+        gutter = (f"{cell.lineno:>{GUTTER_WIDTH}d}"
+                  if cell.lineno is not None else " " * GUTTER_WIDTH)
+        line.append(gutter, style=style)
+        line.append(marker, style=style)
+        line.append(body + "\n", style=style)
+        return line
+
+    def render_pane_text(rows: list[AlignedRow], side: str,
+                         current_hunk: Optional[int],
+                         decisions: Optional[dict[int, Optional[Side]]] = None,
+                         wrap: bool = False,
+                         ) -> Text:
+        # Lines are constructed with an explicit '\n'; ``no_wrap`` flips
+        # between "truncate/overflow-x scroll" (default) and "soft-wrap at
+        # container width" (when the user presses z). Aggregate Text owns
+        # the flag so Rich applies it uniformly to every line chunk.
+        out = Text(no_wrap=not wrap, overflow="ignore" if not wrap else "fold")
+        side_attr = side.lower()
+        for row in rows:
+            is_current = (current_hunk is not None
+                          and row.hunk_index == current_hunk)
+            if side == "BASE" and decisions is not None:
+                cell = _effective_middle_cell(row, decisions)
+            else:
+                cell = getattr(row, side_attr)
+            out.append_text(_render_cell(cell, row.is_hunk, is_current))
+        return out
+
+    class DiffPane(VerticalScroll):
+        """One side of the merge view: YOURS, BASE, or THEIRS.
+
+        A scrollable container with a single Static body. Scroll state is
+        driven from the screen (not the pane) so the three panes move in
+        lockstep when the user presses j/k/page-up/page-down/home/end.
+
+        ``can_focus = False`` is critical: ``VerticalScroll`` is focusable
+        by default, and when a pane has focus it intercepts arrow/scroll
+        keys and our decision keys (y/t/b/B/x) before the MergeScreen
+        bindings get a chance to fire. Keeping focus on the screen lets
+        every key route through screen-level BINDINGS.
+        """
+
+        can_focus = False
+        can_focus_children = False
+
+        def __init__(self, title: str, *, kind: str) -> None:
+            super().__init__(id=f"pane-{kind.lower()}")
+            self._kind = kind
+            self.border_title = title
+            self.add_class("pane")
+            self.add_class(f"pane-{kind.lower()}")
+            self.body = Static("(loading)", expand=True)
+
+        def compose(self) -> ComposeResult:
+            yield self.body
+
+        def set_content(self, text: Text) -> None:
+            self.body.update(text)
+
+    class HelpScreen(ModalScreen):
+        BINDINGS = [Binding("escape,?,q", "app.pop_screen", "close")]
+
+        HELP = """[b]shedman config --review[/b]   keybindings
+
+FILE LIST
+  j ↓    next   |   k ↑      prev
+  g G    top/bottom
+  /      filter by regex
+  enter  open merge screen
+  a      accept-THEIRS for all files (confirm)
+  K      keep-YOURS    for all files (confirm)
+  r      refresh       |   q   quit
+
+MERGE SCREEN
+  j ↓ k ↑   scroll one line
+  h ← l →   pan horizontally (disabled in wrap mode)
+  z         toggle line wrap / horizontal pan mode
+  PgDn/PgUp (ctrl-d/ctrl-u)   scroll one page
+  g G       top / bottom
+  n p       next / prev hunk (re-centers)
+  y         take YOURS   |   t   take THEIRS
+  b         take BOTH (Y→T)  |  B  take BOTH (T→Y)
+  x         skip (keeps YOURS at save)
+  u         undo last per-hunk decision
+  A         take-all YOURS  |  T  take-all THEIRS
+  s         save (atomic write, leaves .shedosbak)
+  d         raw unified diff in pager
+  e         open YOURS in $EDITOR
+  E         open merged-so-far in $EDITOR
+  q         cancel & save draft"""
+
+        def compose(self) -> ComposeResult:
+            yield Static(Text.from_markup(self.HELP), classes="dialog")
+
+    class RawDiffScreen(ModalScreen):
+        """Full-screen pager for unified YOURS↔THEIRS diff.
+
+        Kept deliberately simple: scrollable container with a single
+        pre-rendered ``Text`` block. Colors follow the Catppuccin palette
+        (green additions, red deletions, mauve hunk headers) so the view
+        matches the inline merge pane semantics.
+        """
+
+        BINDINGS = [Binding("escape,q,d", "app.pop_screen", "close")]
+
+        def __init__(self, relpath: str, yours_lines: list[str],
+                     theirs_lines: list[str]) -> None:
+            super().__init__()
+            self._relpath = relpath
+            self._yours = yours_lines
+            self._theirs = theirs_lines
+
+        def compose(self) -> ComposeResult:
+            diff = list(unified_diff(self._yours, self._theirs,
+                                     fromfile=f"YOURS/{self._relpath}",
+                                     tofile=f"THEIRS/{self._relpath}",
+                                     lineterm=""))
+            body = Text()
+            if not diff:
+                body.append(
+                    "(no textual difference between YOURS and THEIRS)\n",
+                    style=PALETTE["overlay0"],
+                )
+            for line in diff:
+                if line.startswith("+++") or line.startswith("---"):
+                    style = f"bold {PALETTE['blue']}"
+                elif line.startswith("@@"):
+                    style = f"bold {PALETTE['mauve']}"
+                elif line.startswith("+"):
+                    style = PALETTE["green"]
+                elif line.startswith("-"):
+                    style = PALETTE["red"]
+                else:
+                    style = PALETTE["text"]
+                body.append(line + "\n", style=style)
+            body.append(
+                "\n[esc/q/d to close]\n",
+                style=PALETTE["overlay0"],
+            )
+            scroller = VerticalScroll(
+                Static(body, expand=True),
+                id="raw-diff-scroll",
+            )
+            scroller.can_focus = True
+            yield scroller
+
+    class ConfirmScreen(ModalScreen):
+        def __init__(self, title: str, body: str, default_yes: bool = False) -> None:
+            super().__init__()
+            self._title = title
+            self._body = body
+            self._default_yes = default_yes
+            self._answer: Optional[bool] = None
+
+        BINDINGS = [
+            Binding("y,Y", "answer_yes", "yes"),
+            Binding("n,N,escape", "answer_no", "no"),
+            Binding("enter", "answer_default", "default"),
+        ]
+
+        def compose(self) -> ComposeResult:
+            markup = (f"[b #89b4fa]{self._title}[/]\n\n{self._body}\n\n"
+                      f"[#6c7086]({'Y/n' if self._default_yes else 'y/N'})[/]")
+            yield Static(Text.from_markup(markup), classes="dialog")
+
+        def action_answer_yes(self) -> None: self.dismiss(True)
+        def action_answer_no(self) -> None: self.dismiss(False)
+        def action_answer_default(self) -> None: self.dismiss(self._default_yes)
+
+    class FilterPromptScreen(ModalScreen):
+        """Modal prompt that asks for a filter string (substring, case-insensitive).
+
+        Returns the entered string on Enter, or None on Escape. An empty
+        string clears any existing filter.
+        """
+
+        BINDINGS = [Binding("escape", "cancel", "cancel")]
+
+        def __init__(self, current: str = "") -> None:
+            super().__init__()
+            self._current = current
+
+        def compose(self) -> ComposeResult:
+            title = Text.from_markup(
+                "[b #89b4fa]Filter conflicts[/]\n"
+                "[#6c7086](substring match on relpath; empty to clear; "
+                "Esc to cancel)[/]\n"
+            )
+            yield Static(title, classes="dialog")
+            self._input = Input(value=self._current,
+                                placeholder="filter…",
+                                id="filter-input")
+            yield self._input
+
+        def on_mount(self) -> None:
+            self._input.focus()
+
+        def action_cancel(self) -> None:
+            self.dismiss(None)
+
+        def on_input_submitted(self, event) -> None:
+            self.dismiss(event.value)
+
+    # ---------- File list screen ----------
+    class FileListScreen(Screen):
+        # All bindings set show=True so the Footer widget advertises them.
+        # DataTable eats Enter (emits RowSelected) and the arrow keys before
+        # screen-level bindings fire; j/k are wired to cursor moves here so
+        # vim-style nav still works inside the DataTable.
+        BINDINGS = [
+            Binding("j",                "cursor_down",      "↓"),
+            Binding("k",                "cursor_up",        "↑"),
+            Binding("g",                "cursor_top",       "top"),
+            Binding("G",                "cursor_bottom",    "bot"),
+            Binding("l,right",          "open",             "open"),
+            Binding("a",                "accept_all_theirs", "take-theirs-all"),
+            Binding("K",                "keep_all_yours",   "keep-yours-all"),
+            Binding("r",                "refresh",          "refresh"),
+            Binding("slash",            "filter",           "filter"),
+            Binding("escape",           "clear_filter",     "clear filter"),
+            Binding("question_mark,f1", "help",             "help"),
+            Binding("q",                "quit",             "quit"),
+        ]
+
+        def __init__(self, app_ref: "ReviewApp") -> None:
+            super().__init__()
+            self._app_ref = app_ref
+            self._filter = ""
+
+        def compose(self) -> ComposeResult:
+            yield Banner("shedman config --review")
+            self.table = DataTable(cursor_type="row", zebra_stripes=False)
+            self.table.add_columns("#", "path", "kind", "hunks", "size", "base")
+            yield self.table
+            yield Footer()
+
+        def on_mount(self) -> None:
+            self.refresh_table()
+
+        def _visible_conflicts(self) -> list[Conflict]:
+            if not self._filter:
+                return list(self._app_ref.conflicts)
+            q = self._filter.lower()
+            return [c for c in self._app_ref.conflicts if q in c.relpath.lower()]
+
+        def refresh_table(self) -> None:
+            self.table.clear()
+            visible = self._visible_conflicts()
+            for i, c in enumerate(visible, 1):
+                kind = c.kind
+                hunks = "-"
+                if c.kind == "text":
+                    hunks = str(c.hunk_count) if c.hunk_count >= 0 else "?"
+                base = ("yes" if c.has_base else ("-" if c.kind != "text" else "[#f9e2af]no[/]"))
+                self.table.add_row(str(i), c.relpath, kind, hunks,
+                                   _human_size(c.size), base)
+            banner = self.query_one("#banner", Banner)
+            total = len(self._app_ref.conflicts)
+            bin_n = sum(1 for c in self._app_ref.conflicts if c.kind == "binary")
+            if self._filter:
+                banner.update(
+                    f"shedman config --review  —  {len(visible)}/{total} "
+                    f"conflict(s) ({bin_n} binary)   "
+                    f"filter=[b #f9e2af]{self._filter}[/]   "
+                    f"/ edit  esc clear   ? help   q quit")
+            else:
+                banner.update(
+                    f"shedman config --review  —  {total} conflict(s) "
+                    f"({bin_n} binary)   / filter   ? help   q quit")
+
+        def action_quit(self) -> None:
+            self.app.exit()
+
+        def action_cursor_down(self) -> None:
+            self.table.action_cursor_down()
+
+        def action_cursor_up(self) -> None:
+            self.table.action_cursor_up()
+
+        def action_cursor_top(self) -> None:
+            if self.table.row_count:
+                self.table.move_cursor(row=0)
+
+        def action_cursor_bottom(self) -> None:
+            if self.table.row_count:
+                self.table.move_cursor(row=self.table.row_count - 1)
+
+        def on_data_table_row_selected(self, event) -> None:
+            # Fired when the user presses Enter (or double-clicks) on a row.
+            # DataTable owns the Enter key — screen-level Enter binding never
+            # fires — so activation has to go through this handler.
+            visible = self._visible_conflicts()
+            idx = getattr(event, "cursor_row", None)
+            if idx is None or idx < 0 or idx >= len(visible):
+                return
+            self._app_ref.open_conflict(visible[idx])
+
+        def action_open(self) -> None:
+            if self.table.row_count == 0:
+                return
+            visible = self._visible_conflicts()
+            idx = self.table.cursor_row
+            if idx is None or idx < 0 or idx >= len(visible):
+                return
+            self._app_ref.open_conflict(visible[idx])
+
+        def action_help(self) -> None:
+            self.app.push_screen(HelpScreen())
+
+        def action_accept_all_theirs(self) -> None:
+            visible = self._visible_conflicts()
+            scope = ("every visible file"
+                     if self._filter else "every file")
+            def after(ans: Optional[bool]) -> None:
+                if ans:
+                    self._app_ref.bulk_accept_theirs(visible)
+                    self.refresh_table()
+            self.app.push_screen(
+                ConfirmScreen("Accept THEIRS for all files",
+                              f"Replace {scope} ({len(visible)}) with its\n"
+                              f"upstream version. A .shedosbak is written for each."),
+                after,
+            )
+
+        def action_keep_all_yours(self) -> None:
+            visible = self._visible_conflicts()
+            scope = ("every visible .shedosnew"
+                     if self._filter else "every .shedosnew")
+            def after(ans: Optional[bool]) -> None:
+                if ans:
+                    self._app_ref.bulk_keep_yours(visible)
+                    self.refresh_table()
+            self.app.push_screen(
+                ConfirmScreen("Keep YOURS for all files",
+                              f"Delete {scope} ({len(visible)}) and leave\n"
+                              f"your live copies as-is."),
+                after,
+            )
+
+        def action_refresh(self) -> None:
+            self._app_ref.rescan()
+            self.refresh_table()
+
+        def action_filter(self) -> None:
+            def after(value: Optional[str]) -> None:
+                if value is None:
+                    return
+                self._filter = value.strip()
+                self.refresh_table()
+                if self.table.row_count:
+                    self.table.move_cursor(row=0)
+            self.app.push_screen(FilterPromptScreen(self._filter), after)
+
+        def action_clear_filter(self) -> None:
+            if self._filter:
+                self._filter = ""
+                self.refresh_table()
+
+    # ---------- Merge screen ----------
+    class MergeScreen(Screen):
+        # Navigation split:
+        #   j/k/↑/↓/PgUp/PgDn/g/G  → scroll all panes in lockstep
+        #   n/p                    → move "current hunk" and re-center
+        #   y/t/b/B/x              → decision on current hunk (advances)
+        # Footer displays every binding with show=True in insertion order.
+        # We surface the scroll keys (even the obvious arrow aliases) so the
+        # user can verify the TUI actually handles them — the previous
+        # hidden-arrow design made it look like scroll was broken.
+        BINDINGS = [
+            Binding("j,down",       "scroll_down",      "↓ line"),
+            Binding("k,up",         "scroll_up",        "↑ line"),
+            Binding("h,left",       "pan_left",         "← pan"),
+            Binding("l,right",      "pan_right",        "→ pan"),
+            Binding("z",            "toggle_wrap",      "wrap"),
+            Binding("pagedown,ctrl+d", "scroll_page_down", "PgDn"),
+            Binding("pageup,ctrl+u",   "scroll_page_up",   "PgUp"),
+            Binding("g",            "scroll_home",      "top"),
+            Binding("G",            "scroll_end",       "bot"),
+            Binding("n",            "next_hunk",        "next hunk"),
+            Binding("p",            "prev_hunk",        "prev hunk"),
+            Binding("y",            "take_yours",       "YOURS"),
+            Binding("t",            "take_theirs",      "THEIRS"),
+            Binding("b",            "take_both_yt",     "both Y→T"),
+            Binding("B",            "take_both_ty",     "both T→Y"),
+            Binding("x",            "skip_hunk",        "skip"),
+            Binding("u",            "undo",             "undo"),
+            Binding("shift+a",      "all_yours",        "all-Y"),
+            Binding("shift+t",      "all_theirs",       "all-T"),
+            Binding("s",            "save",             "save"),
+            Binding("d",            "raw_diff",         "raw-diff"),
+            Binding("e",            "edit_yours",       "edit"),
+            Binding("shift+e",      "edit_merged",      "edit merged"),
+            Binding("q",            "cancel",           "cancel"),
+            Binding("question_mark,f1", "help",         "help"),
+        ]
+
+        def __init__(self, app_ref: "ReviewApp", state: MergeState) -> None:
+            super().__init__()
+            self._app_ref = app_ref
+            self.state = state
+            self.current = 0
+            # Soft-wrap off by default: minified JSON / long one-liners look
+            # awful when reflowed. `z` toggles to Rich's wrap-at-pane-width
+            # mode when the user prefers vertical expansion over pan.
+            self._wrap = False
+            self.rows: list[AlignedRow] = build_aligned_rows(state)
+            # row index → index within state.hunks (for n/p + auto-scroll).
+            self._row_of_hunk: dict[int, int] = {}
+            for idx, r in enumerate(self.rows):
+                if r.hunk_index is not None and r.hunk_index not in self._row_of_hunk:
+                    self._row_of_hunk[r.hunk_index] = idx
+
+        def compose(self) -> ComposeResult:
+            yield Banner("")
+            if self.state.is_2way:
+                self.pane_yours  = DiffPane("YOURS (live)",      kind="YOURS")
+                self.pane_theirs = DiffPane("THEIRS (upstream)", kind="THEIRS")
+                self.pane_base: Optional[DiffPane] = None
+                yield Horizontal(self.pane_yours, self.pane_theirs, id="merge-row")
+            else:
+                self.pane_yours  = DiffPane("YOURS (live)",        kind="YOURS")
+                self.pane_base   = DiffPane("RESULT (preview)",    kind="BASE")
+                self.pane_theirs = DiffPane("THEIRS (upstream)",   kind="THEIRS")
+                yield Horizontal(self.pane_yours, self.pane_base,
+                                 self.pane_theirs, id="merge-row")
+            self.strip = HunkStrip()
+            yield self.strip
+            # Footer auto-renders every `show=True` binding — it's our source
+            # of truth for "what keys do what", so the user never has to
+            # memorize or hit `?` just to find ctrl-d/pgup/g/G.
+            yield Footer()
+
+        def on_mount(self) -> None:
+            banner = self.query_one("#banner", Banner)
+            mode = "2-way (base unavailable)" if self.state.is_2way else "3-way"
+            banner.set_mode(self.state.is_2way)
+            banner.update(f"{self.state.relpath}   {mode}   "
+                          f"hunk {self.current+1}/{len(self.state.hunks)}   "
+                          f"pkg={self.state.pkg}   ? help   s save")
+            self._render_all()
+            # Publish this screen so SIGTERM/SIGHUP handlers can snapshot
+            # the live (state, current_hunk) pair to a draft if the process
+            # is killed. Storing the screen (not a tuple) so the handler
+            # reads the current hunk at the moment of the signal, not at
+            # on_mount time.
+            _active_merge_ref[:] = [self]
+            # Scroll to the first hunk on entry so the user lands on something
+            # actionable, not the top of a 500-line file.
+            self.call_after_refresh(self._focus_current_hunk)
+
+        def on_unmount(self) -> None:
+            _active_merge_ref[:] = []
+
+        def _panes(self) -> list["DiffPane"]:
+            return [p for p in (self.pane_yours, self.pane_base, self.pane_theirs)
+                    if p is not None]
+
+        def _render_all(self) -> None:
+            cur = self.current if 0 <= self.current < len(self.state.hunks) else None
+            self.pane_yours.set_content(
+                render_pane_text(self.rows, "YOURS", cur, wrap=self._wrap))
+            self.pane_theirs.set_content(
+                render_pane_text(self.rows, "THEIRS", cur, wrap=self._wrap))
+            if self.pane_base is not None:
+                # Middle pane re-renders against the current decision map so
+                # y/t/b/B/x/u/A/T all produce a visible result-preview update.
+                decisions = {h.index: h.decision for h in self.state.hunks}
+                self.pane_base.set_content(
+                    render_pane_text(self.rows, "BASE", cur,
+                                     decisions=decisions, wrap=self._wrap))
+            self.strip.update_from(self.state, self.current)
+            banner = self.query_one("#banner", Banner)
+            wrap_tag = "wrap" if self._wrap else "pan"
+            banner.update(
+                f"{self.state.relpath}   "
+                f"{'2-way' if self.state.is_2way else '3-way'}   "
+                f"hunk {self.current+1}/{len(self.state.hunks)}   "
+                f"pkg={self.state.pkg}   [{wrap_tag}]   ? help   s save")
+
+        # --- Scroll synchronization: all three panes move together. -------
+        def _sync_scroll(self, y: int) -> None:
+            for p in self._panes():
+                p.scroll_to(y=y, animate=False)
+
+        def _scroll_by(self, delta: int) -> None:
+            pane = self.pane_yours
+            new_y = max(0, pane.scroll_y + delta)
+            self._sync_scroll(new_y)
+
+        def _center_on_row(self, row_idx: int) -> None:
+            # Place the target row near the top of the viewport (with a little
+            # lead-in so the user sees context above it).
+            pane = self.pane_yours
+            vh = pane.size.height or 10
+            target = max(0, row_idx - max(2, vh // 4))
+            self._sync_scroll(target)
+
+        def action_scroll_down(self) -> None:       self._scroll_by(1)
+        def action_scroll_up(self) -> None:         self._scroll_by(-1)
+        def action_scroll_page_down(self) -> None:
+            self._scroll_by(max(1, (self.pane_yours.size.height or 10) - 2))
+        def action_scroll_page_up(self) -> None:
+            self._scroll_by(-max(1, (self.pane_yours.size.height or 10) - 2))
+        def action_scroll_home(self) -> None:       self._sync_scroll(0)
+        def action_scroll_end(self) -> None:        self._sync_scroll(len(self.rows))
+
+        # --- Horizontal pan (no-op when wrap is on; content never overflows) --
+        PAN_STEP = 8
+
+        def _sync_pan(self, x: int) -> None:
+            for p in self._panes():
+                p.scroll_to(x=x, y=p.scroll_y, animate=False)
+
+        def action_pan_left(self) -> None:
+            if self._wrap:
+                return
+            new_x = max(0, (self.pane_yours.scroll_x or 0) - self.PAN_STEP)
+            self._sync_pan(new_x)
+
+        def action_pan_right(self) -> None:
+            if self._wrap:
+                return
+            new_x = (self.pane_yours.scroll_x or 0) + self.PAN_STEP
+            self._sync_pan(new_x)
+
+        def action_toggle_wrap(self) -> None:
+            self._wrap = not self._wrap
+            for p in self._panes():
+                p.set_class(self._wrap, "wrap")
+            if self._wrap:
+                # Turning wrap on: horizontal scroll offset becomes meaningless,
+                # reset so the user doesn't see a phantom scroll state when
+                # they toggle back.
+                self._sync_pan(0)
+            self._render_all()
+
+        def _focus_current_hunk(self) -> None:
+            if 0 <= self.current < len(self.state.hunks):
+                row = self._row_of_hunk.get(self.current)
+                if row is not None:
+                    self._center_on_row(row)
+
+        def _decision_and_advance(self, side: Side) -> None:
+            if not self.state.hunks:
+                return
+            h = self.state.hunks[self.current]
+            self.state.undo_stack.append((h.index, h.decision))
+            if len(self.state.undo_stack) > UNDO_DEPTH:
+                self.state.undo_stack.pop(0)
+            h.decision = side
+            save_draft(self.state, self.current)
+            if self.current < len(self.state.hunks) - 1:
+                self.current += 1
+            self._render_all()
+            self._focus_current_hunk()
+
+        def action_next_hunk(self) -> None:
+            if self.current < len(self.state.hunks) - 1:
+                self.current += 1
+                self._render_all()
+                self._focus_current_hunk()
+
+        def action_prev_hunk(self) -> None:
+            if self.current > 0:
+                self.current -= 1
+                self._render_all()
+                self._focus_current_hunk()
+
+        def action_take_yours(self) -> None: self._decision_and_advance(Side.YOURS)
+        def action_take_theirs(self) -> None: self._decision_and_advance(Side.THEIRS)
+        def action_take_both_yt(self) -> None: self._decision_and_advance(Side.BOTH_YT)
+        def action_take_both_ty(self) -> None: self._decision_and_advance(Side.BOTH_TY)
+        def action_skip_hunk(self) -> None: self._decision_and_advance(Side.SKIP)
+
+        def action_undo(self) -> None:
+            if not self.state.undo_stack:
+                self.app.bell()
+                return
+            idx, prev = self.state.undo_stack.pop()
+            for h in self.state.hunks:
+                if h.index == idx:
+                    h.decision = prev
+                    break
+            self._render_all()
+
+        def action_all_yours(self) -> None:
+            for h in self.state.hunks:
+                h.decision = Side.YOURS
+            self._render_all()
+
+        def action_all_theirs(self) -> None:
+            for h in self.state.hunks:
+                h.decision = Side.THEIRS
+            self._render_all()
+
+        def action_save(self) -> None:
+            unresolved = self.state.unresolved_count()
+            if unresolved:
+                def after(ans: Optional[bool]) -> None:
+                    if ans:
+                        self._pick_defaults_and_save()
+                self.app.push_screen(
+                    ConfirmScreen(
+                        f"{unresolved} hunk(s) unresolved",
+                        "Apply the auto-classified default for each unresolved hunk\n"
+                        "and save? (unclassified hunks will keep YOURS)",
+                    ),
+                    after,
+                )
+                return
+            self._do_save()
+
+        def _pick_defaults_and_save(self) -> None:
+            for h in self.state.hunks:
+                if h.decision is not None:
+                    continue
+                if h.kind == "yours-only":
+                    h.decision = Side.YOURS
+                elif h.kind == "theirs-only":
+                    h.decision = Side.THEIRS
+                else:
+                    h.decision = Side.YOURS  # conservative
+            self._do_save()
+
+        def _do_save(self) -> None:
+            try:
+                save_merged(self.state)
+            except ConcurrentModification as e:
+                self.app.push_screen(
+                    ConfirmScreen(f"{e.which} changed on disk",
+                                  "Force overwrite with the current merge? "
+                                  "(choose No to cancel and reload the file by hand)"),
+                    lambda ans: self._force_save() if ans else None,
+                )
+                return
+            except UnresolvedHunk:
+                self.app.bell()
+                return
+            except OSError as e:
+                self._show_io_error(e)
+                return
+            self._app_ref.mark_resolved(self.state.relpath)
+            self.app.pop_screen()
+
+        def _force_save(self) -> None:
+            try:
+                save_merged(self.state, force=True)
+            except UnresolvedHunk:
+                return
+            except OSError as e:
+                self._show_io_error(e)
+                return
+            self._app_ref.mark_resolved(self.state.relpath)
+            self.app.pop_screen()
+
+        def _show_io_error(self, e: OSError) -> None:
+            # Surface filesystem-level failures (read-only $HOME, ENOSPC,
+            # permission denied, etc.) as a modal instead of letting the
+            # exception bubble up and take the TUI down.
+            if e.errno == errno.EROFS:
+                title = "$HOME is read-only"
+                body = ("The filesystem holding your home directory is mounted\n"
+                        "read-only. Remount read-write before saving:\n"
+                        "  sudo mount -o remount,rw /home\n"
+                        "Your draft has been preserved; pick up where you left off.")
+            elif e.errno == errno.ENOSPC:
+                title = "No space left on device"
+                body = ("Free up space in $HOME and try again. Your draft is saved.")
+            elif e.errno == errno.EACCES:
+                title = "Permission denied"
+                body = (f"{e.filename or self.state.relpath}\n"
+                        "Check ownership and mode on the file and its parent directory.")
+            else:
+                title = f"I/O error ({e.errno})"
+                body = str(e)
+            _log(f"save I/O error for {self.state.relpath}: {e}")
+            save_draft(self.state, self.current)
+            self.app.push_screen(ConfirmScreen(title, body, default_yes=True))
+
+        def action_raw_diff(self) -> None:
+            self.app.push_screen(RawDiffScreen(
+                self.state.relpath,
+                self.state.yours_lines,
+                self.state.theirs_lines,
+            ))
+
+        def action_edit_yours(self) -> None:
+            self._edit_and_reload(self.state.yours_path)
+
+        def action_edit_merged(self) -> None:
+            # Write current merged-so-far to a tempfile, let $EDITOR edit,
+            # then treat it as the new YOURS baseline for further merging.
+            try:
+                lines = assemble(self.state)
+            except UnresolvedHunk:
+                # Assemble with YOURS defaults for the preview.
+                defaults = [(h.index, h.decision) for h in self.state.hunks]
+                for h in self.state.hunks:
+                    if h.decision is None:
+                        h.decision = Side.YOURS
+                lines = assemble(self.state)
+                for idx, prev in defaults:
+                    for h in self.state.hunks:
+                        if h.index == idx:
+                            h.decision = prev
+                            break
+            tmp = tempfile.NamedTemporaryFile(
+                mode="w", suffix=Path(self.state.relpath).suffix or ".txt",
+                delete=False, encoding=self.state.encoding,
+            )
+            tmp.write(self.state.newline.join(lines))
+            if self.state.trailing_newline:
+                tmp.write(self.state.newline)
+            tmp.close()
+            self._edit_and_reload(Path(tmp.name))
+
+        def _edit_and_reload(self, path: Path) -> None:
+            editor = os.environ.get("VISUAL") or os.environ.get("EDITOR") or "nano"
+            try:
+                with self.app.suspend():
+                    rc = subprocess.call([editor, str(path)])
+            except Exception as e:
+                self.app.bell()
+                _log(f"editor handoff failed: {e}")
+                return
+            if rc != 0:
+                _log(f"editor exited {rc}")
+
+        def action_cancel(self) -> None:
+            save_draft(self.state, self.current)
+            self.app.pop_screen()
+
+        def action_help(self) -> None:
+            self.app.push_screen(HelpScreen())
+
+    # ---------- App wrapper ----------
+    class ReviewApp(App):
+        CSS = APP_CSS
+        TITLE = "shedman config --review"
+        BINDINGS = [Binding("ctrl+c", "quit", "quit", priority=True)]
+
+        def __init__(self, conflicts: list[Conflict], *, start_file: Optional[str],
+                     walk_all: bool, force_2way: bool) -> None:
+            super().__init__()
+            self.conflicts = list(conflicts)
+            self.start_file = start_file
+            self.walk_all = walk_all
+            self.force_2way = force_2way
+            self._resolved: set[str] = set()
+
+        def on_mount(self) -> None:
+            self.push_screen(FileListScreen(self))
+            if self.start_file:
+                for c in self.conflicts:
+                    if c.relpath == self.start_file:
+                        self.open_conflict(c)
+                        break
+            elif self.walk_all and self.conflicts:
+                self.open_conflict(self.conflicts[0])
+
+        def open_conflict(self, c: Conflict) -> None:
+            if c.kind == "binary":
+                self.push_screen(ConfirmScreen(
+                    f"Binary file: {c.relpath}",
+                    "Line-level merge is not possible for binary files.\n"
+                    "Yes → Take THEIRS (replace YOURS)\n"
+                    "No  → Keep YOURS (delete .shedosnew)"
+                ), lambda ans: self._binary_resolve(c, ans))
+                return
+            if c.kind == "symlink":
+                self.push_screen(ConfirmScreen(
+                    f"Symlink: {c.relpath}",
+                    "YOURS is a symlink. The review tool does not merge symlinks.\n"
+                    "Yes → delete .shedosnew and leave the symlink\n"
+                    "No  → skip"
+                ), lambda ans: self._skip_resolve(c, ans))
+                return
+            if c.kind == "orphan":
+                self.push_screen(ConfirmScreen(
+                    f"Orphan: {c.relpath}",
+                    "No shedos-* package currently owns this file.\n"
+                    "Yes → delete .shedosnew\n"
+                    "No  → skip"
+                ), lambda ans: self._skip_resolve(c, ans))
+                return
+            if c.kind == "missing-yours":
+                self.push_screen(ConfirmScreen(
+                    f"Missing live copy: {c.relpath}",
+                    "YOURS doesn't exist. Promote THEIRS to YOURS?\n"
+                    "Yes → mv .shedosnew → live path\n"
+                    "No  → delete .shedosnew"
+                ), lambda ans: self._promote_theirs(c, ans))
+                return
+            try:
+                state = load_merge_state(c, force_2way=self.force_2way)
+            except OSError as e:
+                _log(f"load failed for {c.relpath}: {e}")
+                return
+            draft = load_draft(c.relpath)
+            if draft:
+                def after(ans: Optional[bool]) -> None:
+                    if ans:
+                        apply_draft(state, draft)
+                    self.push_screen(MergeScreen(self, state))
+                self.push_screen(ConfirmScreen(
+                    "Resume draft?",
+                    f"A draft from {draft.get('saved_at', '?')} was found.\n"
+                    "Yes → resume   No → fresh start"
+                ), after)
+                return
+            self.push_screen(MergeScreen(self, state))
+
+        def _binary_resolve(self, c: Conflict, take_theirs: Optional[bool]) -> None:
+            if take_theirs is None:
+                return
+            try:
+                if take_theirs:
+                    shutil.copy2(c.yours_path, c.yours_path.with_name(c.yours_path.name + BAK_SUFFIX))
+                    shutil.copy2(c.theirs_path, c.yours_path)
+                c.theirs_path.unlink()
+                if c.src_path:
+                    _update_manifest(c.relpath, c.src_path)
+            except OSError as e:
+                _log(f"binary resolve failed for {c.relpath}: {e}")
+            self.mark_resolved(c.relpath)
+
+        def _skip_resolve(self, c: Conflict, delete: Optional[bool]) -> None:
+            if delete:
+                try:
+                    c.theirs_path.unlink()
+                except OSError:
+                    pass
+                self.mark_resolved(c.relpath)
+
+        def _promote_theirs(self, c: Conflict, promote: Optional[bool]) -> None:
+            if promote is None:
+                return
+            try:
+                if promote:
+                    os.rename(str(c.theirs_path), str(c.yours_path))
+                else:
+                    c.theirs_path.unlink()
+                if c.src_path:
+                    _update_manifest(c.relpath, c.src_path)
+            except OSError as e:
+                _log(f"promote failed for {c.relpath}: {e}")
+            self.mark_resolved(c.relpath)
+
+        def mark_resolved(self, relpath: str) -> None:
+            self._resolved.add(relpath)
+            self.conflicts = [c for c in self.conflicts if c.relpath not in self._resolved]
+            top = self.screen_stack[-1] if self.screen_stack else None
+            if isinstance(top, FileListScreen):
+                top.refresh_table()
+            if not self.conflicts:
+                self.exit()
+
+        def rescan(self) -> None:
+            self.conflicts, _ = scan_conflicts()
+            self.conflicts, _ = auto_resolve_identical(self.conflicts)
+            populate_hunk_counts(self.conflicts, force_2way=self.force_2way)
+
+        def bulk_accept_theirs(self, scope: Optional[list[Conflict]] = None) -> None:
+            targets = list(scope) if scope is not None else list(self.conflicts)
+            for c in targets:
+                if c.kind == "text" and c.yours_path.exists():
+                    try:
+                        shutil.copy2(c.yours_path,
+                                     c.yours_path.with_name(c.yours_path.name + BAK_SUFFIX))
+                        shutil.copy2(c.theirs_path, c.yours_path)
+                        c.theirs_path.unlink()
+                        if c.src_path:
+                            _update_manifest(c.relpath, c.src_path)
+                    except OSError:
+                        continue
+                    self._resolved.add(c.relpath)
+            self.conflicts = [c for c in self.conflicts if c.relpath not in self._resolved]
+            if not self.conflicts:
+                self.exit()
+
+        def bulk_keep_yours(self, scope: Optional[list[Conflict]] = None) -> None:
+            targets = list(scope) if scope is not None else list(self.conflicts)
+            for c in targets:
+                try:
+                    c.theirs_path.unlink()
+                except OSError:
+                    pass
+                self._resolved.add(c.relpath)
+            self.conflicts = [c for c in self.conflicts if c.relpath not in self._resolved]
+            if not self.conflicts:
+                self.exit()
+
+    # Install the inline runner.
+    def _runner(conflicts: list[Conflict], *, start_file: Optional[str],
+                walk_all: bool, force_2way: bool) -> int:
+        if not conflicts:
+            print("Nothing to review. All configs are in sync.")
+            return 0
+        cols = shutil.get_terminal_size((80, 24)).columns
+        rows = shutil.get_terminal_size((80, 24)).lines
+        if cols < MIN_COLS or rows < MIN_ROWS:
+            print(f"shedman config --review: terminal too small "
+                  f"(need {MIN_COLS}×{MIN_ROWS}, have {cols}×{rows}). "
+                  f"Resize or run with --list.", file=sys.stderr)
+            return 2
+        install_signal_handlers()
+        app = ReviewApp(conflicts, start_file=start_file,
+                        walk_all=walk_all, force_2way=force_2way)
+        app.run()
+        return 0
+
+    globals()["_run_app_inline"] = _runner
+
+
+_load_textual_ui()
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        sys.exit(130)
