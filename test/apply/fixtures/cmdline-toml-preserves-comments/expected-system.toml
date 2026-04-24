@@ -1,0 +1,9 @@
+# Header comment.
+schema = 1
+
+# Cmdline comment.
+[kernel.cmdline]
+append = [
+    "ipv6.disable=1",
+    "nvidia_drm.modeset=1",
+]

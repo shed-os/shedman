@@ -1,0 +1,6 @@
+schema = 1
+
+# Empty append, baseline pinned. quiet/splash/root= are baseline →
+# always preserved, never adopted.
+[kernel.cmdline]
+append = []

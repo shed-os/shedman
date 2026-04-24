@@ -1,0 +1,9 @@
+{
+  "schema": 1,
+  "items": [
+    ["root=PARTUUID=11111111"],
+    ["rw"],
+    ["quiet"],
+    ["splash"]
+  ]
+}

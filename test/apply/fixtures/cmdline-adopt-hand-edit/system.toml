@@ -1,0 +1,4 @@
+schema = 1
+
+[kernel.cmdline]
+append = ["nvidia_drm.modeset=1"]

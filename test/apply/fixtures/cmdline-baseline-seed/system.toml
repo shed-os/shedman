@@ -1,0 +1,6 @@
+schema = 1
+
+# Empty append, baseline absent → first-apply seeds the baseline,
+# limine.conf is byte-preserved.
+[kernel.cmdline]
+append = []

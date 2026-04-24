@@ -1,0 +1,6 @@
+# Header comment.
+schema = 1
+
+# Cmdline comment.
+[kernel.cmdline]
+append = ["nvidia_drm.modeset=1"]

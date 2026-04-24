@@ -1,0 +1,7 @@
+schema = 1
+
+# Declared token already in baseline. Should not be re-added (identity
+# match), should not be adopted into TOML twice. Plan: aligned, no
+# changes.
+[kernel.cmdline]
+append = ["quiet"]

@@ -1,0 +1,7 @@
+schema = 1
+
+[kernel.cmdline]
+append = [
+    "ipv6.disable=1",
+    "nvidia_drm.modeset=1",
+]

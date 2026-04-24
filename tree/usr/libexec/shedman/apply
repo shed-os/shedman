@@ -64,7 +64,14 @@ def run_apply(cfg_path: _core.Optional[Path] = None, *,
         return 2
 
     manifest = _core.Manifest.load()
-    plan, new_manifest = _core.build_plan(cfg, manifest)
+    try:
+        plan, new_manifest = _core.build_plan(cfg, manifest)
+    except _core.SchemaError as e:
+        # Reconcilers may raise SchemaError mid-plan when a real-world
+        # state file (e.g. /boot/limine.conf, /etc/fstab) doesn't match
+        # an expected shape. Treat as schema error → exit 2.
+        print(f"shedman apply: {e}", file=sys.stderr)
+        return 2
 
     print(_core.colorize(f"Plan for {cfg_path or _core.config_path()}:", "bold"))
     print(plan.render())

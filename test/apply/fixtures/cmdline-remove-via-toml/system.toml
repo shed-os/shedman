@@ -1,0 +1,5 @@
+schema = 1
+
+# Token previously in last_applied, dropped from TOML → removed from cmdline.
+[kernel.cmdline]
+append = []

@@ -204,7 +204,8 @@ class SchemaError(ValueError):
 
 
 _ALLOWED_TOP = {"schema", "systemd", "drop-ins", "snapper",
-                "pacman", "services", "network", "security", "fs"}
+                "pacman", "services", "network", "security", "fs",
+                "kernel"}
 _ALLOWED_SYSTEMD = {"system", "user"}
 _ALLOWED_SYSTEMD_SUB = {"enable", "disable"}
 _ALLOWED_SNAPPER = {"timeline", "cleanup"}
@@ -236,6 +237,9 @@ _ALLOWED_FS = {"mounts"}
 _ALLOWED_MOUNT_KEYS = {"name", "device", "target", "fstype",
                       "options", "dump", "pass"}
 MOUNT_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
+_ALLOWED_KERNEL = {"cmdline"}
+_ALLOWED_KERNEL_CMDLINE = {"append"}
+CMDLINE_TOKEN_RE = re.compile(r"^[^=\s]+(=\S+)?$")
 
 GPG_FINGERPRINT_RE = re.compile(r"^[0-9A-F]{40}$")
 
@@ -440,6 +444,22 @@ class FsSection:
 
 
 @dataclass
+class CmdlineSection:
+    """Parsed [kernel.cmdline]. `append` is the user-declared list of
+    tokens to ensure-present in the Limine kernel cmdline."""
+    present: bool = False
+    append: list[str] = field(default_factory=list)
+
+
+@dataclass
+class KernelSection:
+    cmdline: CmdlineSection = field(default_factory=CmdlineSection)
+
+    def is_empty(self) -> bool:
+        return not self.cmdline.present
+
+
+@dataclass
 class ValidatedConfig:
     schema_version: int = SCHEMA_VERSION
     systemd: SystemdSection = field(default_factory=SystemdSection)
@@ -450,6 +470,7 @@ class ValidatedConfig:
     network: NetworkSection = field(default_factory=NetworkSection)
     security: SecuritySection = field(default_factory=SecuritySection)
     fs: FsSection = field(default_factory=FsSection)
+    kernel: KernelSection = field(default_factory=KernelSection)
 
 
 def validate_doc(doc: dict) -> ValidatedConfig:
@@ -691,6 +712,35 @@ def validate_doc(doc: dict) -> ValidatedConfig:
                 _check_keys(f"fs.mounts[{i}]", item, _ALLOWED_MOUNT_KEYS)
                 cfg.fs.mounts.append(_validate_mount_entry(i, item, seen_names,
                                                            seen_targets))
+
+    kn_raw = doc.get("kernel", {})
+    if kn_raw:
+        if not isinstance(kn_raw, dict):
+            raise SchemaError("[kernel] must be a table")
+        _check_keys("kernel", kn_raw, _ALLOWED_KERNEL)
+        cl_raw = kn_raw.get("cmdline", {})
+        if cl_raw is not None:
+            if not isinstance(cl_raw, dict):
+                raise SchemaError("[kernel.cmdline] must be a table")
+            _check_keys("kernel.cmdline", cl_raw, _ALLOWED_KERNEL_CMDLINE)
+            cfg.kernel.cmdline.present = True
+            append_raw = cl_raw.get("append", [])
+            if not isinstance(append_raw, list):
+                raise SchemaError(
+                    "[kernel.cmdline].append must be an array of strings"
+                )
+            for i, tok in enumerate(append_raw):
+                if not isinstance(tok, str):
+                    raise SchemaError(
+                        f"[kernel.cmdline.append][{i}] must be a string"
+                    )
+                if not CMDLINE_TOKEN_RE.match(tok):
+                    raise SchemaError(
+                        f"[kernel.cmdline.append][{i}] {tok!r} is not a "
+                        f"valid kernel cmdline token (no whitespace; either "
+                        f"`flag` or `key=value`)"
+                    )
+                cfg.kernel.cmdline.append.append(tok)
 
     return cfg
 
@@ -2403,6 +2453,209 @@ def _render_system_toml_with_mounts(
 
 
 # ---------------------------------------------------------------------------
+# Reconciler: kernel.cmdline — declarative Limine kernel cmdline tokens
+# with baseline protection.
+#
+# Posture: reconcile (non-baseline tokens only). Install-time tokens
+# (root=, quiet, splash, …) are baseline-protected forever.
+#
+# Identity = single token string.
+#
+# Live source: /boot/limine.conf (or $SHEDOS_APPLY_BOOT_ROOT/limine.conf).
+# We locate the default entry's `cmdline=` line and parse tokens
+# whitespace-separated.
+# ---------------------------------------------------------------------------
+
+
+_LIMINE_CMDLINE_RE = re.compile(
+    r"^(?P<lead>\s*(?:cmdline|CMD_LINE|KERNEL_CMDLINE)\s*=)\s*(?P<tokens>.*)$",
+    re.MULTILINE,
+)
+
+
+def _read_limine_config() -> tuple[Optional[Path], Optional[str]]:
+    """Return (path, text) for the Limine config or (None, None) if
+    not present. Tries the `boot:` mount first, then the legacy
+    `/boot/limine.conf` location."""
+    root = boot_root()
+    for cand in ("limine.conf", "limine.cfg"):
+        p = root / cand
+        if p.exists():
+            try:
+                return p, p.read_text(encoding="utf-8")
+            except OSError:
+                return p, None
+    return None, None
+
+
+def _parse_limine_cmdline(text: str) -> tuple[Optional[str], Optional[str], list[str]]:
+    """Find the first cmdline assignment line in the Limine config.
+    Returns (whole_line, lead_text, tokens). On no match → (None, None, [])."""
+    m = _LIMINE_CMDLINE_RE.search(text)
+    if not m:
+        return None, None, []
+    line = m.group(0)
+    tokens = m.group("tokens").split()
+    return line, m.group("lead"), tokens
+
+
+def plan_kernel_cmdline(cfg: ValidatedConfig) -> list[Change]:
+    if not cfg.kernel.cmdline.present:
+        return []
+
+    section_name = "cmdline"
+    state_p = state_path(section_name)
+    baseline_p = baseline_path(section_name)
+    config_p = config_path()
+
+    limine_path, limine_text = _read_limine_config()
+    if limine_path is None or limine_text is None:
+        # No Limine config to manage — silently skip (this is a normal
+        # state on systems that use a different bootloader, or in tests
+        # without /boot fixtures).
+        return []
+
+    line, lead, live_tokens = _parse_limine_cmdline(limine_text)
+    if line is None:
+        raise SchemaError(
+            f"could not find a cmdline= line in {limine_path}; "
+            f"unsupported Limine config format. Please file an issue."
+        )
+
+    declared_set: set[tuple] = {(t,) for t in cfg.kernel.cmdline.append}
+    live_set: set[tuple] = {(t,) for t in live_tokens}
+    last_applied: set[tuple] = load_state_set(state_p)
+
+    if baseline_p.exists():
+        baseline = load_state_set(baseline_p)
+    else:
+        baseline = set(live_set)
+        save_state_set(baseline_p, baseline)
+
+    merge = threeway_merge(declared_set, live_set, last_applied, baseline)
+
+    changes: list[Change] = []
+
+    # Adoption-write.
+    if merge.to_adopt:
+        adopted = sorted(t[0] for t in merge.to_adopt)
+        new_append = list(cfg.kernel.cmdline.append) + adopted
+        new_doc_text = _render_system_toml_with_cmdline(config_p, new_append)
+        old_doc_text = config_p.read_text(encoding="utf-8") if config_p.exists() else ""
+        diff_iter = difflib.unified_diff(
+            old_doc_text.splitlines(keepends=True),
+            new_doc_text.splitlines(keepends=True),
+            fromfile="system.toml (current)",
+            tofile="system.toml (after adoption)",
+            lineterm="",
+        )
+        diff = "".join(l if l.endswith("\n") else l + "\n" for l in diff_iter)
+        summary = (f"adopt {len(adopted)} hand-edited cmdline token(s) "
+                   f"into [kernel.cmdline].append")
+
+        def apply_adopt() -> None:
+            atomic_write_system_toml(config_p, new_doc_text)
+
+        def undo_adopt() -> None:
+            atomic_write_text(config_p, old_doc_text, mode=0o644)
+
+        changes.append(Change(
+            kind="~", section="kernel.cmdline (toml)",
+            summary=summary, diff=diff,
+            apply_fn=apply_adopt, undo_fn=undo_adopt,
+        ))
+
+    # Compute target cmdline tokens: baseline + (declared ∪ adopted),
+    # preserving baseline order then appending non-baseline in
+    # original-position order where possible.
+    target_tokens: list[str] = []
+    seen: set[str] = set()
+    # Preserve baseline order.
+    for tok in live_tokens:
+        if (tok,) in baseline and tok not in seen:
+            target_tokens.append(tok)
+            seen.add(tok)
+    # Append declared/adopted non-baseline tokens. Sort for stability.
+    nonbase = sorted({t for t in cfg.kernel.cmdline.append} |
+                     {t[0] for t in merge.to_adopt})
+    for tok in nonbase:
+        if tok not in seen:
+            target_tokens.append(tok)
+            seen.add(tok)
+
+    if target_tokens != live_tokens:
+        new_line = lead + " " + " ".join(target_tokens)
+        new_limine_text = limine_text.replace(line, new_line, 1)
+        diff_iter = difflib.unified_diff(
+            limine_text.splitlines(keepends=True),
+            new_limine_text.splitlines(keepends=True),
+            fromfile=f"{limine_path.name} (current)",
+            tofile=f"{limine_path.name} (declared)",
+            lineterm="",
+        )
+        diff = "".join(l if l.endswith("\n") else l + "\n" for l in diff_iter)
+        n_added = len(merge.to_add)
+        n_removed = len(merge.to_remove)
+        summary = (f"reboot to apply: cmdline +{n_added} -{n_removed} "
+                   f"token(s)")
+
+        def apply_cmdline() -> None:
+            atomic_write_text(limine_path, new_limine_text, mode=0o644)
+            save_state_set(state_p, declared_set | merge.to_adopt)
+
+        def undo_cmdline() -> None:
+            atomic_write_text(limine_path, limine_text, mode=0o644)
+
+        changes.append(Change(
+            kind="~", section="kernel.cmdline",
+            summary=summary, diff=diff,
+            apply_fn=apply_cmdline, undo_fn=undo_cmdline,
+        ))
+    else:
+        # Aligned cmdline. Update state file regardless (records
+        # adoption).
+        if changes:
+            prev = changes[0].apply_fn
+
+            def combined() -> None:
+                if prev is not None:
+                    prev()
+                save_state_set(state_p, declared_set | merge.to_adopt)
+            changes[0].apply_fn = combined
+        else:
+            save_state_set(state_p, declared_set | merge.to_adopt)
+
+    return changes
+
+
+def _render_system_toml_with_cmdline(
+    path: Path,
+    new_append: list[str],
+) -> str:
+    import tomlkit  # noqa: PLC0415
+
+    text = path.read_text(encoding="utf-8") if path.exists() else ""
+    doc = tomlkit.parse(text)
+
+    kernel = doc.get("kernel")
+    if kernel is None:
+        kernel = tomlkit.table()
+        doc["kernel"] = kernel
+    cmdline = kernel.get("cmdline")
+    if cmdline is None:
+        cmdline = tomlkit.table()
+        kernel["cmdline"] = cmdline
+
+    arr = tomlkit.array()
+    arr.multiline(True)
+    for tok in sorted(set(new_append)):
+        arr.append(tok)
+    cmdline["append"] = arr
+
+    return tomlkit.dumps(doc)
+
+
+# ---------------------------------------------------------------------------
 # Aggregate planner
 # ---------------------------------------------------------------------------
 
@@ -2419,6 +2672,7 @@ def build_plan(cfg: ValidatedConfig,
     changes.extend(plan_firewall(cfg))
     changes.extend(plan_keyring(cfg))
     changes.extend(plan_mounts(cfg))
+    changes.extend(plan_kernel_cmdline(cfg))
     return Plan(changes=changes), new_manifest
 
 

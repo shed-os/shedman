@@ -183,10 +183,18 @@ STUB
     _stub_pacman_key "$stubdir" "$fdir"
 
     # Fstab — if the fixture provides initial-fstab, copy it under
-    # $etc/fstab. The env var is set unconditionally; the reconciler
-    # treats a missing file as "no [fs.mounts] plan".
+    # $etc/fstab. Env var set unconditionally; reconciler treats
+    # missing file as "no [fs.mounts] plan".
     if [[ -f $fdir/initial-fstab ]]; then
         cp -a "$fdir/initial-fstab" "$etc/fstab"
+    fi
+
+    # Boot — if the fixture provides initial-boot/, copy under $etc/boot
+    # and point SHEDOS_APPLY_BOOT_ROOT there.
+    local boot_dir=$tmp/boot
+    mkdir -p "$boot_dir"
+    if [[ -d $fdir/initial-boot ]]; then
+        cp -a "$fdir/initial-boot/." "$boot_dir/"
     fi
 
     local rc out
@@ -198,6 +206,7 @@ STUB
         SHEDOS_APPLY_UFW="$stubdir/ufw" \
         SHEDOS_APPLY_PACMAN_KEY="$stubdir/pacman-key" \
         SHEDOS_APPLY_FSTAB_PATH="$etc/fstab" \
+        SHEDOS_APPLY_BOOT_ROOT="$boot_dir" \
         SHEDOS_LIB_ROOT="$repo_root/packaging/shedos-system/tree/usr/lib/shedos" \
         NO_COLOR=1 \
         "$tool" --config "$etc/shedos/system.toml" $APPLY_ARGS 2>&1
@@ -221,6 +230,7 @@ STUB
     _file_eq   "PACMAN_KEY"  "$fdir/expected-pacman-key.txt"  "$tmp/pacman-key.log"        || bad=1
     _file_eq   "SYSTEM_TOML" "$fdir/expected-system.toml"     "$etc/shedos/system.toml"    || bad=1
     _file_eq   "FSTAB"       "$fdir/expected-fstab"           "$etc/fstab"                 || bad=1
+    _file_eq   "LIMINE_CONF" "$fdir/expected-limine.conf"     "$boot_dir/limine.conf"      || bad=1
 
     if (( bad )); then
         echo "FAIL $name"
