@@ -30,6 +30,13 @@ if [[ "${1:-}" == "--help-summary" ]]; then
     exit 0
 fi
 
+# --complete-{bash,zsh} print one flag per line for the shell completers.
+# Keep this list in sync with the argparse/case block below.
+if [[ "${1:-}" == "--complete-bash" || "${1:-}" == "--complete-zsh" ]]; then
+    printf '%s\n' --yes --help --list-snapshots --rollback --history
+    exit 0
+fi
+
 # `shedman update --history` hands off to the upgrade-history TUI so users
 # don't have to remember a second command. Detect early so the TUI owns its
 # own flags (tty guards, fixture env, ...). Stop scanning at `--`.

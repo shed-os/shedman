@@ -52,6 +52,12 @@ if len(sys.argv) > 1 and sys.argv[1] == "--help-summary":
     print("report drift between /etc/shedos/system.toml and live state")
     sys.exit(0)
 
+if len(sys.argv) > 1 and sys.argv[1] in ("--complete-bash", "--complete-zsh"):
+    for _f in ("--config", "--json", "--diff", "--fix", "--waybar",
+               "--tick", "--notify-if-new", "--reset-notify-state", "--help"):
+        print(_f)
+    sys.exit(0)
+
 _LIB_ROOT = os.environ.get("SHEDOS_LIB_ROOT", "/usr/lib/shedos")
 if _LIB_ROOT not in sys.path:
     sys.path.insert(0, _LIB_ROOT)

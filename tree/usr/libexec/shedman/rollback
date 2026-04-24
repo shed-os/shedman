@@ -28,6 +28,11 @@ if [[ "${1:-}" == "--help-summary" ]]; then
     exit 0
 fi
 
+if [[ "${1:-}" == "--complete-bash" || "${1:-}" == "--complete-zsh" ]]; then
+    printf '%s\n' --list --undo --yes --keep-current --help
+    exit 0
+fi
+
 PROG="shedman rollback"
 
 usage() {

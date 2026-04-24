@@ -32,6 +32,11 @@ if len(sys.argv) > 1 and sys.argv[1] == "--help-summary":
     print("reconcile /etc/shedos/system.toml against live state")
     sys.exit(0)
 
+if len(sys.argv) > 1 and sys.argv[1] in ("--complete-bash", "--complete-zsh"):
+    for _f in ("--config", "--yes", "--dry-run", "--validate", "--help"):
+        print(_f)
+    sys.exit(0)
+
 _LIB_ROOT = os.environ.get("SHEDOS_LIB_ROOT", "/usr/lib/shedos")
 if _LIB_ROOT not in sys.path:
     sys.path.insert(0, _LIB_ROOT)

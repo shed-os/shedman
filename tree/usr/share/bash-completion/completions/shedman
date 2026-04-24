@@ -1,0 +1,73 @@
+# bash completion for the shedman unified CLI.
+#
+# Subcommand list is discovered at completion time by globbing
+# /usr/libexec/shedman/* — so packages that drop new subcommands into
+# that directory become completable without reinstalling this file.
+# Filenames prefixed with `_` (internal helpers) are hidden.
+#
+# Per-subcommand flag completion defers to `shedman <cmd>
+# --complete-bash` if the subcommand honors it. Every other subcommand
+# falls back to filename completion.
+#
+# This file is intentionally self-contained: it does not call
+# _init_completion / _filedir from the bash-completion package so that
+# sourcing it in isolation (e.g. under `set -u` in a test harness)
+# works without any other dependency.
+
+_shedman() {
+    local cur prev cword libexec
+    libexec=/usr/libexec/shedman
+    cword=$COMP_CWORD
+    cur=${COMP_WORDS[cword]}
+    prev=${COMP_WORDS[cword-1]-}
+
+    # Position 1: enumerate subcommands + built-ins.
+    if (( cword == 1 )); then
+        local -a subcmds=()
+        local f name
+        if [[ -d $libexec ]]; then
+            for f in "$libexec"/*; do
+                [[ -x $f && -f $f ]] || continue
+                name=${f##*/}
+                [[ $name == _* ]] && continue
+                subcmds+=("$name")
+            done
+        fi
+        subcmds+=(help version)
+        COMPREPLY=( $(compgen -W "${subcmds[*]}" -- "$cur") )
+        return 0
+    fi
+
+    local cmd=${COMP_WORDS[1]}
+
+    # `shedman help <tab>` completes with subcommand names.
+    if [[ $cmd == help && $cword == 2 ]]; then
+        local -a subcmds=()
+        local f name
+        if [[ -d $libexec ]]; then
+            for f in "$libexec"/*; do
+                [[ -x $f && -f $f ]] || continue
+                name=${f##*/}
+                [[ $name == _* ]] && continue
+                subcmds+=("$name")
+            done
+        fi
+        COMPREPLY=( $(compgen -W "${subcmds[*]}" -- "$cur") )
+        return 0
+    fi
+
+    # Delegate to the subcommand's --complete-bash if it honors it.
+    # Otherwise fall back to filename completion.
+    local bin="$libexec/$cmd"
+    if [[ -x $bin ]]; then
+        local flags
+        flags=$("$bin" --complete-bash 2>/dev/null)
+        if [[ -n $flags ]]; then
+            COMPREPLY=( $(compgen -W "$flags" -- "$cur") )
+            return 0
+        fi
+    fi
+    COMPREPLY=( $(compgen -f -- "$cur") )
+}
+
+complete -F _shedman shedman

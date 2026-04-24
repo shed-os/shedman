@@ -1,0 +1,72 @@
+#compdef shedman
+# zsh completion for the shedman unified CLI.
+#
+# Subcommand list is discovered at completion time by globbing
+# /usr/libexec/shedman/* — so packages that drop new subcommands into
+# that directory become completable without reinstalling this file.
+# Filenames prefixed with `_` (internal helpers) are hidden.
+#
+# Per-subcommand argument completion defers to `shedman <cmd>
+# --complete-zsh` if the subcommand honors it. Every other subcommand
+# falls back to filename completion.
+
+_shedman() {
+    local -a _subcmds _builtin _flags
+    local state line
+
+    _builtin=(
+        'help:list subcommands or show --help for <cmd>'
+        'version:print the installed shedos-system version'
+    )
+
+    _subcmds=()
+    if [[ -d /usr/libexec/shedman ]]; then
+        local f name summary
+        for f in /usr/libexec/shedman/*(N); do
+            [[ -x $f && -f $f ]] || continue
+            name=${f:t}
+            [[ $name == _* ]] && continue
+            summary=$("$f" --help-summary 2>/dev/null)
+            if [[ -n $summary ]]; then
+                _subcmds+=("$name:$summary")
+            else
+                _subcmds+=("$name:")
+            fi
+        done
+    fi
+
+    _arguments -C \
+        '1: :->command' \
+        '*:: :->args' \
+    && return 0
+
+    case $state in
+        command)
+            _describe -t builtin 'shedman built-in' _builtin
+            _describe -t subcommands 'shedman subcommand' _subcmds
+            ;;
+        args)
+            local cmd=$words[1]
+            case $cmd in
+                help)
+                    _describe -t subcommands 'shedman subcommand' _subcmds
+                    ;;
+                version|--help|-h|--version|-V)
+                    ;;
+                *)
+                    local bin=/usr/libexec/shedman/$cmd
+                    if [[ -x $bin ]]; then
+                        _flags=( "${(@f)$("$bin" --complete-zsh 2>/dev/null)}" )
+                        if (( ${#_flags} )); then
+                            _arguments "*:: :($_flags)" '*:filename:_files'
+                            return 0
+                        fi
+                    fi
+                    _files
+                    ;;
+            esac
+            ;;
+    esac
+}
+
+_shedman "$@"
