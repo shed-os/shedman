@@ -1,0 +1,6 @@
+schema = 1
+
+# Empty trusted list — even though the baseline FP is locally-signed,
+# the reconciler treats it as invisible (forever). No mutations.
+[security.keyring]
+trusted = []

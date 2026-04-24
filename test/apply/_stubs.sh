@@ -80,3 +80,49 @@ STUB
     chmod +x "$stubdir/ufw"
     : >"$logfile"
 }
+
+# ---------------------------------------------------------------------------
+# _stub_pacman_key
+#
+# Reads $FIXDIR/pacman-key-list-keys.txt for `--list-keys --with-colons`
+# (full GPG colon format expected). `--lsign-key <fp>` is logged as a
+# mutation. A non-zero exit can be requested for a specific fingerprint
+# via $FIXDIR/pacman-key-lsign-fail.txt (one fp per line).
+# ---------------------------------------------------------------------------
+_stub_pacman_key() {
+    local stubdir=$1
+    local fixdir=${2:-}
+    local logfile="$stubdir/../pacman-key.log"
+    cat >"$stubdir/pacman-key" <<STUB
+#!/usr/bin/env bash
+logfile=$logfile
+list_file=${fixdir:+$fixdir/pacman-key-list-keys.txt}
+fail_file=${fixdir:+$fixdir/pacman-key-lsign-fail.txt}
+
+case "\${1:-}" in
+    --list-keys)
+        # Emit fixture content (or empty for "no keys trusted").
+        if [[ -n "\$list_file" && -f "\$list_file" ]]; then
+            cat "\$list_file"
+        fi
+        exit 0
+        ;;
+    --lsign-key)
+        fp="\${2:-}"
+        printf '%s\n' "--lsign-key \$fp" >>"\$logfile"
+        if [[ -n "\$fail_file" && -f "\$fail_file" ]]; then
+            if grep -qx "\$fp" "\$fail_file"; then
+                printf 'gpg: %s: signing failed: No public key\n' "\$fp" >&2
+                exit 2
+            fi
+        fi
+        exit 0
+        ;;
+esac
+
+printf '%s\n' "\$*" >>"\$logfile"
+exit 0
+STUB
+    chmod +x "$stubdir/pacman-key"
+    : >"$logfile"
+}

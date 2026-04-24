@@ -177,10 +177,10 @@ STUB
 
     : >"$tmp/systemctl.log"
 
-    # ufw stub — only generated if the fixture mentions firewall in its
-    # name OR provides ufw-status-numbered.txt OR expected-ufw.txt. The
-    # stub is harmless if the apply doesn't shell out to ufw.
+    # Generate Phase 6A binary stubs unconditionally; they're harmless
+    # if the apply doesn't shell out to them.
     _stub_ufw "$stubdir" "$fdir"
+    _stub_pacman_key "$stubdir" "$fdir"
 
     local rc out
     # shellcheck disable=SC2086
@@ -189,6 +189,7 @@ STUB
         SHEDOS_APPLY_STATE_ROOT=$state \
         SHEDOS_APPLY_SYSTEMCTL="$stubdir/systemctl" \
         SHEDOS_APPLY_UFW="$stubdir/ufw" \
+        SHEDOS_APPLY_PACMAN_KEY="$stubdir/pacman-key" \
         SHEDOS_LIB_ROOT="$repo_root/packaging/shedos-system/tree/usr/lib/shedos" \
         NO_COLOR=1 \
         "$tool" --config "$etc/shedos/system.toml" $APPLY_ARGS 2>&1
@@ -208,8 +209,9 @@ STUB
     _tree_diff "ETC"   "$fdir/expected-etc"   "$etc"   || bad=1
     _tree_diff "STATE" "$fdir/expected-state" "$state" || bad=1
     _file_eq   "SYSTEMCTL" "$fdir/expected-systemctl.txt" "$tmp/systemctl.log" || bad=1
-    _file_eq   "UFW"        "$fdir/expected-ufw.txt"        "$tmp/ufw.log"               || bad=1
-    _file_eq   "SYSTEM_TOML" "$fdir/expected-system.toml"   "$etc/shedos/system.toml"    || bad=1
+    _file_eq   "UFW"         "$fdir/expected-ufw.txt"         "$tmp/ufw.log"               || bad=1
+    _file_eq   "PACMAN_KEY"  "$fdir/expected-pacman-key.txt"  "$tmp/pacman-key.log"        || bad=1
+    _file_eq   "SYSTEM_TOML" "$fdir/expected-system.toml"     "$etc/shedos/system.toml"    || bad=1
 
     if (( bad )); then
         echo "FAIL $name"

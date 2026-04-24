@@ -1,0 +1,7 @@
+schema = 1
+
+# AAAA was previously declared + locally-signed (in last_applied),
+# now removed from TOML. Reconciler must NOT delete the trust;
+# only emit a ⚠ warning Change.
+[security.keyring]
+trusted = []

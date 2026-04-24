@@ -204,7 +204,7 @@ class SchemaError(ValueError):
 
 
 _ALLOWED_TOP = {"schema", "systemd", "drop-ins", "snapper",
-                "pacman", "services", "network"}
+                "pacman", "services", "network", "security"}
 _ALLOWED_SYSTEMD = {"system", "user"}
 _ALLOWED_SYSTEMD_SUB = {"enable", "disable"}
 _ALLOWED_SNAPPER = {"timeline", "cleanup"}
@@ -230,6 +230,10 @@ _ALLOWED_FIREWALL_LOG = {"log", "log-all"}
 # Loose proto allowlist mirroring `man ufw`'s "PROTOCOLS" section. Anything
 # not on this list (e.g. typos like `tpc`) raises a schema error.
 _ALLOWED_FIREWALL_PROTOS = {"tcp", "udp", "ah", "esp", "ipv6", "igmp", "gre"}
+_ALLOWED_SECURITY = {"keyring"}
+_ALLOWED_SECURITY_KEYRING = {"trusted"}
+
+GPG_FINGERPRINT_RE = re.compile(r"^[0-9A-F]{40}$")
 
 UNIT_NAME_RE = re.compile(r"^[A-Za-z0-9@:_.\-\\x]+\.(service|timer|socket|target|mount|path|slice)$")
 DROPIN_KEY_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.\-/]*\.(conf|json|rules|nsswitch|hosts|cfg)$")
@@ -385,6 +389,22 @@ class NetworkSection:
 
 
 @dataclass
+class KeyringSection:
+    """Parsed [security.keyring]. `trusted` is a list of upper-case
+    40-char hex GPG fingerprints we want locally signed."""
+    present: bool = False
+    trusted: list[str] = field(default_factory=list)
+
+
+@dataclass
+class SecuritySection:
+    keyring: KeyringSection = field(default_factory=KeyringSection)
+
+    def is_empty(self) -> bool:
+        return not self.keyring.present
+
+
+@dataclass
 class ValidatedConfig:
     schema_version: int = SCHEMA_VERSION
     systemd: SystemdSection = field(default_factory=SystemdSection)
@@ -393,6 +413,7 @@ class ValidatedConfig:
     pacman: PacmanSection = field(default_factory=PacmanSection)
     services: ServicesSection = field(default_factory=ServicesSection)
     network: NetworkSection = field(default_factory=NetworkSection)
+    security: SecuritySection = field(default_factory=SecuritySection)
 
 
 def validate_doc(doc: dict) -> ValidatedConfig:
@@ -582,6 +603,37 @@ def validate_doc(doc: dict) -> ValidatedConfig:
                 cfg.network.firewall.rules.append(
                     _validate_firewall_rule(i, item)
                 )
+
+    sec_raw = doc.get("security", {})
+    if sec_raw:
+        if not isinstance(sec_raw, dict):
+            raise SchemaError("[security] must be a table")
+        _check_keys("security", sec_raw, _ALLOWED_SECURITY)
+        kr_raw = sec_raw.get("keyring", {})
+        if kr_raw is not None:
+            if not isinstance(kr_raw, dict):
+                raise SchemaError("[security.keyring] must be a table")
+            _check_keys("security.keyring", kr_raw,
+                        _ALLOWED_SECURITY_KEYRING)
+            cfg.security.keyring.present = True
+            trusted_raw = kr_raw.get("trusted", [])
+            if not isinstance(trusted_raw, list):
+                raise SchemaError(
+                    "[security.keyring].trusted must be an array of "
+                    "40-char hex fingerprint strings"
+                )
+            for i, fp in enumerate(trusted_raw):
+                if not isinstance(fp, str):
+                    raise SchemaError(
+                        f"[security.keyring.trusted][{i}] must be a string"
+                    )
+                fp_norm = fp.replace(" ", "").upper()
+                if not GPG_FINGERPRINT_RE.match(fp_norm):
+                    raise SchemaError(
+                        f"[security.keyring.trusted][{i}] {fp!r} is not a "
+                        f"valid 40-char hex GPG fingerprint"
+                    )
+                cfg.security.keyring.trusted.append(fp_norm)
 
     return cfg
 
@@ -1778,6 +1830,200 @@ def _render_system_toml_with_firewall(
 
 
 # ---------------------------------------------------------------------------
+# Reconciler: security.keyring — declarative pacman-key trust with
+# bidirectional adoption.
+#
+# Posture: warn-don't-remove. TOML omission of a previously-managed
+# fingerprint emits a `⚠` Change that logs but never runs
+# `pacman-key --delete`. Users must remove trust by hand.
+#
+# Identity = 40-char upper-hex GPG fingerprint string (no spaces).
+#
+# Live-state source: `pacman-key --list-keys --with-colons`. We treat
+# every `fpr:` record as locally-trusted on this system.
+# ---------------------------------------------------------------------------
+
+
+_PACMAN_KEY_FPR_RE = re.compile(r"^fpr:::::::::([0-9A-F]{40}):", re.MULTILINE)
+
+
+def _list_pacman_key_fingerprints(check: bool = True) -> set[str]:
+    cmd = pacman_key_cmd() + ["--list-keys", "--with-colons"]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True,
+                              timeout=10, check=False)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        if check:
+            raise RuntimeError(f"{cmd}: {e}") from e
+        return set()
+    if proc.returncode != 0:
+        if check:
+            raise RuntimeError(
+                f"{cmd} exited {proc.returncode}: "
+                f"{(proc.stderr or proc.stdout).strip()[:200]}"
+            )
+        return set()
+    return {m.group(1) for m in _PACMAN_KEY_FPR_RE.finditer(proc.stdout)}
+
+
+def plan_keyring(cfg: ValidatedConfig) -> list[Change]:
+    if not cfg.security.keyring.present:
+        return []
+
+    section_name = "keyring"
+    state_p = state_path(section_name)
+    baseline_p = baseline_path(section_name)
+    config_p = config_path()
+
+    declared: set[tuple] = {(fp,) for fp in cfg.security.keyring.trusted}
+    live: set[tuple] = {(fp,) for fp in _list_pacman_key_fingerprints(check=True)}
+    last_applied: set[tuple] = load_state_set(state_p)
+
+    if baseline_p.exists():
+        baseline = load_state_set(baseline_p)
+    else:
+        # First apply: snapshot the entire live keyring as baseline.
+        # The shedos install-time fingerprints become invisible forever.
+        baseline = set(live)
+        save_state_set(baseline_p, baseline)
+
+    merge = threeway_merge(declared, live, last_applied, baseline)
+
+    changes: list[Change] = []
+
+    # Adoption-write: live - baseline - last_applied - declared.
+    if merge.to_adopt:
+        adopted_fps = sorted(t[0] for t in merge.to_adopt)
+        new_trusted = list(cfg.security.keyring.trusted) + adopted_fps
+        new_doc_text = _render_system_toml_with_keyring(config_p, new_trusted)
+        old_doc_text = config_p.read_text(encoding="utf-8") if config_p.exists() else ""
+        diff_iter = difflib.unified_diff(
+            old_doc_text.splitlines(keepends=True),
+            new_doc_text.splitlines(keepends=True),
+            fromfile="system.toml (current)",
+            tofile="system.toml (after adoption)",
+            lineterm="",
+        )
+        diff = "".join(l if l.endswith("\n") else l + "\n" for l in diff_iter)
+        summary = (f"adopt {len(adopted_fps)} pacman-key trusted "
+                   f"fingerprint(s) into [security.keyring]")
+
+        def apply_adopt() -> None:
+            atomic_write_system_toml(config_p, new_doc_text)
+
+        def undo_adopt() -> None:
+            atomic_write_text(config_p, old_doc_text, mode=0o644)
+
+        changes.append(Change(
+            kind="~", section="security.keyring (toml)",
+            summary=summary, diff=diff,
+            apply_fn=apply_adopt, undo_fn=undo_adopt,
+        ))
+
+    # `live` here is "fingerprints that are locally-signed already".
+    # Imported-but-not-signed keys aren't visible to us; we'll discover
+    # they're missing only when `pacman-key --lsign-key` fails. That's
+    # surfaced as a RuntimeError → exit 1 with a pointed message.
+
+    # Warn-don't-remove: items in last_applied but not declared, that
+    # are still live (i.e. not the user already cleaning up by hand).
+    warn_fps = sorted(t[0] for t in merge.to_remove)
+    if warn_fps:
+        for fp in warn_fps:
+            changes.append(Change(
+                kind="~", section="security.keyring",
+                summary=(f"⚠ {fp[:8]}…{fp[-4:]} dropped from TOML but stays "
+                         f"locally-signed (run `pacman-key --delete {fp}` to "
+                         f"actually revoke)"),
+                apply_fn=lambda: None,
+                undo_fn=None,
+            ))
+
+    # We also need to update last_applied even when there are no
+    # mutations — to record the merged "post-apply" set so future
+    # removals work. The state-save needs to happen on adoption-only
+    # paths too.
+    if not changes and not merge.to_add:
+        save_state_set(state_p, declared | merge.to_adopt)
+        return []
+
+    # Live additions: lsign each declared fingerprint not yet trusted.
+    add_fps = sorted(t[0] for t in merge.to_add)
+
+    if add_fps:
+        def apply_lsign() -> None:
+            for fp in add_fps:
+                _pacman_key_run(["--lsign-key", fp])
+            save_state_set(state_p, declared | merge.to_adopt)
+
+        # No undo for lsign — it's idempotent; rollback is no-op.
+        changes.append(Change(
+            kind="+", section="security.keyring",
+            summary=f"locally-sign {len(add_fps)} fingerprint(s)",
+            diff="\n".join(f"  + {fp}" for fp in add_fps) + "\n",
+            apply_fn=apply_lsign,
+        ))
+    else:
+        # Adoption-only or warn-only: still save the merged state.
+        # Splice into the first Change's apply_fn.
+        prev_apply = changes[0].apply_fn
+
+        def combined() -> None:
+            if prev_apply is not None:
+                prev_apply()
+            save_state_set(state_p, declared | merge.to_adopt)
+        changes[0].apply_fn = combined
+
+    return changes
+
+
+def _pacman_key_run(extra_args: list[str], *, check: bool = True) -> tuple[int, str]:
+    cmd = pacman_key_cmd() + extra_args
+    try:
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=30,
+                             check=False)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        if check:
+            raise RuntimeError(f"{cmd}: {e}") from e
+        return 127, str(e)
+    if out.returncode != 0 and check:
+        raise RuntimeError(
+            f"{cmd} exited {out.returncode}: "
+            f"{(out.stderr or out.stdout).strip()[:200]}"
+        )
+    return out.returncode, out.stdout
+
+
+def _render_system_toml_with_keyring(
+    path: Path,
+    new_trusted: list[str],
+) -> str:
+    """Round-trip system.toml replacing the [security.keyring].trusted
+    array with the post-merge fingerprint list. Sorted for determinism."""
+    import tomlkit  # noqa: PLC0415
+
+    text = path.read_text(encoding="utf-8") if path.exists() else ""
+    doc = tomlkit.parse(text)
+
+    security = doc.get("security")
+    if security is None:
+        security = tomlkit.table()
+        doc["security"] = security
+    keyring = security.get("keyring")
+    if keyring is None:
+        keyring = tomlkit.table()
+        security["keyring"] = keyring
+
+    arr = tomlkit.array()
+    arr.multiline(True)
+    for fp in sorted(set(new_trusted)):
+        arr.append(fp)
+    keyring["trusted"] = arr
+
+    return tomlkit.dumps(doc)
+
+
+# ---------------------------------------------------------------------------
 # Aggregate planner
 # ---------------------------------------------------------------------------
 
@@ -1792,6 +2038,7 @@ def build_plan(cfg: ValidatedConfig,
     changes.extend(plan_pacman(cfg))
     changes.extend(plan_services(cfg))
     changes.extend(plan_firewall(cfg))
+    changes.extend(plan_keyring(cfg))
     return Plan(changes=changes), new_manifest
 
 

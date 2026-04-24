@@ -1,0 +1,9 @@
+# Top-of-file comment about declarative state.
+schema = 1
+
+# Trust roots — managed declaratively.
+[security.keyring]
+trusted = [
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC",
+]
