@@ -9,7 +9,7 @@ set -uo pipefail
 
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 repo_root=$(cd -- "$here/../.." && pwd)
-tool=$repo_root/packaging/shedos-system/tree/usr/bin/shedos-upgrade-history
+tool=$repo_root/packaging/shedos-system/tree/usr/libexec/shedman/upgrade-history
 
 if [[ ! -x $tool ]]; then
     echo "FATAL: $tool not executable" >&2

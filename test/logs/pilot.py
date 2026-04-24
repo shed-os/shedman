@@ -32,7 +32,7 @@ from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-TOOL_PATH = REPO_ROOT / "packaging/shedos-system/tree/usr/bin/shedos-logs"
+TOOL_PATH = REPO_ROOT / "packaging/shedos-system/tree/usr/libexec/shedman/logs"
 
 
 def _load_module():
