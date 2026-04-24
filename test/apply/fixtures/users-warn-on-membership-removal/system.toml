@@ -1,0 +1,7 @@
+schema = 1
+
+# shedrack was previously declared in `docker` (in last_applied), but
+# TOML now drops docker. Reconciler must NOT gpasswd -d; emit ⚠ warn.
+[[users]]
+name = "shedrack"
+groups = ["wheel"]

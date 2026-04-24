@@ -1,0 +1,3 @@
+shedrack:x:1000:
+docker:x:1001:
+wheel:x:10:shedrack

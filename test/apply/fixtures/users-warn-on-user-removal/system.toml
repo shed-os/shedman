@@ -1,0 +1,6 @@
+schema = 1
+
+# shedrack was previously declared (in last_applied) but dropped from
+# TOML. Reconciler must NOT userdel; emit ⚠ warn only.
+[[users]]
+name = "root"

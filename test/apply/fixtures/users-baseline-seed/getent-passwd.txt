@@ -1,0 +1,2 @@
+root:x:0:0:root:/root:/bin/bash
+shedrack:x:1000:1000:shedrack:/home/shedrack:/usr/bin/zsh

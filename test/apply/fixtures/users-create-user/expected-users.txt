@@ -1,0 +1,1 @@
+useradd -m -s /usr/bin/zsh -G wheel newuser

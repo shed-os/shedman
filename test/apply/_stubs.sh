@@ -126,3 +126,45 @@ STUB
     chmod +x "$stubdir/pacman-key"
     : >"$logfile"
 }
+
+# ---------------------------------------------------------------------------
+# _stub_users — getent / useradd / groupadd / gpasswd / chsh
+#
+# Reads:
+#   $FIXDIR/getent-passwd.txt   getent passwd output (`name:x:uid:gid:...`)
+#   $FIXDIR/getent-group.txt    getent group output (`name:x:gid:members`)
+# Logs every useradd/groupadd/gpasswd/chsh invocation to
+# $stubdir/../users.log (one argv per line).
+# ---------------------------------------------------------------------------
+_stub_users() {
+    local stubdir=$1
+    local fixdir=${2:-}
+    local logfile="$stubdir/../users.log"
+
+    cat >"$stubdir/getent" <<STUB
+#!/usr/bin/env bash
+table="\${1:-}"
+case "\$table" in
+    passwd)
+        ${fixdir:+if [[ -f "$fixdir/getent-passwd.txt" ]]; then cat "$fixdir/getent-passwd.txt"; fi}
+        exit 0
+        ;;
+    group)
+        ${fixdir:+if [[ -f "$fixdir/getent-group.txt" ]]; then cat "$fixdir/getent-group.txt"; fi}
+        exit 0
+        ;;
+esac
+exit 2
+STUB
+    chmod +x "$stubdir/getent"
+
+    for cmd in useradd groupadd gpasswd chsh; do
+        cat >"$stubdir/$cmd" <<STUB
+#!/usr/bin/env bash
+printf '$cmd %s\n' "\$*" >>$logfile
+exit 0
+STUB
+        chmod +x "$stubdir/$cmd"
+    done
+    : >"$logfile"
+}

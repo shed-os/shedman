@@ -205,7 +205,7 @@ class SchemaError(ValueError):
 
 _ALLOWED_TOP = {"schema", "systemd", "drop-ins", "snapper",
                 "pacman", "services", "network", "security", "fs",
-                "kernel"}
+                "kernel", "users", "groups"}
 _ALLOWED_SYSTEMD = {"system", "user"}
 _ALLOWED_SYSTEMD_SUB = {"enable", "disable"}
 _ALLOWED_SNAPPER = {"timeline", "cleanup"}
@@ -240,6 +240,9 @@ MOUNT_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 _ALLOWED_KERNEL = {"cmdline"}
 _ALLOWED_KERNEL_CMDLINE = {"append"}
 CMDLINE_TOKEN_RE = re.compile(r"^[^=\s]+(=\S+)?$")
+_ALLOWED_USER_KEYS = {"name", "shell", "groups"}
+_ALLOWED_GROUP_KEYS = {"name", "system"}
+USER_NAME_RE = re.compile(r"^[a-z_][a-z0-9_-]*\$?$")
 
 GPG_FINGERPRINT_RE = re.compile(r"^[0-9A-F]{40}$")
 
@@ -460,6 +463,31 @@ class KernelSection:
 
 
 @dataclass
+class UserEntry:
+    name: str
+    shell: Optional[str] = None
+    groups: list[str] = field(default_factory=list)
+
+
+@dataclass
+class GroupEntry:
+    name: str
+    system: bool = False
+
+
+@dataclass
+class UsersSection:
+    present: bool = False
+    users: list[UserEntry] = field(default_factory=list)
+
+
+@dataclass
+class GroupsSection:
+    present: bool = False
+    groups: list[GroupEntry] = field(default_factory=list)
+
+
+@dataclass
 class ValidatedConfig:
     schema_version: int = SCHEMA_VERSION
     systemd: SystemdSection = field(default_factory=SystemdSection)
@@ -471,6 +499,8 @@ class ValidatedConfig:
     security: SecuritySection = field(default_factory=SecuritySection)
     fs: FsSection = field(default_factory=FsSection)
     kernel: KernelSection = field(default_factory=KernelSection)
+    users_sec: UsersSection = field(default_factory=UsersSection)
+    groups_sec: GroupsSection = field(default_factory=GroupsSection)
 
 
 def validate_doc(doc: dict) -> ValidatedConfig:
@@ -741,6 +771,70 @@ def validate_doc(doc: dict) -> ValidatedConfig:
                         f"`flag` or `key=value`)"
                     )
                 cfg.kernel.cmdline.append.append(tok)
+
+    groups_raw = doc.get("groups", [])
+    if groups_raw is not None and groups_raw != []:
+        if not isinstance(groups_raw, list):
+            raise SchemaError("[[groups]] must be an array of tables")
+        cfg.groups_sec.present = True
+        seen_groups: set[str] = set()
+        for i, item in enumerate(groups_raw):
+            if not isinstance(item, dict):
+                raise SchemaError(f"[[groups]][{i}] must be a table")
+            _check_keys(f"groups[{i}]", item, _ALLOWED_GROUP_KEYS)
+            name = item.get("name")
+            if not isinstance(name, str) or not USER_NAME_RE.match(name):
+                raise SchemaError(
+                    f"[[groups]][{i}].name is required and must match "
+                    f"{USER_NAME_RE.pattern}"
+                )
+            if name in seen_groups:
+                raise SchemaError(f"[[groups]][{i}].name {name!r} duplicated")
+            seen_groups.add(name)
+            system = item.get("system", False)
+            if not isinstance(system, bool):
+                raise SchemaError(f"[[groups]][{i}].system must be a bool")
+            cfg.groups_sec.groups.append(GroupEntry(name=name, system=system))
+
+    users_raw = doc.get("users", [])
+    if users_raw is not None and users_raw != []:
+        if not isinstance(users_raw, list):
+            raise SchemaError("[[users]] must be an array of tables")
+        cfg.users_sec.present = True
+        seen_users: set[str] = set()
+        for i, item in enumerate(users_raw):
+            if not isinstance(item, dict):
+                raise SchemaError(f"[[users]][{i}] must be a table")
+            _check_keys(f"users[{i}]", item, _ALLOWED_USER_KEYS)
+            name = item.get("name")
+            if not isinstance(name, str) or not USER_NAME_RE.match(name):
+                raise SchemaError(
+                    f"[[users]][{i}].name is required and must match "
+                    f"{USER_NAME_RE.pattern}"
+                )
+            if name in seen_users:
+                raise SchemaError(f"[[users]][{i}].name {name!r} duplicated")
+            seen_users.add(name)
+            shell = item.get("shell")
+            if shell is not None:
+                if not isinstance(shell, str) or not shell.startswith("/"):
+                    raise SchemaError(
+                        f"[[users]][{i}].shell must be an absolute path"
+                    )
+            groups_field = item.get("groups", [])
+            if not isinstance(groups_field, list):
+                raise SchemaError(f"[[users]][{i}].groups must be an array")
+            normalized_groups: list[str] = []
+            for j, g in enumerate(groups_field):
+                if not isinstance(g, str) or not USER_NAME_RE.match(g):
+                    raise SchemaError(
+                        f"[[users]][{i}].groups[{j}] {g!r} is not a valid "
+                        f"group name"
+                    )
+                normalized_groups.append(g)
+            cfg.users_sec.users.append(UserEntry(
+                name=name, shell=shell, groups=normalized_groups,
+            ))
 
     return cfg
 
@@ -2656,6 +2750,443 @@ def _render_system_toml_with_cmdline(
 
 
 # ---------------------------------------------------------------------------
+# Reconciler: users + groups — strictly additive.
+#
+# Posture: warn-and-preserve-membership. Removing a user/group from
+# TOML never `userdel`/`groupdel`s; removing a group from a user's
+# declared list never `gpasswd -d`s the membership. All removals
+# become ⚠ doctor warnings.
+#
+# Live state from `getent group` / `getent passwd`. Mutations via
+# `groupadd`, `useradd`, `gpasswd -a`. (No `chsh` for now — shell
+# updates are deferred; declared shell is just used at user creation.)
+#
+# Identity tuples:
+#   group:                (group_name,)
+#   user existence:       (user_name,)  via the `users.state` section
+#   group membership:     (user, group) via the `users-memberships.state`
+#                         section
+# ---------------------------------------------------------------------------
+
+
+def _getent_run(table: str, *, check: bool = True) -> list[str]:
+    cmd = ["getent", table]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True,
+                              timeout=10, check=False)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        if check:
+            raise RuntimeError(f"{cmd}: {e}") from e
+        return []
+    if proc.returncode != 0:
+        if check and proc.returncode != 2:
+            raise RuntimeError(
+                f"{cmd} exited {proc.returncode}: "
+                f"{(proc.stderr or proc.stdout).strip()[:200]}"
+            )
+        return []
+    return [l for l in proc.stdout.splitlines() if l]
+
+
+def _live_groups_and_memberships() -> tuple[set[str], set[tuple[str, str]]]:
+    """Return (group_names, memberships).
+    `memberships` is a set of (user, group) tuples reflecting both
+    the explicit gr_mem field and the user's primary group. Primary
+    membership is enumerated by cross-referencing /etc/passwd's gid
+    column with /etc/group entries."""
+    group_names: set[str] = set()
+    gid_to_name: dict[str, str] = {}
+    memberships: set[tuple[str, str]] = set()
+    for line in _getent_run("group", check=False):
+        # name:x:gid:user1,user2
+        parts = line.split(":")
+        if len(parts) < 4:
+            continue
+        gname = parts[0]
+        gid = parts[2]
+        members = parts[3].split(",") if parts[3] else []
+        group_names.add(gname)
+        gid_to_name[gid] = gname
+        for u in members:
+            if u:
+                memberships.add((u, gname))
+    # Primary memberships from passwd.
+    for line in _getent_run("passwd", check=False):
+        parts = line.split(":")
+        if len(parts) < 4:
+            continue
+        uname = parts[0]
+        gid = parts[3]
+        primary = gid_to_name.get(gid)
+        if primary:
+            memberships.add((uname, primary))
+    return group_names, memberships
+
+
+def _live_users() -> set[str]:
+    out: set[str] = set()
+    for line in _getent_run("passwd", check=False):
+        name = line.split(":", 1)[0]
+        if name:
+            out.add(name)
+    return out
+
+
+def plan_groups(cfg: ValidatedConfig) -> list[Change]:
+    if not cfg.groups_sec.present:
+        return []
+
+    section_name = "groups"
+    state_p = state_path(section_name)
+    baseline_p = baseline_path(section_name)
+    config_p = config_path()
+
+    live_groups, _ = _live_groups_and_memberships()
+    declared: set[tuple] = {(g.name,) for g in cfg.groups_sec.groups}
+    live: set[tuple] = {(g,) for g in live_groups}
+    last_applied: set[tuple] = load_state_set(state_p)
+
+    if baseline_p.exists():
+        baseline = load_state_set(baseline_p)
+    else:
+        baseline = set(live)
+        save_state_set(baseline_p, baseline)
+
+    merge = threeway_merge(declared, live, last_applied, baseline)
+
+    changes: list[Change] = []
+
+    if merge.to_adopt:
+        adopted = sorted(t[0] for t in merge.to_adopt)
+        all_groups = list(cfg.groups_sec.groups) + [
+            GroupEntry(name=g, system=False) for g in adopted
+        ]
+        new_doc_text = _render_system_toml_with_groups(config_p, all_groups)
+        old_doc_text = config_p.read_text(encoding="utf-8") if config_p.exists() else ""
+        diff_iter = difflib.unified_diff(
+            old_doc_text.splitlines(keepends=True),
+            new_doc_text.splitlines(keepends=True),
+            fromfile="system.toml (current)",
+            tofile="system.toml (after adoption)",
+            lineterm="",
+        )
+        diff = "".join(l if l.endswith("\n") else l + "\n" for l in diff_iter)
+        summary = f"adopt {len(adopted)} hand-created group(s) into [[groups]]"
+
+        def apply_adopt() -> None:
+            atomic_write_system_toml(config_p, new_doc_text)
+
+        def undo_adopt() -> None:
+            atomic_write_text(config_p, old_doc_text, mode=0o644)
+
+        changes.append(Change(
+            kind="~", section="groups (toml)",
+            summary=summary, diff=diff,
+            apply_fn=apply_adopt, undo_fn=undo_adopt,
+        ))
+
+    # Warn-only on removal.
+    for t in sorted(merge.to_remove):
+        gname = t[0]
+        changes.append(Change(
+            kind="~", section="groups",
+            summary=(f"⚠ {gname!r} dropped from TOML but stays present "
+                     f"(run `sudo groupdel {gname}` to actually remove)"),
+            apply_fn=lambda: None,
+        ))
+
+    # Adds: groupadd.
+    add_groups = sorted(merge.to_add)
+    if add_groups:
+        # Re-resolve each add to its declared GroupEntry to honor `system`.
+        by_name = {g.name: g for g in cfg.groups_sec.groups}
+
+        def apply_groupadd() -> None:
+            for t in add_groups:
+                gname = t[0]
+                ge = by_name.get(gname) or GroupEntry(name=gname)
+                cmd_args = ["groupadd"]
+                if ge.system:
+                    cmd_args.append("--system")
+                cmd_args.append(gname)
+                _run_simple(cmd_args)
+            save_state_set(state_p, declared | merge.to_adopt)
+
+        changes.append(Change(
+            kind="+", section="groups",
+            summary=f"groupadd {len(add_groups)} group(s)",
+            diff="\n".join(f"  + {t[0]}" for t in add_groups) + "\n",
+            apply_fn=apply_groupadd,
+        ))
+    else:
+        # No live mutations — splice state-save into first Change or
+        # save now.
+        if changes:
+            prev = changes[0].apply_fn
+
+            def combined() -> None:
+                if prev is not None:
+                    prev()
+                save_state_set(state_p, declared | merge.to_adopt)
+            changes[0].apply_fn = combined
+        else:
+            save_state_set(state_p, declared | merge.to_adopt)
+
+    return changes
+
+
+def plan_users(cfg: ValidatedConfig) -> list[Change]:
+    if not cfg.users_sec.present:
+        return []
+
+    section_name = "users"
+    membership_section = "users-memberships"
+    state_p = state_path(section_name)
+    baseline_p = baseline_path(section_name)
+    mem_state_p = state_path(membership_section)
+    mem_baseline_p = baseline_path(membership_section)
+    config_p = config_path()
+
+    live_users = _live_users()
+    _, live_memberships = _live_groups_and_memberships()
+
+    declared_users: set[tuple] = {(u.name,) for u in cfg.users_sec.users}
+    declared_memberships: set[tuple] = set()
+    for u in cfg.users_sec.users:
+        for g in u.groups:
+            declared_memberships.add((u.name, g))
+
+    live_users_set: set[tuple] = {(u,) for u in live_users}
+    live_memberships_set: set[tuple] = set(live_memberships)
+
+    last_applied_users = load_state_set(state_p)
+    last_applied_mem = load_state_set(mem_state_p)
+
+    if baseline_p.exists():
+        baseline_users = load_state_set(baseline_p)
+    else:
+        baseline_users = set(live_users_set)
+        save_state_set(baseline_p, baseline_users)
+
+    if mem_baseline_p.exists():
+        baseline_mem = load_state_set(mem_baseline_p)
+    else:
+        baseline_mem = set(live_memberships_set)
+        save_state_set(mem_baseline_p, baseline_mem)
+
+    user_merge = threeway_merge(declared_users, live_users_set,
+                                last_applied_users, baseline_users)
+    mem_merge = threeway_merge(declared_memberships, live_memberships_set,
+                                last_applied_mem, baseline_mem)
+
+    changes: list[Change] = []
+
+    # Adoption-write covers both: hand-added users + hand-added group
+    # memberships. Only one TOML-write Change for the whole section.
+    if user_merge.to_adopt or mem_merge.to_adopt:
+        # Build the post-adoption [[users]] list. Start from declared,
+        # then layer in adopted users + adopted memberships.
+        by_name = {u.name: u for u in cfg.users_sec.users}
+        # Bring in adopted users with empty groups (they'll be filled
+        # in by the membership pass below).
+        for t in user_merge.to_adopt:
+            uname = t[0]
+            if uname not in by_name:
+                by_name[uname] = UserEntry(name=uname)
+        # Adopted group memberships → append to the user's groups list,
+        # but skip baseline memberships (those stay invisible).
+        for u, g in mem_merge.to_adopt:
+            if u not in by_name:
+                # User must exist on the system (it's in live), so
+                # adopt the user with its hand-added group.
+                by_name[u] = UserEntry(name=u)
+            entry = by_name[u]
+            if g not in entry.groups:
+                entry.groups.append(g)
+            entry.groups.sort()
+
+        ordered = sorted(by_name.values(), key=lambda u: u.name)
+        new_doc_text = _render_system_toml_with_users(config_p, ordered)
+        old_doc_text = config_p.read_text(encoding="utf-8") if config_p.exists() else ""
+        diff_iter = difflib.unified_diff(
+            old_doc_text.splitlines(keepends=True),
+            new_doc_text.splitlines(keepends=True),
+            fromfile="system.toml (current)",
+            tofile="system.toml (after adoption)",
+            lineterm="",
+        )
+        diff = "".join(l if l.endswith("\n") else l + "\n" for l in diff_iter)
+        n = len(user_merge.to_adopt) + len(mem_merge.to_adopt)
+        summary = (f"adopt {n} hand-managed user/membership change(s) "
+                   f"into [[users]]")
+
+        def apply_adopt() -> None:
+            atomic_write_system_toml(config_p, new_doc_text)
+
+        def undo_adopt() -> None:
+            atomic_write_text(config_p, old_doc_text, mode=0o644)
+
+        changes.append(Change(
+            kind="~", section="users (toml)",
+            summary=summary, diff=diff,
+            apply_fn=apply_adopt, undo_fn=undo_adopt,
+        ))
+
+    # Warn-only on removal of users or memberships.
+    for t in sorted(user_merge.to_remove):
+        uname = t[0]
+        changes.append(Change(
+            kind="~", section="users",
+            summary=(f"⚠ {uname!r} dropped from TOML but stays as a system "
+                     f"account (no auto-userdel; remove by hand if intended)"),
+            apply_fn=lambda: None,
+        ))
+    for u, g in sorted(mem_merge.to_remove):
+        changes.append(Change(
+            kind="~", section="users",
+            summary=(f"⚠ {u!r} → {g!r} membership dropped from TOML but "
+                     f"stays in /etc/group (no auto-gpasswd-d)"),
+            apply_fn=lambda: None,
+        ))
+
+    # User creation: useradd for each declared user not yet present.
+    by_name_decl = {u.name: u for u in cfg.users_sec.users}
+    user_adds = sorted(user_merge.to_add)
+    mem_adds = sorted(mem_merge.to_add)
+
+    if user_adds or mem_adds:
+        # Memberships handled by `useradd -G` shouldn't also fire as
+        # separate `gpasswd -a` calls. Build the covered set.
+        covered_by_useradd: set[tuple[str, str]] = set()
+        for t in user_adds:
+            uname = t[0]
+            entry = by_name_decl.get(uname)
+            if entry:
+                for g in entry.groups:
+                    covered_by_useradd.add((uname, g))
+        deferred_mem_adds = [m for m in mem_adds
+                             if m not in covered_by_useradd]
+
+        def apply_users() -> None:
+            for t in user_adds:
+                uname = t[0]
+                entry = by_name_decl.get(uname) or UserEntry(name=uname)
+                cmd_args = ["useradd", "-m"]
+                if entry.shell:
+                    cmd_args += ["-s", entry.shell]
+                if entry.groups:
+                    cmd_args += ["-G", ",".join(entry.groups)]
+                cmd_args.append(uname)
+                _run_simple(cmd_args, idempotent_exit=9)
+            for u, g in deferred_mem_adds:
+                _run_simple(["gpasswd", "-a", u, g], idempotent_exit=3)
+            save_state_set(state_p, declared_users | user_merge.to_adopt)
+            save_state_set(mem_state_p, declared_memberships |
+                           mem_merge.to_adopt)
+
+        diff_lines = []
+        for t in user_adds:
+            diff_lines.append(f"  + useradd {t[0]}")
+        for u, g in deferred_mem_adds:
+            diff_lines.append(f"  + gpasswd -a {u} {g}")
+        n_add = len(user_adds) + len(deferred_mem_adds)
+        changes.append(Change(
+            kind="+", section="users",
+            summary=f"add {n_add} user/membership change(s)",
+            diff="\n".join(diff_lines) + "\n",
+            apply_fn=apply_users,
+        ))
+    else:
+        # State-save splice for adoption-only or warn-only paths.
+        if changes:
+            prev = changes[0].apply_fn
+
+            def combined() -> None:
+                if prev is not None:
+                    prev()
+                save_state_set(state_p, declared_users | user_merge.to_adopt)
+                save_state_set(mem_state_p, declared_memberships |
+                               mem_merge.to_adopt)
+            changes[0].apply_fn = combined
+        else:
+            save_state_set(state_p, declared_users | user_merge.to_adopt)
+            save_state_set(mem_state_p, declared_memberships |
+                           mem_merge.to_adopt)
+
+    return changes
+
+
+def _run_simple(cmd: list[str], *, check: bool = True,
+                idempotent_exit: Optional[int] = None) -> tuple[int, str]:
+    """Run a simple subprocess command with timeout. If
+    `idempotent_exit` is set, treat that exit code as success
+    (e.g. groupadd returns 9 for 'group already exists', which we
+    silently accept on idempotent rerun)."""
+    try:
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=30,
+                             check=False)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        if check:
+            raise RuntimeError(f"{cmd}: {e}") from e
+        return 127, str(e)
+    if out.returncode == 0:
+        return 0, out.stdout
+    if idempotent_exit is not None and out.returncode == idempotent_exit:
+        return out.returncode, out.stdout
+    if check:
+        raise RuntimeError(
+            f"{cmd} exited {out.returncode}: "
+            f"{(out.stderr or out.stdout).strip()[:200]}"
+        )
+    return out.returncode, out.stdout
+
+
+def _render_system_toml_with_groups(
+    path: Path,
+    new_groups: list[GroupEntry],
+) -> str:
+    import tomlkit  # noqa: PLC0415
+
+    text = path.read_text(encoding="utf-8") if path.exists() else ""
+    doc = tomlkit.parse(text)
+
+    aot = tomlkit.aot()
+    for g in sorted(new_groups, key=lambda x: x.name):
+        t = tomlkit.table()
+        t.add("name", g.name)
+        if g.system:
+            t.add("system", True)
+        aot.append(t)
+    doc["groups"] = aot
+    return tomlkit.dumps(doc)
+
+
+def _render_system_toml_with_users(
+    path: Path,
+    new_users: list[UserEntry],
+) -> str:
+    import tomlkit  # noqa: PLC0415
+
+    text = path.read_text(encoding="utf-8") if path.exists() else ""
+    doc = tomlkit.parse(text)
+
+    aot = tomlkit.aot()
+    for u in sorted(new_users, key=lambda x: x.name):
+        t = tomlkit.table()
+        t.add("name", u.name)
+        if u.shell is not None:
+            t.add("shell", u.shell)
+        if u.groups:
+            arr = tomlkit.array()
+            for g in u.groups:
+                arr.append(g)
+            t.add("groups", arr)
+        aot.append(t)
+    doc["users"] = aot
+    return tomlkit.dumps(doc)
+
+
+# ---------------------------------------------------------------------------
 # Aggregate planner
 # ---------------------------------------------------------------------------
 
@@ -2673,6 +3204,8 @@ def build_plan(cfg: ValidatedConfig,
     changes.extend(plan_keyring(cfg))
     changes.extend(plan_mounts(cfg))
     changes.extend(plan_kernel_cmdline(cfg))
+    changes.extend(plan_groups(cfg))
+    changes.extend(plan_users(cfg))
     return Plan(changes=changes), new_manifest
 
 

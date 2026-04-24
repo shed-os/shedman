@@ -1,0 +1,7 @@
+schema = 1
+
+# shedrack is in `wheel` (baseline). TOML doesn't list wheel — but
+# baseline protection means wheel stays, no warning. Zero changes.
+[[users]]
+name = "shedrack"
+groups = ["docker"]

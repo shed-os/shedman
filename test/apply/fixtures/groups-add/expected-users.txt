@@ -1,0 +1,2 @@
+groupadd kvm
+groupadd --system shedos-build

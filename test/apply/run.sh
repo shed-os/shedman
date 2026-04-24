@@ -181,6 +181,7 @@ STUB
     # if the apply doesn't shell out to them.
     _stub_ufw "$stubdir" "$fdir"
     _stub_pacman_key "$stubdir" "$fdir"
+    _stub_users "$stubdir" "$fdir"
 
     # Fstab — if the fixture provides initial-fstab, copy it under
     # $etc/fstab. Env var set unconditionally; reconciler treats
@@ -207,6 +208,7 @@ STUB
         SHEDOS_APPLY_PACMAN_KEY="$stubdir/pacman-key" \
         SHEDOS_APPLY_FSTAB_PATH="$etc/fstab" \
         SHEDOS_APPLY_BOOT_ROOT="$boot_dir" \
+        PATH="$stubdir:$PATH" \
         SHEDOS_LIB_ROOT="$repo_root/packaging/shedos-system/tree/usr/lib/shedos" \
         NO_COLOR=1 \
         "$tool" --config "$etc/shedos/system.toml" $APPLY_ARGS 2>&1
@@ -231,6 +233,7 @@ STUB
     _file_eq   "SYSTEM_TOML" "$fdir/expected-system.toml"     "$etc/shedos/system.toml"    || bad=1
     _file_eq   "FSTAB"       "$fdir/expected-fstab"           "$etc/fstab"                 || bad=1
     _file_eq   "LIMINE_CONF" "$fdir/expected-limine.conf"     "$boot_dir/limine.conf"      || bad=1
+    _file_eq   "USERS"       "$fdir/expected-users.txt"       "$tmp/users.log"             || bad=1
 
     if (( bad )); then
         echo "FAIL $name"

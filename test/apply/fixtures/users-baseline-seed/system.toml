@@ -1,0 +1,8 @@
+schema = 1
+
+[[groups]]
+name = "docker"
+
+[[users]]
+name = "shedrack"
+groups = ["wheel", "docker"]

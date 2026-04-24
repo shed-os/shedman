@@ -1,0 +1,7 @@
+schema = 1
+
+[[groups]]
+name = "devops"
+
+[[groups]]
+name = "wheel"

@@ -1,0 +1,8 @@
+schema = 1
+
+[[groups]]
+name = "kvm"
+
+[[groups]]
+name = "shedos-build"
+system = true

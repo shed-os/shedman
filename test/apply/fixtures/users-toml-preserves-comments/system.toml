@@ -1,0 +1,6 @@
+# Top comment.
+schema = 1
+
+# Group comment.
+[[groups]]
+name = "wheel"

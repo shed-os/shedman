@@ -1,0 +1,6 @@
+schema = 1
+
+[[users]]
+name = "newuser"
+shell = "/usr/bin/zsh"
+groups = ["wheel"]
