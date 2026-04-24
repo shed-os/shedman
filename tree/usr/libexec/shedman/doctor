@@ -53,8 +53,9 @@ if len(sys.argv) > 1 and sys.argv[1] == "--help-summary":
     sys.exit(0)
 
 if len(sys.argv) > 1 and sys.argv[1] in ("--complete-bash", "--complete-zsh"):
-    for _f in ("--config", "--json", "--diff", "--fix", "--waybar",
-               "--tick", "--notify-if-new", "--reset-notify-state", "--help"):
+    for _f in ("--config", "-c", "--json", "-j", "--diff", "-d",
+               "--fix", "-f", "--waybar", "--tick", "--notify-if-new",
+               "--reset-notify-state", "--help", "-h"):
         print(_f)
     sys.exit(0)
 
@@ -239,15 +240,15 @@ def main() -> int:
         prog="shedman doctor",
         description="Report drift between /etc/shedos/system.toml and live state.",
     )
-    parser.add_argument("--config", type=Path, default=None,
+    parser.add_argument("--config", "-c", type=Path, default=None,
                         help="path to system.toml "
                              "(default: /etc/shedos/system.toml)")
     mode = parser.add_mutually_exclusive_group()
-    mode.add_argument("--json", action="store_true",
+    mode.add_argument("--json", "-j", action="store_true",
                       help="emit drift report as JSON")
-    mode.add_argument("--diff", action="store_true",
+    mode.add_argument("--diff", "-d", action="store_true",
                       help="emit unified diffs for each drift entry")
-    mode.add_argument("--fix", action="store_true",
+    mode.add_argument("--fix", "-f", action="store_true",
                       help="delegate to `shedman apply --yes`")
     mode.add_argument("--waybar", action="store_true",
                       help="emit waybar custom-module JSON (always exits 0)")

@@ -184,7 +184,7 @@ def main(argv: list[str] | None = None) -> int:
         prog="shedman status",
         description="Aggregate dashboard across the four waybar signals.",
     )
-    parser.add_argument("--json", action="store_true",
+    parser.add_argument("--json", "-j", action="store_true",
                         help="emit aggregated payload as JSON")
     args = parser.parse_args(av)
 

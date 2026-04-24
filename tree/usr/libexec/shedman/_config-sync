@@ -59,7 +59,7 @@ explicit 3-way merge. A file the user has edited is never overwritten; at
 worst a .shedosnew file is written alongside (exactly like pacman's .pacnew).
 
 Options:
-  --dry-run            Print what would happen, change nothing.
+  -n, --dry-run        Print what would happen, change nothing.
   -y, --yes            Skip the apply prompt. Conflicts still drop
                        .shedosnew files (NOT auto-resolved — the tool
                        never silently picks between your edits and
@@ -78,7 +78,7 @@ EOF
 
 for arg in "$@"; do
     case "$arg" in
-        --dry-run) DRY_RUN=1 ;;
+        -n|--dry-run) DRY_RUN=1 ;;
         -y|--yes) YES=1 ;;
         --rebuild-manifest) REBUILD_MANIFEST=1 ;;
         -h|--help) usage; exit 0 ;;

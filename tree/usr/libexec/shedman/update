@@ -33,7 +33,8 @@ fi
 # --complete-{bash,zsh} print one flag per line for the shell completers.
 # Keep this list in sync with the argparse/case block below.
 if [[ "${1:-}" == "--complete-bash" || "${1:-}" == "--complete-zsh" ]]; then
-    printf '%s\n' --yes --help --list-snapshots --rollback --history
+    printf '%s\n' --yes -y --help -h --list-snapshots -l \
+        --rollback -r --history
     exit 0
 fi
 
@@ -62,9 +63,9 @@ ROLLBACK_TARGET=""
 
 usage() {
     cat <<'EOF'
-Usage: shedman update [--yes] [--help]
-       shedman update --list-snapshots
-       shedman update --rollback [N]
+Usage: shedman update [-y|--yes] [-h|--help]
+       shedman update -l|--list-snapshots
+       shedman update -r|--rollback [N]
        shedman update --history
 
 Interactive upgrade wrapper for ShedOS: pacman -Syu → yay -Sua → shedman config --sync.
@@ -72,18 +73,18 @@ Every upgrade is bracketed by a snapper pre/post btrfs snapshot pair so you
 can roll back to the pre-upgrade state if something breaks.
 
 Options:
-  -y, --yes         Unattended mode. Skip prompts, pass --noconfirm to pacman/yay,
-                    and --yes to `shedman config --sync`. Conflicts still drop
-                    .shedosnew files instead of overwriting your edits — no
-                    silent data loss. Intended for cron/systemd-timer driven
-                    upgrades on trusted systems.
-  --list-snapshots  Print recent snapper snapshots. Use this to find a
-                    pre-upgrade snapshot number to pass to --rollback.
-  --rollback [N]    Roll back to snapshot N (or prompt interactively if N is
-                    omitted). Delegates to `shedman rollback`; requires root.
-                    Reboot is required before the rollback takes effect.
-  --history         Open the upgrade-history TUI (delegates to shedman upgrade-history).
-  -h, --help        This message.
+  -y, --yes             Unattended mode. Skip prompts, pass --noconfirm to pacman/yay,
+                        and --yes to `shedman config --sync`. Conflicts still drop
+                        .shedosnew files instead of overwriting your edits — no
+                        silent data loss. Intended for cron/systemd-timer driven
+                        upgrades on trusted systems.
+  -l, --list-snapshots  Print recent snapper snapshots. Use this to find a
+                        pre-upgrade snapshot number to pass to --rollback.
+  -r, --rollback [N]    Roll back to snapshot N (or prompt interactively if N is
+                        omitted). Delegates to `shedman rollback`; requires root.
+                        Reboot is required before the rollback takes effect.
+  --history             Open the upgrade-history TUI (delegates to shedman upgrade-history).
+  -h, --help            This message.
 
 Run without flags for the normal interactive flow (default answer is N
 at every prompt).
@@ -95,8 +96,8 @@ while (( $# )); do
     case "$1" in
         -y|--yes) YES=1 ;;
         -h|--help) usage; exit 0 ;;
-        --list-snapshots) ACTION=list-snapshots ;;
-        --rollback)
+        -l|--list-snapshots) ACTION=list-snapshots ;;
+        -r|--rollback)
             ACTION=rollback
             # An optional positional number may follow.
             if [[ ${2:-} =~ ^[0-9]+$ ]]; then

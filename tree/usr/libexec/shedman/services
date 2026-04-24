@@ -32,14 +32,14 @@ EXPECTED=(
 FIX=0
 for arg in "$@"; do
     case "$arg" in
-        --fix) FIX=1 ;;
+        -f|--fix) FIX=1 ;;
         -h|--help)
             cat <<EOF
-Usage: shedman services [--fix]
+Usage: shedman services [-f|--fix]
 
-  --fix    Enable and start any expected unit that isn't currently enabled
-           or running. Requires sudo.
-           Also runs \`initdb\` if the postgres cluster is missing.
+  -f, --fix    Enable and start any expected unit that isn't currently enabled
+               or running. Requires sudo.
+               Also runs \`initdb\` if the postgres cluster is missing.
 
 Without --fix, just prints a status table.
 EOF

@@ -29,7 +29,8 @@ if [[ "${1:-}" == "--help-summary" ]]; then
 fi
 
 if [[ "${1:-}" == "--complete-bash" || "${1:-}" == "--complete-zsh" ]]; then
-    printf '%s\n' --list --undo --yes --keep-current --help
+    printf '%s\n' --list -l --undo -u --yes -y --keep-current -k \
+        --help -h
     exit 0
 fi
 
@@ -37,26 +38,26 @@ PROG="shedman rollback"
 
 usage() {
     cat <<EOF
-Usage: shedman rollback [--yes] [--keep-current] <snapshot-number>
-       shedman rollback --list
-       shedman rollback --undo
+Usage: shedman rollback [-y|--yes] [-k|--keep-current] <snapshot-number>
+       shedman rollback -l|--list
+       shedman rollback -u|--undo
 
 Restore the root filesystem from a snapper snapshot. Requires root.
 
 Arguments:
-  <snapshot-number>  Snapper snapshot number (see --list). Typically this
-                     is a "pre" snapshot from a `shedman update` run.
+  <snapshot-number>      Snapper snapshot number (see --list). Typically this
+                         is a "pre" snapshot from a \`shedman update\` run.
 
 Options:
-  --list             Show recent snapper snapshots and exit.
-  --undo             Roll the last rollback back — promotes the most recent
-                     @.rollback-<ts> backup to become @ again.
-  --keep-current     Don't delete the prior @.rollback-<ts> backup after
-                     confirming the rollback boot. Default is to keep it
-                     until the next rollback anyway; this flag is only
-                     meaningful paired with --undo.
-  --yes              Skip the "are you sure" confirmation prompt.
-  -h, --help         This message.
+  -l, --list             Show recent snapper snapshots and exit.
+  -u, --undo             Roll the last rollback back — promotes the most recent
+                         @.rollback-<ts> backup to become @ again.
+  -k, --keep-current     Don't delete the prior @.rollback-<ts> backup after
+                         confirming the rollback boot. Default is to keep it
+                         until the next rollback anyway; this flag is only
+                         meaningful paired with --undo.
+  -y, --yes              Skip the "are you sure" confirmation prompt.
+  -h, --help             This message.
 
 Safety:
   - The current @ is renamed (not deleted) to @.rollback-<timestamp> so you
@@ -193,10 +194,10 @@ main() {
     local action="" target="" yes=0 keep=0
     while (( $# )); do
         case $1 in
-            --list) action=list ;;
-            --undo) action=undo ;;
+            -l|--list) action=list ;;
+            -u|--undo) action=undo ;;
             -y|--yes) yes=1 ;;
-            --keep-current) keep=1 ;;
+            -k|--keep-current) keep=1 ;;
             -h|--help) usage; exit 0 ;;
             --) shift; break ;;
             -*) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;

@@ -149,6 +149,8 @@ fi
 
 # T5: Every completion-enabled real subcommand produces a non-empty
 #     flag list via --complete-bash.
+# T5b: Each of those subcommands emits at least one single-letter short
+#      flag, so `shedman <cmd> -<tab>` works alongside long flags.
 for cmd in update apply doctor rollback; do
     real=$repo_root/packaging/shedos-system/tree/usr/libexec/shedman/$cmd
     if [[ ! -x $real ]]; then
@@ -160,6 +162,11 @@ for cmd in update apply doctor rollback; do
         _fail T5_real_"$cmd" "--complete-bash emitted nothing"
     else
         _ok T5_real_"$cmd"
+    fi
+    if grep -Eq '^-[a-zA-Z]$' <<<"$out"; then
+        _ok T5b_shorts_"$cmd"
+    else
+        _fail T5b_shorts_"$cmd" "no single-letter short in: $out"
     fi
 done
 

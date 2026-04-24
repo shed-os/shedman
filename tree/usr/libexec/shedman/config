@@ -9,12 +9,12 @@ LIBEXEC=/usr/libexec/shedman
 
 usage() {
     cat <<'EOF'
-Usage: shedman config --sync   [options]
-       shedman config --review [file]
+Usage: shedman config -s|--sync   [options]
+       shedman config -r|--review [file]
 
-  --sync    Seed or refresh packaged defaults in $HOME via 3-way merge.
-            Conflicts land as `<file>.shedosnew` for later review.
-  --review  Open the merge TUI to resolve `.shedosnew` conflicts.
+  -s, --sync    Seed or refresh packaged defaults in $HOME via 3-way merge.
+                Conflicts land as `<file>.shedosnew` for later review.
+  -r, --review  Open the merge TUI to resolve `.shedosnew` conflicts.
 
 Options pass through to the underlying tool; run
 `shedman config --sync --help` or `shedman config --review --help`
@@ -31,11 +31,11 @@ case "${1:-}" in
         usage
         exit 0
         ;;
-    --sync|sync)
+    -s|--sync|sync)
         shift
         exec "$LIBEXEC/_config-sync" "$@"
         ;;
-    --review|review)
+    -r|--review|review)
         shift
         exec "$LIBEXEC/_config-review" "$@"
         ;;

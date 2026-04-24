@@ -33,7 +33,8 @@ if len(sys.argv) > 1 and sys.argv[1] == "--help-summary":
     sys.exit(0)
 
 if len(sys.argv) > 1 and sys.argv[1] in ("--complete-bash", "--complete-zsh"):
-    for _f in ("--config", "--yes", "--dry-run", "--validate", "--help"):
+    for _f in ("--config", "-c", "--yes", "-y", "--dry-run", "-n",
+               "--validate", "--help", "-h"):
         print(_f)
     sys.exit(0)
 
@@ -116,12 +117,12 @@ def main() -> int:
         prog="shedman apply",
         description="Reconcile /etc/shedos/system.toml against live state.",
     )
-    parser.add_argument("--config", type=Path, default=None,
+    parser.add_argument("--config", "-c", type=Path, default=None,
                         help="path to system.toml (default: "
                              "/etc/shedos/system.toml)")
     parser.add_argument("--yes", "-y", action="store_true",
                         help="apply without prompting")
-    parser.add_argument("--dry-run", action="store_true",
+    parser.add_argument("--dry-run", "-n", action="store_true",
                         help="print the plan and exit (no prompt, no apply)")
     parser.add_argument("--validate", action="store_true",
                         help="parse + validate the TOML and exit 0 if OK, "
