@@ -1,0 +1,18 @@
+schema = 1
+
+[network.firewall]
+enabled = true
+incoming = "deny"
+outgoing = "allow"
+
+[[network.firewall.rules]]
+action = "allow"
+port = 22
+proto = "tcp"
+comment = "ssh"
+
+[[network.firewall.rules]]
+action = "allow"
+port = 9090
+proto = "tcp"
+comment = "dev server"

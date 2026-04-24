@@ -1,0 +1,8 @@
+schema = 1
+
+[network.firewall]
+enabled = true
+
+[[network.firewall.rules]]
+action = "allow"
+app = "OpenSSH"

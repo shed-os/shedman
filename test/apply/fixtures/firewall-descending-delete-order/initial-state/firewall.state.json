@@ -1,0 +1,10 @@
+{
+  "schema": 1,
+  "items": [
+    ["allow", "in", null, null, null, null, null, null, 22, "tcp", null],
+    ["allow", "in", null, null, null, null, null, null, 80, "tcp", null],
+    ["allow", "in", null, null, null, null, null, null, 443, "tcp", null],
+    ["allow", "in", null, null, null, null, null, null, 5432, "tcp", null],
+    ["allow", "in", null, null, null, null, null, null, 9090, "tcp", null]
+  ]
+}

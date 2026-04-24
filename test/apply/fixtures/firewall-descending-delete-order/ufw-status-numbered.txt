@@ -1,0 +1,9 @@
+Status: active
+
+     To                         Action      From
+     --                         ------      ----
+[ 1] 22/tcp                     ALLOW IN    Anywhere                   # ssh
+[ 2] 80/tcp                     ALLOW IN    Anywhere                   # http
+[ 3] 443/tcp                    ALLOW IN    Anywhere                   # https
+[ 4] 5432/tcp                   ALLOW IN    Anywhere                   # postgres
+[ 5] 9090/tcp                   ALLOW IN    Anywhere                   # prom

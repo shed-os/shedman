@@ -1,0 +1,5 @@
+Status: active
+
+     To                         Action      From
+     --                         ------      ----
+[ 1] this is not a valid ufw line shape at all

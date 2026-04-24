@@ -1,0 +1,16 @@
+schema = 1
+
+[network.firewall]
+enabled = true
+incoming = "deny"
+outgoing = "allow"
+
+[[network.firewall.rules]]
+action = "allow"
+direction = "in"
+from = "192.168.1.0/24"
+to = "any"
+to-port = 5432
+proto = "tcp"
+log = "log"
+comment = "lan to postgres"

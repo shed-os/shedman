@@ -1,0 +1,7 @@
+schema = 1
+
+[network.firewall]
+enabled = true
+incoming = "deny"
+outgoing = "allow"
+routed = "deny"

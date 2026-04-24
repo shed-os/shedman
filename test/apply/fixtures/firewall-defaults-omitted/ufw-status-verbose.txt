@@ -1,0 +1,3 @@
+Status: active
+Logging: on (low)
+Default: reject (incoming), reject (outgoing), reject (routed)

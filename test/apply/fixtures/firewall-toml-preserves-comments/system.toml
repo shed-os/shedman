@@ -1,0 +1,15 @@
+# Top-level comment about ShedOS declarative state.
+# This MUST round-trip byte-identical after a firewall adoption-write.
+schema = 1
+
+# Firewall section — managed declaratively.
+[network.firewall]
+enabled = true
+incoming = "deny"
+outgoing = "allow"
+
+[[network.firewall.rules]]
+action = "allow"
+port = 22
+proto = "tcp"
+comment = "ssh"

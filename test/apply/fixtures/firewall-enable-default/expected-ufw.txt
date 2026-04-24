@@ -1,0 +1,4 @@
+default deny incoming
+default allow outgoing
+default deny routed
+enable

@@ -1,0 +1,6 @@
+{
+  "schema": 1,
+  "items": [
+    ["allow", "in", null, null, null, null, null, null, 22, "tcp", null]
+  ]
+}

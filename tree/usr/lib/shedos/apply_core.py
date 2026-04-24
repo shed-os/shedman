@@ -16,7 +16,11 @@ Env vars (all shared with shedos-apply):
 
     SHEDOS_APPLY_ETC_ROOT       replaces /etc
     SHEDOS_APPLY_STATE_ROOT     replaces /var/lib/shedos
+    SHEDOS_APPLY_BOOT_ROOT      replaces /boot
     SHEDOS_APPLY_SYSTEMCTL      replaces "systemctl" (shlex-split)
+    SHEDOS_APPLY_UFW            replaces "ufw" (shlex-split)
+    SHEDOS_APPLY_PACMAN_KEY     replaces "pacman-key" (shlex-split)
+    SHEDOS_APPLY_FSTAB_PATH     replaces /etc/fstab
 """
 
 from __future__ import annotations
@@ -57,12 +61,47 @@ def systemctl_cmd() -> list[str]:
     return shlex.split(raw)
 
 
+def boot_root() -> Path:
+    return Path(os.environ.get("SHEDOS_APPLY_BOOT_ROOT", "/boot"))
+
+
+def ufw_cmd() -> list[str]:
+    raw = os.environ.get("SHEDOS_APPLY_UFW", "ufw")
+    return shlex.split(raw)
+
+
+def pacman_key_cmd() -> list[str]:
+    raw = os.environ.get("SHEDOS_APPLY_PACMAN_KEY", "pacman-key")
+    return shlex.split(raw)
+
+
+def fstab_path() -> Path:
+    raw = os.environ.get("SHEDOS_APPLY_FSTAB_PATH")
+    if raw:
+        return Path(raw)
+    return etc_root() / "fstab"
+
+
 def config_path() -> Path:
     return etc_root() / "shedos" / "system.toml"
 
 
 def manifest_path() -> Path:
     return state_root() / "apply.state.json"
+
+
+def baseline_path(section: str) -> Path:
+    """Per-section baseline file. Snapshotted on first apply, never
+    rewritten — represents the install-time state Phase 6A reconcilers
+    are invisible to."""
+    return state_root() / f"{section}.baseline.json"
+
+
+def state_path(section: str) -> Path:
+    """Per-section last-applied state file. Updated every successful
+    apply; drives the three-way diff that distinguishes 'remove via
+    TOML' from 'adopt via raw tool'."""
+    return state_root() / f"{section}.state.json"
 
 
 # ---------------------------------------------------------------------------
@@ -165,7 +204,7 @@ class SchemaError(ValueError):
 
 
 _ALLOWED_TOP = {"schema", "systemd", "drop-ins", "snapper",
-                "pacman", "services"}
+                "pacman", "services", "network"}
 _ALLOWED_SYSTEMD = {"system", "user"}
 _ALLOWED_SYSTEMD_SUB = {"enable", "disable"}
 _ALLOWED_SNAPPER = {"timeline", "cleanup"}
@@ -177,6 +216,20 @@ _ALLOWED_PACMAN = {"repos"}
 _ALLOWED_PACMAN_REPO_KEYS = {"server", "siglevel"}
 _ALLOWED_SERVICES = {"postgresql"}
 _ALLOWED_SERVICES_POSTGRES = {"auto-init", "per-user-db"}
+_ALLOWED_NETWORK = {"firewall"}
+_ALLOWED_FIREWALL_TOP = {"enabled", "incoming", "outgoing", "routed", "rules"}
+_ALLOWED_FIREWALL_RULE_KEYS = {
+    "action", "direction", "interface", "log",
+    "from", "to", "from-port", "to-port", "port", "proto", "app",
+    "comment",
+}
+_ALLOWED_FIREWALL_DEFAULT_POLICIES = {"allow", "deny", "reject"}
+_ALLOWED_FIREWALL_RULE_ACTIONS = {"allow", "deny", "reject", "limit"}
+_ALLOWED_FIREWALL_DIRECTIONS = {"in", "out"}
+_ALLOWED_FIREWALL_LOG = {"log", "log-all"}
+# Loose proto allowlist mirroring `man ufw`'s "PROTOCOLS" section. Anything
+# not on this list (e.g. typos like `tpc`) raises a schema error.
+_ALLOWED_FIREWALL_PROTOS = {"tcp", "udp", "ah", "esp", "ipv6", "igmp", "gre"}
 
 UNIT_NAME_RE = re.compile(r"^[A-Za-z0-9@:_.\-\\x]+\.(service|timer|socket|target|mount|path|slice)$")
 DROPIN_KEY_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.\-/]*\.(conf|json|rules|nsswitch|hosts|cfg)$")
@@ -284,6 +337,54 @@ class ServicesSection:
 
 
 @dataclass
+class FirewallRule:
+    """A single ufw rule row, normalized to the union of UFW's grammar.
+    `None` = "key not specified". `to_tuple()` produces the identity
+    used for the three-way merge — comments are excluded since they're
+    informational, not part of identity."""
+    action: str            # required: allow | deny | reject | limit
+    direction: Optional[str] = None
+    interface: Optional[str] = None
+    log: Optional[str] = None
+    from_: Optional[str] = None       # `from` is a Python keyword
+    to: Optional[str] = None
+    from_port: Optional[int] = None
+    to_port: Optional[int] = None
+    port: Optional[int] = None
+    proto: Optional[str] = None
+    app: Optional[str] = None
+    comment: Optional[str] = None
+
+    def to_tuple(self) -> tuple:
+        return (
+            self.action, self.direction, self.interface, self.log,
+            self.from_, self.to, self.from_port, self.to_port,
+            self.port, self.proto, self.app,
+        )
+
+
+@dataclass
+class FirewallSection:
+    """Parsed [network.firewall] block. `present` = "the section
+    exists in TOML at all" — distinct from `enabled = false`, which
+    is "section is in TOML but ufw should be off"."""
+    present: bool = False
+    enabled: Optional[bool] = None
+    incoming: Optional[str] = None
+    outgoing: Optional[str] = None
+    routed: Optional[str] = None
+    rules: list[FirewallRule] = field(default_factory=list)
+
+
+@dataclass
+class NetworkSection:
+    firewall: FirewallSection = field(default_factory=FirewallSection)
+
+    def is_empty(self) -> bool:
+        return not self.firewall.present
+
+
+@dataclass
 class ValidatedConfig:
     schema_version: int = SCHEMA_VERSION
     systemd: SystemdSection = field(default_factory=SystemdSection)
@@ -291,6 +392,7 @@ class ValidatedConfig:
     snapper: SnapperSection = field(default_factory=SnapperSection)
     pacman: PacmanSection = field(default_factory=PacmanSection)
     services: ServicesSection = field(default_factory=ServicesSection)
+    network: NetworkSection = field(default_factory=NetworkSection)
 
 
 def validate_doc(doc: dict) -> ValidatedConfig:
@@ -440,7 +542,133 @@ def validate_doc(doc: dict) -> ValidatedConfig:
                 cfg.services.postgresql.per_user_db = _check_bool(
                     "services.postgresql.per-user-db", pg_raw["per-user-db"])
 
+    net_raw = doc.get("network", {})
+    if net_raw:
+        if not isinstance(net_raw, dict):
+            raise SchemaError("[network] must be a table")
+        _check_keys("network", net_raw, _ALLOWED_NETWORK)
+        fw_raw = net_raw.get("firewall", {})
+        if fw_raw is not None:
+            if not isinstance(fw_raw, dict):
+                raise SchemaError("[network.firewall] must be a table")
+            _check_keys("network.firewall", fw_raw, _ALLOWED_FIREWALL_TOP)
+            cfg.network.firewall.present = True
+
+            if "enabled" in fw_raw:
+                cfg.network.firewall.enabled = _check_bool(
+                    "network.firewall.enabled", fw_raw["enabled"])
+
+            for chain in ("incoming", "outgoing", "routed"):
+                if chain in fw_raw:
+                    val = fw_raw[chain]
+                    if not isinstance(val, str) or val not in _ALLOWED_FIREWALL_DEFAULT_POLICIES:
+                        raise SchemaError(
+                            f"[network.firewall].{chain} must be one of "
+                            f"{sorted(_ALLOWED_FIREWALL_DEFAULT_POLICIES)}, "
+                            f"got {val!r}"
+                        )
+                    setattr(cfg.network.firewall, chain, val)
+
+            rules_raw = fw_raw.get("rules", [])
+            if not isinstance(rules_raw, list):
+                raise SchemaError("[network.firewall].rules must be an array")
+            for i, item in enumerate(rules_raw):
+                if not isinstance(item, dict):
+                    raise SchemaError(
+                        f"[network.firewall.rules][{i}] must be a table"
+                    )
+                _check_keys(f"network.firewall.rules[{i}]", item,
+                            _ALLOWED_FIREWALL_RULE_KEYS)
+                cfg.network.firewall.rules.append(
+                    _validate_firewall_rule(i, item)
+                )
+
     return cfg
+
+
+def _validate_firewall_rule(idx: int, item: dict) -> "FirewallRule":
+    """Schema-validate one [[network.firewall.rules]] table and return
+    a FirewallRule. Catches mutually-exclusive key combinations
+    (e.g. `app` paired with `port` or `proto`) and dependent keys
+    (`from-port` without `from`)."""
+    pfx = f"network.firewall.rules[{idx}]"
+    action = item.get("action")
+    if not isinstance(action, str) or action not in _ALLOWED_FIREWALL_RULE_ACTIONS:
+        raise SchemaError(
+            f"[{pfx}].action is required and must be one of "
+            f"{sorted(_ALLOWED_FIREWALL_RULE_ACTIONS)}, got {action!r}"
+        )
+    direction = item.get("direction")
+    if direction is not None and (not isinstance(direction, str) or
+                                  direction not in _ALLOWED_FIREWALL_DIRECTIONS):
+        raise SchemaError(
+            f"[{pfx}].direction must be one of "
+            f"{sorted(_ALLOWED_FIREWALL_DIRECTIONS)}, got {direction!r}"
+        )
+    # UFW's default direction is `in`. Normalize so a TOML rule that
+    # omits direction matches a parsed-ufw rule on the identity tuple.
+    if direction is None:
+        direction = "in"
+    log = item.get("log")
+    if log is not None and (not isinstance(log, str) or
+                            log not in _ALLOWED_FIREWALL_LOG):
+        raise SchemaError(
+            f"[{pfx}].log must be one of "
+            f"{sorted(_ALLOWED_FIREWALL_LOG)}, got {log!r}"
+        )
+    proto = item.get("proto")
+    if proto is not None and (not isinstance(proto, str) or
+                              proto not in _ALLOWED_FIREWALL_PROTOS):
+        raise SchemaError(
+            f"[{pfx}].proto must be one of "
+            f"{sorted(_ALLOWED_FIREWALL_PROTOS)}, got {proto!r}"
+        )
+    interface = item.get("interface")
+    if interface is not None and not isinstance(interface, str):
+        raise SchemaError(f"[{pfx}].interface must be a string")
+    from_ = item.get("from")
+    if from_ is not None and not isinstance(from_, str):
+        raise SchemaError(f"[{pfx}].from must be a string")
+    to = item.get("to")
+    if to is not None and not isinstance(to, str):
+        raise SchemaError(f"[{pfx}].to must be a string")
+    from_port = item.get("from-port")
+    if from_port is not None:
+        from_port = _check_int(f"{pfx}.from-port", from_port, minimum=1)
+    to_port = item.get("to-port")
+    if to_port is not None:
+        to_port = _check_int(f"{pfx}.to-port", to_port, minimum=1)
+    port = item.get("port")
+    if port is not None:
+        port = _check_int(f"{pfx}.port", port, minimum=1)
+    app = item.get("app")
+    if app is not None and not isinstance(app, str):
+        raise SchemaError(f"[{pfx}].app must be a string")
+    comment = item.get("comment")
+    if comment is not None and not isinstance(comment, str):
+        raise SchemaError(f"[{pfx}].comment must be a string")
+
+    # Mutually-exclusive constraints.
+    if app is not None and (port is not None or proto is not None
+                            or to_port is not None or from_port is not None):
+        raise SchemaError(
+            f"[{pfx}] `app` is mutually exclusive with port/proto/from-port/to-port"
+        )
+    if from_port is not None and from_ is None:
+        raise SchemaError(
+            f"[{pfx}] `from-port` requires `from` to be set"
+        )
+    if to_port is not None and to is None and port is None:
+        # to-port without `to` is meaningless; user probably wanted `port`.
+        raise SchemaError(
+            f"[{pfx}] `to-port` requires `to` (or use `port` shorthand)"
+        )
+
+    return FirewallRule(
+        action=action, direction=direction, interface=interface, log=log,
+        from_=from_, to=to, from_port=from_port, to_port=to_port,
+        port=port, proto=proto, app=app, comment=comment,
+    )
 
 
 def load_config(path: Optional[Path] = None) -> ValidatedConfig:
@@ -515,6 +743,134 @@ def atomic_write_text(path: Path, text: str, *, mode: int = 0o644) -> None:
         try: os.unlink(tmp)
         except OSError: pass
         raise
+
+
+# ---------------------------------------------------------------------------
+# Cross-cutting Phase 6A scaffolding: three-way merge, baseline + state
+# files, format-preserving system.toml writes via tomlkit.
+#
+# Every Phase 6A reconciler runs the same algorithm with different
+# identity tuples:
+#
+#   declared    — set of items in /etc/shedos/system.toml
+#   live        — set of items observed on the system right now
+#   last_applied— set we wrote on the previous apply
+#   baseline    — set captured on first apply; protected forever
+#
+# Items in `baseline` are invisible to the reconciler — never adopted,
+# never removed when omitted from TOML. Items elsewhere flow through
+# `to_add` / `to_remove` / `to_adopt` per the merge rules below.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class MergeResult:
+    """Output of `threeway_merge`. Each field is a set of identity
+    tuples. Reconcilers translate these into `Change` objects."""
+    to_add: frozenset[tuple]      # in declared, not in live
+    to_remove: frozenset[tuple]   # in last_applied, not in declared (and not baseline)
+    to_adopt: frozenset[tuple]    # in live, not in baseline/last_applied/declared
+    aligned: frozenset[tuple]     # in declared, in live (noop)
+
+
+def threeway_merge(
+    declared: set[tuple],
+    live: set[tuple],
+    last_applied: set[tuple],
+    baseline: set[tuple],
+) -> MergeResult:
+    """Compute add/remove/adopt sets for the bidirectional reconciler.
+
+    Item-by-item rules (matching the table in the Phase 6A plan):
+
+      * baseline rows               → invisible; never in any output set
+      * declared & live             → aligned (noop)
+      * declared & not live         → to_add (push to live)
+      * not declared & last_applied → to_remove (user removed from TOML)
+      * not declared & live & not last_applied & not baseline
+                                    → to_adopt (user added via raw tool)
+    """
+    # baseline trumps everything — strip it from the inputs first.
+    declared = declared - baseline
+    live = live - baseline
+    last_applied = last_applied - baseline
+
+    aligned = declared & live
+    to_add = declared - live
+    to_remove = (last_applied - declared) & live  # only delete what's actually there
+    to_adopt = (live - declared) - last_applied
+    return MergeResult(
+        to_add=frozenset(to_add),
+        to_remove=frozenset(to_remove),
+        to_adopt=frozenset(to_adopt),
+        aligned=frozenset(aligned),
+    )
+
+
+def load_state_set(path: Path) -> set[tuple]:
+    """Load a section's last-applied or baseline state file. Each entry
+    is stored as a list (JSON has no tuple type) and rehydrated to a
+    tuple for set membership. Missing/unreadable file → empty set."""
+    if not path.exists():
+        return set()
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return set()
+    items = doc.get("items", []) if isinstance(doc, dict) else []
+    out: set[tuple] = set()
+    for item in items:
+        if isinstance(item, list):
+            out.add(tuple(item))
+    return out
+
+
+def save_state_set(path: Path, items: set[tuple]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "schema": SCHEMA_VERSION,
+        "items": sorted([list(t) for t in items]),
+    }
+    atomic_write_text(path, json.dumps(payload, indent=2) + "\n", mode=0o644)
+
+
+def seed_baseline_if_missing(section: str, live: set[tuple]) -> set[tuple]:
+    """First-apply seed: snapshot the current live state as the
+    permanent baseline. On subsequent applies, return the existing
+    file's contents unchanged."""
+    p = baseline_path(section)
+    if p.exists():
+        return load_state_set(p)
+    save_state_set(p, live)
+    return live
+
+
+def atomic_write_system_toml(
+    path: Path,
+    new_doc_text: str,
+) -> None:
+    """Replace /etc/shedos/system.toml atomically and re-validate it
+    end-to-end with stdlib `tomllib` + `validate_doc()`. If the new
+    text doesn't parse or doesn't validate, the live file is left
+    untouched and the caller gets a SchemaError with a pointed message.
+
+    Reconcilers should use `tomlkit` to *edit* a parsed document, then
+    serialize and pass through here for the safety net.
+    """
+    try:
+        doc = tomllib.loads(new_doc_text)
+    except tomllib.TOMLDecodeError as e:
+        raise SchemaError(
+            f"adoption-write produced invalid TOML and was discarded: {e}"
+        ) from e
+    try:
+        validate_doc(doc)
+    except SchemaError as e:
+        raise SchemaError(
+            f"adoption-write produced TOML that fails schema validation "
+            f"and was discarded: {e}"
+        ) from e
+    atomic_write_text(path, new_doc_text, mode=0o644)
 
 
 # ---------------------------------------------------------------------------
@@ -893,6 +1249,535 @@ def plan_services(cfg: ValidatedConfig) -> list[Change]:
 
 
 # ---------------------------------------------------------------------------
+# Reconciler: network.firewall — declarative ufw with bidirectional adoption.
+#
+# Three-way merge against (declared, live, last_applied, baseline). Tool-
+# added rules ("ufw allow 9090") get adopted into system.toml; TOML
+# removals propagate to ufw. Baseline (the rule set on first apply) is
+# protected forever; on a fresh ShedOS install ufw is empty so baseline
+# is the empty set, but a system that ran `ufw allow` before adopting the
+# section will have those baseline rules invisible to the reconciler.
+#
+# Wire-format: every rule we ADD goes through `ufw <action> <args>
+# comment '<text>'`. We never tag rules with a `shedos:` prefix —
+# ownership is tracked via the state file, not via the comment.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class FirewallLiveState:
+    active: bool
+    incoming: Optional[str]   # current default (deny | allow | reject)
+    outgoing: Optional[str]
+    routed: Optional[str]
+    rules: list[FirewallRule]
+
+
+def _firewall_status(check: bool = True) -> FirewallLiveState:
+    """Return the live ufw state. UFW splits its disclosure across
+    `status numbered` (rule numbers) and `status verbose` (default
+    policies header), so we make two calls.
+    """
+    rc, num_out = _ufw_run_capture(["status", "numbered"], check=check)
+    if rc != 0 and not check:
+        return FirewallLiveState(False, None, None, None, [])
+    active, rules = _parse_ufw_status_numbered(num_out)
+
+    rc2, verb_out = _ufw_run_capture(["status", "verbose"], check=check)
+    if rc2 != 0:
+        # Best-effort: rules are good, defaults left as None.
+        return FirewallLiveState(active, None, None, None, rules)
+    incoming, outgoing, routed = _parse_ufw_defaults(verb_out)
+    return FirewallLiveState(active, incoming, outgoing, routed, rules)
+
+
+def _ufw_run_capture(extra_args: list[str], *, check: bool) -> tuple[int, str]:
+    cmd = ufw_cmd() + extra_args
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True,
+                              timeout=10, check=False)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        if check:
+            raise RuntimeError(f"{cmd}: {e}") from e
+        return 127, ""
+    if proc.returncode != 0 and check:
+        raise RuntimeError(
+            f"{cmd} exited {proc.returncode}: "
+            f"{(proc.stderr or proc.stdout).strip()[:200]}"
+        )
+    return proc.returncode, proc.stdout
+
+
+_UFW_DEFAULT_RE = re.compile(
+    r"Default:\s*"
+    r"(?P<incoming>\w+)\s*\(incoming\),?\s*"
+    r"(?P<outgoing>\w+)\s*\(outgoing\),?\s*"
+    r"(?P<routed>\w+)\s*\(routed\)",
+    re.IGNORECASE,
+)
+
+
+def _parse_ufw_defaults(text: str) -> tuple[Optional[str], Optional[str], Optional[str]]:
+    """Pull the `Default: deny (incoming), allow (outgoing), disabled (routed)`
+    line out of `ufw status verbose` output. UFW reports `disabled` for
+    routed when forwarding is off; we map that to None so it never
+    triggers a `ufw default disabled routed` call (not a real policy)."""
+    for raw in text.splitlines():
+        m = _UFW_DEFAULT_RE.search(raw)
+        if not m:
+            continue
+        def _norm(p: str) -> Optional[str]:
+            p = p.lower()
+            return p if p in _ALLOWED_FIREWALL_DEFAULT_POLICIES else None
+        return _norm(m.group("incoming")), _norm(m.group("outgoing")), _norm(m.group("routed"))
+    return None, None, None
+
+
+_UFW_RULE_RE = re.compile(
+    r"^\[\s*(?P<num>\d+)\]\s+(?P<body>.+?)\s*$"
+)
+
+
+def _parse_ufw_status_numbered(text: str) -> tuple[bool, list[FirewallRule]]:
+    """Parse `ufw status numbered` output into (active, rules).
+
+    UFW's output isn't formal — we treat each numbered line as a
+    rule, split off the comment, and decode the action + direction +
+    pieces from the remaining tokens. We deduplicate v4/v6 pairs by
+    rule number (UFW emits them as separate lines but they share the
+    same identity tuple in our schema).
+    """
+    active = False
+    seen: dict[int, FirewallRule] = {}
+    for raw in text.splitlines():
+        line = raw.rstrip()
+        if line.startswith("Status:"):
+            # Match the first word after "Status:" — guard against
+            # "Status: inactive" matching the substring "active".
+            tail = line.split(":", 1)[1].strip().lower().split()
+            active = bool(tail) and tail[0] == "active"
+            continue
+        m = _UFW_RULE_RE.match(line)
+        if not m:
+            continue
+        num = int(m.group("num"))
+        body = m.group("body")
+        rule = _decode_ufw_rule_body(body)
+        if rule is None:
+            raise SchemaError(
+                f"could not parse ufw rule line {num!r}: {body!r}. "
+                f"Refusing to apply — aborts before any mutation."
+            )
+        # First occurrence wins (v4 line before v6 (v6) line).
+        seen.setdefault(num, rule)
+    return active, [seen[k] for k in sorted(seen)]
+
+
+def _decode_ufw_rule_body(body: str) -> Optional[FirewallRule]:
+    """Decode a single ufw rule line minus the `[N]` prefix into a
+    FirewallRule. Returns None on unrecognized shapes (caller raises
+    SchemaError to abort the apply rather than silently miscount)."""
+    # Strip `(v6)` and trailing comment.
+    comment: Optional[str] = None
+    if "#" in body:
+        body, _, comment_raw = body.partition("#")
+        body = body.rstrip()
+        comment = comment_raw.strip() or None
+    body = body.replace("(v6)", "").rstrip()
+
+    # Find ALLOW/DENY/REJECT/LIMIT IN/OUT/FWD splitter.
+    action_re = re.compile(
+        r"^(?P<dst>.+?)\s+(?P<action>ALLOW|DENY|REJECT|LIMIT)"
+        r"\s+(?P<dir>IN|OUT|FWD)\s+(?P<src>.*?)\s*$",
+        re.IGNORECASE,
+    )
+    m = action_re.match(body)
+    if not m:
+        return None
+    dst_part = m.group("dst").strip()
+    src_part = m.group("src").strip()
+    action = m.group("action").lower()
+    direction = {"in": "in", "out": "out", "fwd": "in"}[m.group("dir").lower()]
+
+    # Decode dst — `<port>/<proto>` | `<addr>` | `<addr> <port>` |
+    # `App profile`.
+    port: Optional[int] = None
+    to_port: Optional[int] = None
+    proto: Optional[str] = None
+    to_addr: Optional[str] = None
+    app: Optional[str] = None
+    # App profiles in ufw status look like "OpenSSH" with no slash/digit.
+    if dst_part and not any(ch.isdigit() for ch in dst_part) and "/" not in dst_part:
+        app = dst_part
+    elif "/" in dst_part:
+        port_str, _, proto_str = dst_part.partition("/")
+        if port_str.isdigit():
+            port = int(port_str)
+            proto = proto_str.lower() or None
+        else:
+            return None
+    elif dst_part.isdigit():
+        port = int(dst_part)
+    else:
+        # Could be `<addr> <port>` or just `<addr>`.
+        parts = dst_part.split()
+        if len(parts) == 2 and parts[1].isdigit():
+            to_addr = parts[0]
+            to_port = int(parts[1])
+        elif len(parts) == 1:
+            to_addr = parts[0]
+        else:
+            return None
+
+    from_addr: Optional[str] = None
+    if src_part and src_part.lower() != "anywhere":
+        from_addr = src_part
+
+    return FirewallRule(
+        action=action, direction=direction,
+        interface=None,  # ufw status doesn't surface this distinctly enough
+        log=None,
+        from_=from_addr, to=to_addr,
+        from_port=None, to_port=to_port, port=port,
+        proto=proto, app=app, comment=comment,
+    )
+
+
+def _ufw_args_for_rule(rule: FirewallRule) -> list[str]:
+    """Build the argv for `ufw <action> ...` from a FirewallRule.
+    Mirrors `man ufw` rule syntax. Caller prepends the ufw binary +
+    `--force`."""
+    args = [rule.action]
+    if rule.direction == "out":
+        args.append("out")
+    if rule.interface:
+        args += ["on", rule.interface]
+    if rule.log == "log":
+        args.append("log")
+    elif rule.log == "log-all":
+        args.append("log-all")
+    # App-profile rule shape.
+    if rule.app:
+        if rule.from_:
+            args += ["from", rule.from_]
+        args += ["to", "any", "app", rule.app]
+    else:
+        if rule.from_:
+            args += ["from", rule.from_]
+            if rule.from_port is not None:
+                args += ["port", str(rule.from_port)]
+        if rule.to:
+            args += ["to", rule.to]
+            if rule.to_port is not None:
+                args += ["port", str(rule.to_port)]
+        if rule.port is not None and not rule.to and not rule.from_:
+            args.append(str(rule.port))
+            if rule.proto:
+                args[-1] = f"{rule.port}/{rule.proto}"
+        elif rule.proto and (rule.from_ or rule.to):
+            args += ["proto", rule.proto]
+    if rule.comment:
+        args += ["comment", rule.comment]
+    return args
+
+
+def plan_firewall(cfg: ValidatedConfig) -> list[Change]:
+    """Build the firewall plan via three-way merge.
+
+    Returns either an empty list (aligned), one Change covering all
+    mutations, or two Changes (a `~` for adoption-write that touches
+    system.toml + a `~` for live ufw mutations) so doctor can surface
+    them distinctly. The undo function for the live Change snapshots
+    the pre-apply rule set to firewall.undo.json.
+    """
+    fw = cfg.network.firewall
+    if not fw.present:
+        return []
+
+    section_name = "firewall"
+    state_p = state_path(section_name)
+    baseline_p = baseline_path(section_name)
+    config_p = config_path()
+
+    try:
+        live = _firewall_status(check=True)
+    except RuntimeError as e:
+        raise RuntimeError(f"plan_firewall: {e}") from e
+    live_active = live.active
+    live_rules = live.rules
+
+    declared_set: set[tuple] = {r.to_tuple() for r in fw.rules}
+    live_set: set[tuple] = {r.to_tuple() for r in live_rules}
+    last_applied: set[tuple] = load_state_set(state_p)
+
+    # First apply seeds the baseline as the empty set — bypassing the
+    # baseline-protection path because the firewall ship state is "off,
+    # no rules". This matches the user-approved behavior: any rules
+    # already present at first apply get adopted into TOML.
+    if baseline_p.exists():
+        baseline = load_state_set(baseline_p)
+    else:
+        baseline = set()
+        save_state_set(baseline_p, baseline)
+
+    merge = threeway_merge(declared_set, live_set, last_applied, baseline)
+
+    # Rule lookup tables for translating tuples back to FirewallRule
+    # objects when we need to render argv / write TOML.
+    by_tuple_declared = {r.to_tuple(): r for r in fw.rules}
+    by_tuple_live = {r.to_tuple(): r for r in live_rules}
+    rule_num_by_tuple: dict[tuple, int] = {}
+    for i, r in enumerate(live_rules, start=1):
+        rule_num_by_tuple.setdefault(r.to_tuple(), i)
+
+    # Adoption-write needed?
+    adoption_changes: list[Change] = []
+    if merge.to_adopt:
+        adopted_rules = [by_tuple_live[t] for t in merge.to_adopt]
+        new_rules_for_toml = list(fw.rules) + adopted_rules
+        new_doc_text = _render_system_toml_with_firewall(
+            config_p, fw, new_rules_for_toml,
+        )
+        old_doc_text = config_p.read_text(encoding="utf-8") if config_p.exists() else ""
+        diff_iter = difflib.unified_diff(
+            old_doc_text.splitlines(keepends=True),
+            new_doc_text.splitlines(keepends=True),
+            fromfile="system.toml (current)",
+            tofile="system.toml (after adoption)",
+            lineterm="",
+        )
+        diff = "".join(l if l.endswith("\n") else l + "\n" for l in diff_iter)
+        adopt_summary = (
+            f"adopt {len(merge.to_adopt)} ufw-CLI rule(s) into "
+            f"[network.firewall]"
+        )
+
+        def apply_adopt() -> None:
+            atomic_write_system_toml(config_p, new_doc_text)
+
+        def undo_adopt() -> None:
+            atomic_write_text(config_p, old_doc_text, mode=0o644)
+
+        adoption_changes.append(Change(
+            kind="~", section="network.firewall (toml)",
+            summary=adopt_summary, diff=diff,
+            apply_fn=apply_adopt, undo_fn=undo_adopt,
+        ))
+
+    # Live mutations: defaults, service state, deletes, adds.
+    # Only emit a default Change if declared differs from observed.
+    default_changes: list[tuple[str, str]] = []  # (chain, policy)
+    for chain in ("incoming", "outgoing", "routed"):
+        declared_pol = getattr(fw, chain)
+        observed_pol = getattr(live, chain)
+        if declared_pol is not None and declared_pol != observed_pol:
+            default_changes.append((chain, declared_pol))
+
+    desired_active = fw.enabled
+    service_action: Optional[str] = None
+    if desired_active is True and not live_active:
+        service_action = "enable"
+    elif desired_active is False and live_active:
+        service_action = "disable"
+
+    rules_to_remove: list[tuple[int, FirewallRule]] = []
+    for t in merge.to_remove:
+        n = rule_num_by_tuple.get(t)
+        rule_obj = by_tuple_live.get(t)
+        if n is not None and rule_obj is not None:
+            rules_to_remove.append((n, rule_obj))
+    rules_to_remove.sort(key=lambda x: x[0], reverse=True)
+
+    rules_to_add: list[FirewallRule] = [
+        by_tuple_declared[t] for t in merge.to_add
+    ]
+
+    needs_live = (default_changes or service_action
+                  or rules_to_remove or rules_to_add)
+    if not needs_live and not adoption_changes:
+        # Aligned. Still record the merged set so a future remove
+        # propagates correctly.
+        save_state_set(state_p, declared_set | merge.to_adopt)
+        return []
+
+    if not needs_live:
+        # Adoption-only — write state and return.
+        def apply_state_only() -> None:
+            save_state_set(state_p, declared_set | merge.to_adopt)
+        # Splice the state save into the adoption Change's apply_fn.
+        original_apply = adoption_changes[0].apply_fn
+
+        def combined() -> None:
+            assert original_apply is not None
+            original_apply()
+            apply_state_only()
+        adoption_changes[0].apply_fn = combined
+        return adoption_changes
+
+    summary_parts: list[str] = []
+    if rules_to_add:
+        summary_parts.append(f"add {len(rules_to_add)} rule(s)")
+    if rules_to_remove:
+        summary_parts.append(f"remove {len(rules_to_remove)} rule(s)")
+    if default_changes:
+        summary_parts.append(f"set {len(default_changes)} default policy(ies)")
+    if service_action:
+        summary_parts.append(f"{service_action} ufw")
+    live_summary = "; ".join(summary_parts) or "noop"
+
+    def apply_live() -> None:
+        # Remove first (descending), then add, then defaults, then
+        # service flip.
+        for num, _rule in rules_to_remove:
+            _ufw_run(["--force", "delete", str(num)])
+        for r in rules_to_add:
+            _ufw_run(["--force"] + _ufw_args_for_rule(r))
+        for chain, policy in default_changes:
+            _ufw_run(["--force", "default", policy, chain])
+        if service_action == "enable":
+            _systemctl_run(["enable", "ufw.service"])
+            _ufw_run(["--force", "enable"])
+        elif service_action == "disable":
+            _ufw_run(["--force", "disable"])
+            _systemctl_run(["disable", "ufw.service"], check=False)
+        save_state_set(state_p, declared_set | merge.to_adopt)
+
+    def undo_live() -> None:
+        # Best-effort: replay the pre-apply rule set. A flock on
+        # firewall.lock during apply protects against concurrent
+        # mutation; on undo we just trust the snapshot.
+        _ufw_run(["--force", "reset"], check=False)
+        for r in live_rules:
+            _ufw_run(["--force"] + _ufw_args_for_rule(r), check=False)
+
+    live_change = Change(
+        kind="~", section="network.firewall",
+        summary=live_summary, diff=_firewall_diff(live_rules, rules_to_add,
+                                                  rules_to_remove,
+                                                  default_changes,
+                                                  service_action),
+        apply_fn=apply_live, undo_fn=undo_live,
+    )
+    return adoption_changes + [live_change]
+
+
+def _ufw_run(extra_args: list[str], *, check: bool = True) -> tuple[int, str]:
+    cmd = ufw_cmd() + extra_args
+    try:
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=30,
+                             check=False)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        if check:
+            raise RuntimeError(f"{cmd}: {e}") from e
+        return 127, str(e)
+    if out.returncode != 0 and check:
+        raise RuntimeError(
+            f"{cmd} exited {out.returncode}: "
+            f"{(out.stderr or out.stdout).strip()[:200]}"
+        )
+    return out.returncode, out.stdout
+
+
+def _firewall_diff(
+    pre_rules: list[FirewallRule],
+    rules_to_add: list[FirewallRule],
+    rules_to_remove: list[tuple[int, FirewallRule]],
+    default_changes: list[tuple[str, str]],
+    service_action: Optional[str],
+) -> str:
+    """Render a human-readable diff for `shedman doctor --diff`."""
+    lines: list[str] = []
+    if service_action:
+        lines.append(f"  service: {service_action}")
+    for chain, policy in default_changes:
+        lines.append(f"  default {chain:<8} → {policy}")
+    for num, r in rules_to_remove:
+        lines.append(f"  - [{num}] {_render_rule_for_diff(r)}")
+    for r in rules_to_add:
+        lines.append(f"  + {_render_rule_for_diff(r)}")
+    return "\n".join(lines) + ("\n" if lines else "")
+
+
+def _render_rule_for_diff(r: FirewallRule) -> str:
+    parts = [r.action]
+    if r.direction == "out":
+        parts.append("out")
+    if r.app:
+        parts.append(f"app:{r.app}")
+    if r.port is not None:
+        parts.append(f"{r.port}/{r.proto}" if r.proto else str(r.port))
+    if r.from_:
+        parts.append(f"from {r.from_}")
+    if r.to:
+        parts.append(f"to {r.to}")
+    if r.comment:
+        parts.append(f"# {r.comment}")
+    return " ".join(parts)
+
+
+def _render_system_toml_with_firewall(
+    path: Path,
+    fw: FirewallSection,
+    new_rules: list[FirewallRule],
+) -> str:
+    """Use tomlkit to round-trip /etc/shedos/system.toml, replacing only
+    the `[network.firewall].rules` array with the post-merge rule list.
+    Top-level + non-firewall sections + comments are byte-preserved
+    (modulo tomlkit's normal serialization).
+
+    Imported lazily so the rest of apply_core.py keeps stdlib-only.
+    """
+    import tomlkit  # noqa: PLC0415
+
+    text = path.read_text(encoding="utf-8") if path.exists() else ""
+    doc = tomlkit.parse(text)
+
+    network = doc.get("network")
+    if network is None:
+        network = tomlkit.table()
+        doc["network"] = network
+    firewall = network.get("firewall")
+    if firewall is None:
+        firewall = tomlkit.table()
+        network["firewall"] = firewall
+
+    # Preserve scalar keys already in the file (enabled, incoming, ...).
+    rules_aot = tomlkit.aot()
+    for rule in new_rules:
+        t = tomlkit.table()
+        if rule.action is not None:
+            t.add("action", rule.action)
+        # `direction = "in"` is the UFW default; omit it from TOML to
+        # keep adoption-writes minimal. Only emit if explicitly "out".
+        if rule.direction is not None and rule.direction != "in":
+            t.add("direction", rule.direction)
+        if rule.interface is not None:
+            t.add("interface", rule.interface)
+        if rule.log is not None:
+            t.add("log", rule.log)
+        if rule.from_ is not None:
+            t.add("from", rule.from_)
+        if rule.to is not None:
+            t.add("to", rule.to)
+        if rule.from_port is not None:
+            t.add("from-port", rule.from_port)
+        if rule.to_port is not None:
+            t.add("to-port", rule.to_port)
+        if rule.port is not None:
+            t.add("port", rule.port)
+        if rule.proto is not None:
+            t.add("proto", rule.proto)
+        if rule.app is not None:
+            t.add("app", rule.app)
+        if rule.comment is not None:
+            t.add("comment", rule.comment)
+        rules_aot.append(t)
+    firewall["rules"] = rules_aot
+
+    return tomlkit.dumps(doc)
+
+
+# ---------------------------------------------------------------------------
 # Aggregate planner
 # ---------------------------------------------------------------------------
 
@@ -906,6 +1791,7 @@ def build_plan(cfg: ValidatedConfig,
     changes.extend(plan_snapper(cfg))
     changes.extend(plan_pacman(cfg))
     changes.extend(plan_services(cfg))
+    changes.extend(plan_firewall(cfg))
     return Plan(changes=changes), new_manifest
 
 

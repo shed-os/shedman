@@ -1,0 +1,10 @@
+schema = 1
+
+[network.firewall]
+enabled = false
+
+[[network.firewall.rules]]
+action = "allow"
+port = 22
+proto = "tcp"
+comment = "ssh"
