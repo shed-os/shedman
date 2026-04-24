@@ -1,0 +1,16 @@
+schema = 1
+[fs]
+
+[[fs.mounts]]
+name = "data-2"
+device = "UUID=BBBBBBBB-BBBB-BBBB-BBBB-BBBBBBBBBBBB"
+target = "/mnt/data"
+fstype = "btrfs"
+pass = 2
+
+[[fs.mounts]]
+name = "data"
+device = "UUID=AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA"
+target = "/srv/data"
+fstype = "ext4"
+pass = 2

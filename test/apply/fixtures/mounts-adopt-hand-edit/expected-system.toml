@@ -1,0 +1,15 @@
+schema = 1
+
+[[fs.mounts]]
+name = "data"
+device = "UUID=44444444-4444-4444-4444-444444444444"
+target = "/mnt/data"
+fstype = "btrfs"
+options = "noatime"
+
+[[fs.mounts]]
+name = "scratch"
+device = "UUID=55555555-5555-5555-5555-555555555555"
+target = "/mnt/scratch"
+fstype = "ext4"
+pass = 2

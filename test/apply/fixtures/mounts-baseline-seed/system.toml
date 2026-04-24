@@ -1,0 +1,6 @@
+schema = 1
+
+# Empty mounts list. First apply: every existing fstab line gets
+# snapshotted as baseline. fstab is byte-preserved.
+[fs]
+mounts = []

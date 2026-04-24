@@ -1,0 +1,5 @@
+schema = 1
+# Empty TOML, last_applied empty. fstab has 4 baseline lines.
+# Verify: zero changes, all 4 lines preserved.
+[fs]
+mounts = []

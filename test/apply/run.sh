@@ -182,6 +182,13 @@ STUB
     _stub_ufw "$stubdir" "$fdir"
     _stub_pacman_key "$stubdir" "$fdir"
 
+    # Fstab — if the fixture provides initial-fstab, copy it under
+    # $etc/fstab. The env var is set unconditionally; the reconciler
+    # treats a missing file as "no [fs.mounts] plan".
+    if [[ -f $fdir/initial-fstab ]]; then
+        cp -a "$fdir/initial-fstab" "$etc/fstab"
+    fi
+
     local rc out
     # shellcheck disable=SC2086
     out=$(
@@ -190,6 +197,7 @@ STUB
         SHEDOS_APPLY_SYSTEMCTL="$stubdir/systemctl" \
         SHEDOS_APPLY_UFW="$stubdir/ufw" \
         SHEDOS_APPLY_PACMAN_KEY="$stubdir/pacman-key" \
+        SHEDOS_APPLY_FSTAB_PATH="$etc/fstab" \
         SHEDOS_LIB_ROOT="$repo_root/packaging/shedos-system/tree/usr/lib/shedos" \
         NO_COLOR=1 \
         "$tool" --config "$etc/shedos/system.toml" $APPLY_ARGS 2>&1
@@ -212,6 +220,7 @@ STUB
     _file_eq   "UFW"         "$fdir/expected-ufw.txt"         "$tmp/ufw.log"               || bad=1
     _file_eq   "PACMAN_KEY"  "$fdir/expected-pacman-key.txt"  "$tmp/pacman-key.log"        || bad=1
     _file_eq   "SYSTEM_TOML" "$fdir/expected-system.toml"     "$etc/shedos/system.toml"    || bad=1
+    _file_eq   "FSTAB"       "$fdir/expected-fstab"           "$etc/fstab"                 || bad=1
 
     if (( bad )); then
         echo "FAIL $name"

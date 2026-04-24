@@ -204,7 +204,7 @@ class SchemaError(ValueError):
 
 
 _ALLOWED_TOP = {"schema", "systemd", "drop-ins", "snapper",
-                "pacman", "services", "network", "security"}
+                "pacman", "services", "network", "security", "fs"}
 _ALLOWED_SYSTEMD = {"system", "user"}
 _ALLOWED_SYSTEMD_SUB = {"enable", "disable"}
 _ALLOWED_SNAPPER = {"timeline", "cleanup"}
@@ -232,6 +232,10 @@ _ALLOWED_FIREWALL_LOG = {"log", "log-all"}
 _ALLOWED_FIREWALL_PROTOS = {"tcp", "udp", "ah", "esp", "ipv6", "igmp", "gre"}
 _ALLOWED_SECURITY = {"keyring"}
 _ALLOWED_SECURITY_KEYRING = {"trusted"}
+_ALLOWED_FS = {"mounts"}
+_ALLOWED_MOUNT_KEYS = {"name", "device", "target", "fstype",
+                      "options", "dump", "pass"}
+MOUNT_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 
 GPG_FINGERPRINT_RE = re.compile(r"^[0-9A-F]{40}$")
 
@@ -405,6 +409,37 @@ class SecuritySection:
 
 
 @dataclass
+class MountEntry:
+    """One [[fs.mounts]] table → one fstab line. `name` is the user-
+    friendly handle for the entry; the (device, target) pair is the
+    identity tuple for the three-way merge."""
+    name: str
+    device: str
+    target: str
+    fstype: str
+    options: str = "defaults"
+    dump: int = 0
+    pass_: int = 0
+
+    def to_fstab_line(self) -> str:
+        # Tab-separated, mirroring the format Calamares emits.
+        return (f"{self.device}\t{self.target}\t{self.fstype}\t"
+                f"{self.options}\t{self.dump}\t{self.pass_}")
+
+    def identity(self) -> tuple:
+        return (self.device, self.target)
+
+
+@dataclass
+class FsSection:
+    present: bool = False
+    mounts: list[MountEntry] = field(default_factory=list)
+
+    def is_empty(self) -> bool:
+        return not self.present
+
+
+@dataclass
 class ValidatedConfig:
     schema_version: int = SCHEMA_VERSION
     systemd: SystemdSection = field(default_factory=SystemdSection)
@@ -414,6 +449,7 @@ class ValidatedConfig:
     services: ServicesSection = field(default_factory=ServicesSection)
     network: NetworkSection = field(default_factory=NetworkSection)
     security: SecuritySection = field(default_factory=SecuritySection)
+    fs: FsSection = field(default_factory=FsSection)
 
 
 def validate_doc(doc: dict) -> ValidatedConfig:
@@ -635,7 +671,69 @@ def validate_doc(doc: dict) -> ValidatedConfig:
                     )
                 cfg.security.keyring.trusted.append(fp_norm)
 
+    fs_raw = doc.get("fs", {})
+    if fs_raw:
+        if not isinstance(fs_raw, dict):
+            raise SchemaError("[fs] must be a table")
+        _check_keys("fs", fs_raw, _ALLOWED_FS)
+        mounts_raw = fs_raw.get("mounts", [])
+        if mounts_raw is not None:
+            if not isinstance(mounts_raw, list):
+                raise SchemaError("[[fs.mounts]] must be an array of tables")
+            cfg.fs.present = True
+            seen_names: set[str] = set()
+            seen_targets: set[str] = set()
+            for i, item in enumerate(mounts_raw):
+                if not isinstance(item, dict):
+                    raise SchemaError(
+                        f"[[fs.mounts]][{i}] must be a table"
+                    )
+                _check_keys(f"fs.mounts[{i}]", item, _ALLOWED_MOUNT_KEYS)
+                cfg.fs.mounts.append(_validate_mount_entry(i, item, seen_names,
+                                                           seen_targets))
+
     return cfg
+
+
+def _validate_mount_entry(idx: int, item: dict, seen_names: set[str],
+                          seen_targets: set[str]) -> "MountEntry":
+    pfx = f"fs.mounts[{idx}]"
+    name = item.get("name")
+    if not isinstance(name, str) or not MOUNT_NAME_RE.match(name):
+        raise SchemaError(
+            f"[{pfx}].name is required and must match {MOUNT_NAME_RE.pattern}"
+        )
+    if name in seen_names:
+        raise SchemaError(f"[{pfx}].name {name!r} duplicated")
+    seen_names.add(name)
+
+    device = item.get("device")
+    if not isinstance(device, str) or not device.strip():
+        raise SchemaError(f"[{pfx}].device is required (non-empty string)")
+    target = item.get("target")
+    if not isinstance(target, str) or not target.startswith("/"):
+        raise SchemaError(f"[{pfx}].target is required and must be absolute")
+    if target in seen_targets:
+        raise SchemaError(f"[{pfx}].target {target!r} duplicated")
+    seen_targets.add(target)
+    fstype = item.get("fstype")
+    if not isinstance(fstype, str) or not fstype.strip():
+        raise SchemaError(f"[{pfx}].fstype is required (non-empty string)")
+    options = item.get("options", "defaults")
+    if not isinstance(options, str):
+        raise SchemaError(f"[{pfx}].options must be a string")
+    dump = item.get("dump", 0)
+    if isinstance(dump, bool) or not isinstance(dump, int):
+        raise SchemaError(f"[{pfx}].dump must be an integer")
+    pass_ = item.get("pass", 0)
+    if isinstance(pass_, bool) or not isinstance(pass_, int):
+        raise SchemaError(f"[{pfx}].pass must be an integer")
+
+    return MountEntry(
+        name=name, device=device.strip(), target=target,
+        fstype=fstype.strip(), options=options.strip() or "defaults",
+        dump=dump, pass_=pass_,
+    )
 
 
 def _validate_firewall_rule(idx: int, item: dict) -> "FirewallRule":
@@ -2024,6 +2122,287 @@ def _render_system_toml_with_keyring(
 
 
 # ---------------------------------------------------------------------------
+# Reconciler: fs.mounts — declarative /etc/fstab entries with baseline
+# protection for Calamares' install-time lines.
+#
+# Posture: reconcile (TOML removal → fstab line removal), but ONLY for
+# non-baseline entries. The baseline (every fstab entry on first apply)
+# is permanently invisible.
+#
+# Identity = (device, target). `options`/`fstype`/`dump`/`pass` changes
+# are updates, not adds/removes.
+#
+# Tool-managed entries live inside a marker fence at the END of fstab:
+#     # >>> shedos-mounts <<<
+#     <device>\t<target>\t<fstype>\t<options>\t<dump>\t<pass>
+#     # <<< shedos-mounts >>>
+# Baseline entries stay outside the fence, byte-preserved.
+# ---------------------------------------------------------------------------
+
+
+_FSTAB_FENCE_OPEN = "# >>> shedos-mounts <<<"
+_FSTAB_FENCE_CLOSE = "# <<< shedos-mounts >>>"
+
+
+def _parse_fstab(text: str) -> tuple[list[MountEntry], list[str]]:
+    """Parse /etc/fstab into (entries, raw_lines_outside_fence).
+
+    Returns:
+      entries — every non-comment, non-blank fstab line decoded into a
+                MountEntry. We auto-name unnamed entries by slugifying
+                the target.
+      raw_lines_outside_fence — all original lines verbatim (including
+                comments + blanks) but EXCLUDING anything between the
+                shedos-mounts fence markers. Used to reconstruct fstab
+                while preserving non-tool content byte-identically.
+    """
+    entries: list[MountEntry] = []
+    out_lines: list[str] = []
+    in_fence = False
+    name_counter: dict[str, int] = {}
+    for raw in text.splitlines(keepends=False):
+        stripped = raw.strip()
+        if stripped == _FSTAB_FENCE_OPEN:
+            in_fence = True
+            continue
+        if stripped == _FSTAB_FENCE_CLOSE:
+            in_fence = False
+            continue
+        if in_fence:
+            # Tool-managed area. Parse if it's a real entry; skip
+            # comments/blanks (we own the fence body).
+            if stripped and not stripped.startswith("#"):
+                e = _parse_fstab_line(stripped, name_counter)
+                if e is not None:
+                    entries.append(e)
+            continue
+        # Outside fence: preserve verbatim.
+        out_lines.append(raw)
+        if stripped and not stripped.startswith("#"):
+            e = _parse_fstab_line(stripped, name_counter)
+            if e is not None:
+                entries.append(e)
+    return entries, out_lines
+
+
+def _parse_fstab_line(line: str,
+                       name_counter: dict[str, int]) -> Optional[MountEntry]:
+    parts = line.split()
+    if len(parts) < 4:
+        return None
+    device, target, fstype, options = parts[0], parts[1], parts[2], parts[3]
+    # Be strict about target — only absolute paths and `none` (swap) are
+    # valid fstab targets. Anything else means the line is malformed
+    # (or we're scanning shell prose / comment text). Silently skip.
+    if not (target.startswith("/") or target == "none"):
+        return None
+    dump = int(parts[4]) if len(parts) > 4 and parts[4].isdigit() else 0
+    pass_ = int(parts[5]) if len(parts) > 5 and parts[5].isdigit() else 0
+    name = _slugify_target(target, name_counter)
+    return MountEntry(name=name, device=device, target=target, fstype=fstype,
+                      options=options, dump=dump, pass_=pass_)
+
+
+def _slugify_target(target: str, counter: dict[str, int]) -> str:
+    """Map /mnt/data → 'data', /mnt/nfs-home → 'nfs-home', `/` → 'root'."""
+    if target == "/":
+        base = "root"
+    else:
+        # Last non-empty path component, lowercased, non-alnum→hyphen.
+        last = target.rstrip("/").rsplit("/", 1)[-1]
+        base = re.sub(r"[^a-z0-9._-]+", "-", last.lower()) or "mount"
+    n = counter.get(base, 0) + 1
+    counter[base] = n
+    if n == 1:
+        return base
+    return f"{base}-{n}"
+
+
+def _render_fstab(out_lines: list[str], managed: list[MountEntry]) -> str:
+    """Serialize fstab — original non-fence lines, then a fresh fence
+    block holding the managed entries. Trailing newline guaranteed."""
+    body_parts = list(out_lines)
+    while body_parts and body_parts[-1].strip() == "":
+        body_parts.pop()
+    out = "\n".join(body_parts)
+    if out:
+        out += "\n"
+    if managed:
+        out += "\n" + _FSTAB_FENCE_OPEN + "\n"
+        out += "# Managed by shedos-apply — do not edit between these markers.\n"
+        out += "# Declarative source: /etc/shedos/system.toml ([fs.mounts]).\n"
+        for e in managed:
+            out += e.to_fstab_line() + "\n"
+        out += _FSTAB_FENCE_CLOSE + "\n"
+    return out
+
+
+def plan_mounts(cfg: ValidatedConfig) -> list[Change]:
+    if not cfg.fs.present:
+        return []
+
+    section_name = "mounts"
+    state_p = state_path(section_name)
+    baseline_p = baseline_path(section_name)
+    config_p = config_path()
+    fstab = fstab_path()
+
+    if not fstab.exists():
+        return []
+
+    fstab_text = fstab.read_text(encoding="utf-8")
+    live_entries, outside_fence_lines = _parse_fstab(fstab_text)
+
+    declared_entries = {e.identity(): e for e in cfg.fs.mounts}
+    live_by_id = {e.identity(): e for e in live_entries}
+
+    declared: set[tuple] = set(declared_entries)
+    live: set[tuple] = set(live_by_id)
+    last_applied: set[tuple] = load_state_set(state_p)
+
+    if baseline_p.exists():
+        baseline = load_state_set(baseline_p)
+    else:
+        # First apply: snapshot every existing fstab entry as baseline.
+        baseline = set(live)
+        save_state_set(baseline_p, baseline)
+
+    merge = threeway_merge(declared, live, last_applied, baseline)
+
+    changes: list[Change] = []
+
+    # Adoption-write: live - baseline - last_applied - declared.
+    if merge.to_adopt:
+        # Sort adopted entries by target so the adoption-write is
+        # deterministic across runs (frozenset iteration is not).
+        adopted_sorted = sorted(merge.to_adopt, key=lambda t: t[1])
+        adopted = [live_by_id[t] for t in adopted_sorted]
+        new_for_toml = list(cfg.fs.mounts) + adopted
+        new_doc_text = _render_system_toml_with_mounts(config_p, new_for_toml)
+        old_doc_text = config_p.read_text(encoding="utf-8") if config_p.exists() else ""
+        diff_iter = difflib.unified_diff(
+            old_doc_text.splitlines(keepends=True),
+            new_doc_text.splitlines(keepends=True),
+            fromfile="system.toml (current)",
+            tofile="system.toml (after adoption)",
+            lineterm="",
+        )
+        diff = "".join(l if l.endswith("\n") else l + "\n" for l in diff_iter)
+        summary = (f"adopt {len(adopted)} hand-edited fstab entry(ies) "
+                   f"into [[fs.mounts]]")
+
+        def apply_adopt() -> None:
+            atomic_write_system_toml(config_p, new_doc_text)
+
+        def undo_adopt() -> None:
+            atomic_write_text(config_p, old_doc_text, mode=0o644)
+
+        changes.append(Change(
+            kind="~", section="fs.mounts (toml)",
+            summary=summary, diff=diff,
+            apply_fn=apply_adopt, undo_fn=undo_adopt,
+        ))
+
+    # Compute the post-merge "managed" set: declared + adopted, minus
+    # baseline (which never lands in the fence).
+    managed_ids = sorted((declared | merge.to_adopt) - baseline,
+                         key=lambda t: t[1])
+    # Resolve each managed id to a MountEntry — prefer declared shape
+    # over live (lets options/fstype updates take effect).
+    managed_entries: list[MountEntry] = []
+    for mid in managed_ids:
+        managed_entries.append(declared_entries.get(mid) or live_by_id[mid])
+
+    # Outside-fence lines — strip out tool-managed entries that lived
+    # outside the fence (they're being moved into it).
+    new_outside: list[str] = []
+    managed_target_set = {e.target for e in managed_entries}
+    for raw in outside_fence_lines:
+        stripped = raw.strip()
+        if stripped and not stripped.startswith("#"):
+            parts = stripped.split()
+            if len(parts) >= 2 and parts[1] in managed_target_set:
+                # Drop — moves into the fence.
+                continue
+        new_outside.append(raw)
+
+    desired_text = _render_fstab(new_outside, managed_entries)
+    if desired_text != fstab_text:
+        diff_iter = difflib.unified_diff(
+            fstab_text.splitlines(keepends=True),
+            desired_text.splitlines(keepends=True),
+            fromfile="fstab (current)",
+            tofile="fstab (declared)",
+            lineterm="",
+        )
+        diff = "".join(l if l.endswith("\n") else l + "\n" for l in diff_iter)
+        n_added = len(merge.to_add)
+        n_removed = len(merge.to_remove)
+        summary = (f"reconcile fstab fence ({len(managed_entries)} managed "
+                   f"entry(ies); +{n_added}, -{n_removed})")
+
+        def apply_fstab() -> None:
+            atomic_write_text(fstab, desired_text, mode=0o644)
+            save_state_set(state_p, declared | merge.to_adopt)
+
+        def undo_fstab() -> None:
+            atomic_write_text(fstab, fstab_text, mode=0o644)
+
+        changes.append(Change(
+            kind="~", section="fs.mounts",
+            summary=summary, diff=diff,
+            apply_fn=apply_fstab, undo_fn=undo_fstab,
+        ))
+    else:
+        # Aligned. Still update last_applied to record adoption.
+        if changes:
+            prev = changes[0].apply_fn
+
+            def combined() -> None:
+                if prev is not None:
+                    prev()
+                save_state_set(state_p, declared | merge.to_adopt)
+            changes[0].apply_fn = combined
+        else:
+            save_state_set(state_p, declared | merge.to_adopt)
+
+    return changes
+
+
+def _render_system_toml_with_mounts(
+    path: Path,
+    new_entries: list[MountEntry],
+) -> str:
+    import tomlkit  # noqa: PLC0415
+
+    text = path.read_text(encoding="utf-8") if path.exists() else ""
+    doc = tomlkit.parse(text)
+
+    fs = doc.get("fs")
+    if fs is None:
+        fs = tomlkit.table()
+        doc["fs"] = fs
+
+    aot = tomlkit.aot()
+    for e in new_entries:
+        t = tomlkit.table()
+        t.add("name", e.name)
+        t.add("device", e.device)
+        t.add("target", e.target)
+        t.add("fstype", e.fstype)
+        if e.options != "defaults":
+            t.add("options", e.options)
+        if e.dump != 0:
+            t.add("dump", e.dump)
+        if e.pass_ != 0:
+            t.add("pass", e.pass_)
+        aot.append(t)
+    fs["mounts"] = aot
+
+    return tomlkit.dumps(doc)
+
+
+# ---------------------------------------------------------------------------
 # Aggregate planner
 # ---------------------------------------------------------------------------
 
@@ -2039,6 +2418,7 @@ def build_plan(cfg: ValidatedConfig,
     changes.extend(plan_services(cfg))
     changes.extend(plan_firewall(cfg))
     changes.extend(plan_keyring(cfg))
+    changes.extend(plan_mounts(cfg))
     return Plan(changes=changes), new_manifest
 
 

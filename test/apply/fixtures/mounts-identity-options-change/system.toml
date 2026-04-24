@@ -1,0 +1,8 @@
+schema = 1
+
+[[fs.mounts]]
+name = "data"
+device = "UUID=44444444-4444-4444-4444-444444444444"
+target = "/mnt/data"
+fstype = "btrfs"
+options = "noatime,compress=zstd:3,subvol=@data"
