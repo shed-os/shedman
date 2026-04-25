@@ -52,11 +52,30 @@ if len(sys.argv) > 1 and sys.argv[1] == "--help-summary":
     print("report drift between /etc/shedos/system.toml and live state")
     sys.exit(0)
 
-if len(sys.argv) > 1 and sys.argv[1] in ("--complete-bash", "--complete-zsh", "--complete-fish"):
+if len(sys.argv) > 1 and sys.argv[1] in ("--complete-bash", "--complete-zsh"):
     for _f in ("--config", "-c", "--json", "-j", "--diff", "-d",
                "--fix", "-f", "--waybar", "--tick", "--notify-if-new",
                "--reset-notify-state", "--help", "-h"):
         print(_f)
+    sys.exit(0)
+if len(sys.argv) > 1 and sys.argv[1] == "--complete-fish":
+    for _flag, _desc in (
+        ("--config",             "read system.toml from a custom path"),
+        ("-c",                   "read system.toml from a custom path"),
+        ("--json",               "emit machine-readable JSON"),
+        ("-j",                   "emit machine-readable JSON"),
+        ("--diff",               "render unified diffs for every drift entry"),
+        ("-d",                   "render unified diffs for every drift entry"),
+        ("--fix",                "delegate to shedman apply --yes"),
+        ("-f",                   "delegate to shedman apply --yes"),
+        ("--waybar",             "JSON for waybar's custom/doctor module"),
+        ("--tick",               "timer-driven entry; rc=0 even on drift"),
+        ("--notify-if-new",      "fire a notification iff the drift fingerprint changed"),
+        ("--reset-notify-state", "clear the hysteresis file"),
+        ("--help",               "show usage"),
+        ("-h",                   "show usage"),
+    ):
+        print(f"{_flag}\t{_desc}")
     sys.exit(0)
 
 _LIB_ROOT = os.environ.get("SHEDOS_LIB_ROOT", "/usr/lib/shedos")

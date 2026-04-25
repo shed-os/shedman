@@ -32,10 +32,26 @@ if len(sys.argv) > 1 and sys.argv[1] == "--help-summary":
     print("reconcile /etc/shedos/system.toml against live state")
     sys.exit(0)
 
-if len(sys.argv) > 1 and sys.argv[1] in ("--complete-bash", "--complete-zsh", "--complete-fish"):
+if len(sys.argv) > 1 and sys.argv[1] in ("--complete-bash", "--complete-zsh"):
     for _f in ("--config", "-c", "--yes", "-y", "--dry-run", "-n",
                "--validate", "--help", "-h"):
         print(_f)
+    sys.exit(0)
+if len(sys.argv) > 1 and sys.argv[1] == "--complete-fish":
+    # Fish's `complete -a` reads `value\tdescription` natively. Bash and
+    # zsh ignore descriptions, so they get the flag-only branch above.
+    for _flag, _desc in (
+        ("--config",   "read system.toml from a custom path"),
+        ("-c",         "read system.toml from a custom path"),
+        ("--yes",      "apply without the y/N prompt"),
+        ("-y",         "apply without the y/N prompt"),
+        ("--dry-run",  "print plan and exit; no mutations"),
+        ("-n",         "print plan and exit; no mutations"),
+        ("--validate", "parse + schema-check the TOML; exit 0 if valid"),
+        ("--help",     "show usage"),
+        ("-h",         "show usage"),
+    ):
+        print(f"{_flag}\t{_desc}")
     sys.exit(0)
 
 _LIB_ROOT = os.environ.get("SHEDOS_LIB_ROOT", "/usr/lib/shedos")

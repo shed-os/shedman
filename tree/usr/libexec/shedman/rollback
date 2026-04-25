@@ -28,9 +28,25 @@ if [[ "${1:-}" == "--help-summary" ]]; then
     exit 0
 fi
 
-if [[ "${1:-}" == "--complete-bash" || "${1:-}" == "--complete-zsh" || "${1:-}" == "--complete-fish" ]]; then
+if [[ "${1:-}" == "--complete-bash" || "${1:-}" == "--complete-zsh" ]]; then
     printf '%s\n' --list -l --undo -u --yes -y --keep-current -k \
         --help -h
+    exit 0
+fi
+if [[ "${1:-}" == "--complete-fish" ]]; then
+    # Fish's `complete -a` reads `value\tdescription` natively.
+    cat <<'EOF'
+--list	list recent snapper snapshots and exit
+-l	list recent snapper snapshots and exit
+--undo	promote the most recent rollback backup back to @
+-u	promote the most recent rollback backup back to @
+--yes	skip the y/N confirmation prompt
+-y	skip the y/N confirmation prompt
+--keep-current	with --undo: keep the prior backup around
+-k	with --undo: keep the prior backup around
+--help	show usage
+-h	show usage
+EOF
     exit 0
 fi
 

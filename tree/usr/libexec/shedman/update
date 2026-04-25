@@ -31,10 +31,25 @@ if [[ "${1:-}" == "--help-summary" ]]; then
 fi
 
 # --complete-{bash,zsh} print one flag per line for the shell completers.
-# Keep this list in sync with the argparse/case block below.
-if [[ "${1:-}" == "--complete-bash" || "${1:-}" == "--complete-zsh" || "${1:-}" == "--complete-fish" ]]; then
+# --complete-fish prints `flag\tdescription` (fish's native format).
+# Keep these lists in sync with the argparse/case block below.
+if [[ "${1:-}" == "--complete-bash" || "${1:-}" == "--complete-zsh" ]]; then
     printf '%s\n' --yes -y --help -h --list-snapshots -l \
         --rollback -r --history
+    exit 0
+fi
+if [[ "${1:-}" == "--complete-fish" ]]; then
+    cat <<'EOF'
+--yes	skip the confirmation prompt; unattended upgrade
+-y	skip the confirmation prompt; unattended upgrade
+--help	show usage
+-h	show usage
+--list-snapshots	list snapper snapshots
+-l	list snapper snapshots
+--rollback	roll back to a snapper snapshot
+-r	roll back to a snapper snapshot
+--history	open the upgrade-history TUI
+EOF
     exit 0
 fi
 
