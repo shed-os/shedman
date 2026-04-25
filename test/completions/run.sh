@@ -188,6 +188,35 @@ else
     _fail T7_bash_file_parses "bash -n failed"
 fi
 
+# T8: fish completion file parses cleanly under `fish -n`.
+fish_file=$repo_root/packaging/shedos-system/tree/usr/share/fish/vendor_completions.d/shedman.fish
+if [[ ! -f $fish_file ]]; then
+    _fail T8_fish_file_present "fish completion file missing: $fish_file"
+elif command -v fish >/dev/null 2>&1; then
+    if fish -n "$fish_file" 2>/dev/null; then
+        _ok T8_fish_file_parses
+    else
+        _fail T8_fish_file_parses "fish -n failed"
+    fi
+else
+    echo "skip T8_fish_file_parses: fish not installed"
+fi
+
+# T9: every opt-in subcommand emits non-empty output for --complete-fish.
+for cmd in update apply doctor rollback; do
+    real=$repo_root/packaging/shedos-system/tree/usr/libexec/shedman/$cmd
+    if [[ ! -x $real ]]; then
+        _fail T9_fish_"$cmd" "missing binary"
+        continue
+    fi
+    out=$("$real" --complete-fish 2>/dev/null || true)
+    if [[ -z $out ]]; then
+        _fail T9_fish_"$cmd" "--complete-fish emitted nothing"
+    else
+        _ok T9_fish_"$cmd"
+    fi
+done
+
 # ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------

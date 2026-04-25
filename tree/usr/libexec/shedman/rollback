@@ -28,7 +28,7 @@ if [[ "${1:-}" == "--help-summary" ]]; then
     exit 0
 fi
 
-if [[ "${1:-}" == "--complete-bash" || "${1:-}" == "--complete-zsh" ]]; then
+if [[ "${1:-}" == "--complete-bash" || "${1:-}" == "--complete-zsh" || "${1:-}" == "--complete-fish" ]]; then
     printf '%s\n' --list -l --undo -u --yes -y --keep-current -k \
         --help -h
     exit 0

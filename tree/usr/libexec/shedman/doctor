@@ -52,7 +52,7 @@ if len(sys.argv) > 1 and sys.argv[1] == "--help-summary":
     print("report drift between /etc/shedos/system.toml and live state")
     sys.exit(0)
 
-if len(sys.argv) > 1 and sys.argv[1] in ("--complete-bash", "--complete-zsh"):
+if len(sys.argv) > 1 and sys.argv[1] in ("--complete-bash", "--complete-zsh", "--complete-fish"):
     for _f in ("--config", "-c", "--json", "-j", "--diff", "-d",
                "--fix", "-f", "--waybar", "--tick", "--notify-if-new",
                "--reset-notify-state", "--help", "-h"):
