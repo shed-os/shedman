@@ -12,7 +12,7 @@ shedman - unified ShedOS utility CLI
 
 # DESCRIPTION
 
-*shedman* is a Git-style dispatcher for every utility shipped by
+*shedman* is the unified dispatcher for every utility shipped by
 ShedOS. It discovers subcommands at runtime by globbing every
 executable under /usr/libexec/shedman/ — each becomes
 *shedman <name>*. Filenames prefixed with an underscore are internal
@@ -82,7 +82,8 @@ The headline set:
 	Declarative source of truth (applied via *shedman apply*).
 
 /usr/libexec/shedman/
-	Subcommand binaries (Git-style discovery).
+	Subcommand binaries. The dispatcher discovers them at runtime by
+	listing this directory.
 
 /usr/bin/shedos-\*
 	Silent back-compat shims for legacy shedos-\* names.

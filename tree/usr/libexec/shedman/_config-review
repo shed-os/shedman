@@ -725,7 +725,7 @@ class Cell:
     lineno: Optional[int]
     text: Optional[str]
     # Per-cell diff classification vs BASE (in 3-way) or vs the counterpart
-    # side (in 2-way). Renderer turns this into a git-style marker + color:
+    # side (in 2-way). Renderer turns this into a unified-diff marker + color:
     #   "equal"   → neutral, no marker  (line unchanged from BASE)
     #   "add"     → green "+"           (line the side introduced)
     #   "del"     → red "-"             (line the side deleted from BASE;
@@ -916,7 +916,7 @@ def build_aligned_rows(state: MergeState) -> list[AlignedRow]:
     all three files, so they emit one row per equal line. Inside a hunk we
     do proper per-side alignment against BASE (see ``_hunk_rows_3way``):
     each row's YOURS/THEIRS cell is tagged ``equal``/``add``/``del`` so the
-    renderer can draw git-style green "+" / red "-" per line while the BASE
+    renderer can draw a green "+" or red "-" per line while the BASE
     pane stays neutral.
 
     For a 2-way merge (no BASE), the BASE cell is always blank and we align

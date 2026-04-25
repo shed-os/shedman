@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # shedman — unified dispatcher for ShedOS utilities.
 #
-# Git-style: every file under /usr/libexec/shedman/ is a subcommand.
+# Every executable file under /usr/libexec/shedman/ is a subcommand.
 # `shedman foo args…` execs /usr/libexec/shedman/foo with argv preserved.
 # Packages drop additional subcommands by installing files to that
 # directory; `shedman help` lists everything it finds at runtime.

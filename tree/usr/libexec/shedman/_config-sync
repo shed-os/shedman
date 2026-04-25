@@ -55,8 +55,9 @@ usage() {
 Usage: shedman config --sync [--dry-run] [--yes] [--rebuild-manifest] [--help]
 
 Synchronises $HOME dotfiles against ShedOS package defaults using an
-explicit 3-way merge. A file the user has edited is never overwritten; at
-worst a .shedosnew file is written alongside (exactly like pacman's .pacnew).
+explicit 3-way merge. A file the user has edited is never overwritten;
+when both you and upstream changed it, the upstream version is written
+alongside as <file>.shedosnew for you to merge.
 
 Options:
   -n, --dry-run        Print what would happen, change nothing.
