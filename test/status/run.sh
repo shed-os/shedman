@@ -101,6 +101,17 @@ for f in "${fixtures[@]}"; do
     _run_one "$f"
 done
 
+# Watch-mode pilot tests, only when no specific fixture was requested
+# (so `bash run.sh all-ok` doesn't accidentally run unrelated TUI cases).
+if (( $# == 0 )); then
+    if python3 "$here/watch_pilot.py"; then
+        :
+    else
+        fail=$((fail + 1))
+        failures+=("watch_pilot")
+    fi
+fi
+
 echo
 echo "Summary: $pass passed, $fail failed"
 if (( fail > 0 )); then

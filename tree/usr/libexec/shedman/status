@@ -175,6 +175,75 @@ def _print_json(sections: dict[str, dict[str, Any]],
     print(json.dumps(doc, indent=2, sort_keys=True))
 
 
+def _run_watch(libexec: Path, interval: float) -> int:
+    """Live-refreshing TUI. Re-runs the four signal probes every
+    `interval` seconds and rerenders. `q` to quit. Imported lazily so
+    the one-shot path stays Textual-free."""
+    try:
+        from textual.app import App, ComposeResult  # noqa: PLC0415
+        from textual.containers import Vertical  # noqa: PLC0415
+        from textual.widgets import (  # noqa: PLC0415
+            DataTable, Footer, Header, Static,
+        )
+    except ImportError:
+        print("shedman status --watch: python-textual not installed",
+              file=sys.stderr)
+        return 2
+
+    class StatusWatchApp(App):
+        TITLE = "shedman status"
+        BINDINGS = [("q", "quit", "Quit")]
+        CSS = """
+        DataTable { height: auto; }
+        #verdict { padding: 1 2; }
+        """
+
+        def __init__(self, libexec_path: Path, refresh_s: float) -> None:
+            super().__init__()
+            self._libexec = libexec_path
+            self._refresh_s = refresh_s
+            self._last_refresh = ""
+
+        def compose(self) -> ComposeResult:
+            yield Header(show_clock=True)
+            with Vertical():
+                yield DataTable(id="signals")
+                yield Static("", id="verdict")
+            yield Footer()
+
+        def on_mount(self) -> None:
+            tbl = self.query_one("#signals", DataTable)
+            tbl.add_column("signal", key="signal")
+            tbl.add_column("status", key="status")
+            for name in SIGNALS:
+                tbl.add_row(name, "—", key=name)
+            self._refresh()
+            self.set_interval(self._refresh_s, self._refresh)
+
+        def _refresh(self) -> None:
+            sections = {n: _run_signal(self._libexec, n) for n in SIGNALS}
+            summary = _summarize(sections)
+            tbl = self.query_one("#signals", DataTable)
+            for name in SIGNALS:
+                tbl.update_cell(name, "status",
+                                _humanize(name, sections[name]))
+            verdict = self.query_one("#verdict", Static)
+            if summary["status"] == "ok":
+                verdict.update("Summary: OK")
+            elif summary["status"] == "attention":
+                attn = ", ".join(summary["attention"])
+                verdict.update(f"Summary: Attention needed: "
+                               f"{len(summary['attention'])} item(s) "
+                               f"({attn})")
+            else:
+                miss = ", ".join(summary["unavailable"])
+                verdict.update(f"Summary: {len(summary['unavailable'])} "
+                               f"signal(s) unavailable ({miss})")
+
+    StatusWatchApp(libexec, interval).run()
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     av = argv if argv is not None else sys.argv[1:]
     if av and av[0] == "--help-summary":
@@ -184,8 +253,14 @@ def main(argv: list[str] | None = None) -> int:
         prog="shedman status",
         description="Aggregate dashboard across the four waybar signals.",
     )
-    parser.add_argument("--json", "-j", action="store_true",
-                        help="emit aggregated payload as JSON")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--json", "-j", action="store_true",
+                      help="emit aggregated payload as JSON")
+    mode.add_argument("--watch", "-w", action="store_true",
+                      help="live-refreshing TUI (q to quit)")
+    parser.add_argument("--interval", type=float, default=None,
+                        help="seconds between refreshes when --watch "
+                             "(default: 5; min 1)")
     args = parser.parse_args(av)
 
     libexec = Path(os.environ.get("SHEDOS_STATUS_LIBEXEC", DEFAULT_LIBEXEC))
@@ -193,6 +268,15 @@ def main(argv: list[str] | None = None) -> int:
         print(f"shedman status: libexec dir missing: {libexec}",
               file=sys.stderr)
         return 2
+
+    if args.watch:
+        interval = args.interval
+        if interval is None:
+            env_iv = os.environ.get("SHEDOS_STATUS_INTERVAL")
+            interval = float(env_iv) if env_iv else 5.0
+        if interval < 1.0:
+            interval = 1.0
+        return _run_watch(libexec, interval)
 
     sections = {name: _run_signal(libexec, name) for name in SIGNALS}
     summary = _summarize(sections)
