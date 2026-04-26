@@ -74,8 +74,11 @@ done
 
 # T3 missing catalog → exits 1. Use a path that genuinely doesn't exist
 # so the catalog-not-readable branch fires and the script exits before
-# any UI / connectivity work.
-SHEDOS_APPS_CATALOG="$tmp/no-such-catalog.tsv" out=$(USER=test_not_calamares "$tool" 2>&1); rc=$?
+# any UI / connectivity work. Must use `env` to pass SHEDOS_APPS_CATALOG
+# into the subshell — bash treats `VAR=val out=$(...)` as a local
+# assignment, not an env-var prefix.
+out=$(env SHEDOS_APPS_CATALOG="$tmp/no-such-catalog.tsv" \
+    USER=test_not_calamares "$tool" 2>&1); rc=$?
 if (( rc == 1 )); then
     _ok T3_missing_catalog_refused
 else
