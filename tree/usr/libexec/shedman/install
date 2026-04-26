@@ -84,7 +84,7 @@ fi
 
 # Refuse root — yay itself refuses, but fail fast with a clearer message.
 if [[ "$(id -u)" -eq 0 ]]; then
-    yad --error --title="ShedOS Apps" --width=380 --center \
+    yad --error --title="ShedOS Apps" --width=380 --center --button="OK!gtk-ok:0" \
         --text="Don't run this as root.\n\nyay builds AUR packages as a regular user and calls sudo itself." \
         2>/dev/null || \
         echo "shedman install: refuse to run as root" >&2
@@ -92,7 +92,7 @@ if [[ "$(id -u)" -eq 0 ]]; then
 fi
 
 if [[ ! -r "$CATALOG" ]]; then
-    yad --error --title="ShedOS Apps" --width=380 --center \
+    yad --error --title="ShedOS Apps" --width=380 --center --button="OK!gtk-ok:0" \
         --text="App catalog missing:\n<tt>$CATALOG</tt>\n\nThis is a packaging bug — please report it." \
         2>/dev/null
     exit 1
@@ -152,7 +152,7 @@ prompt_connect() {
                 elif command -v kitty >/dev/null 2>&1 && command -v nmtui >/dev/null 2>&1; then
                     kitty --title "Network settings" -e nmtui >/dev/null 2>&1
                 else
-                    yad --info --title="ShedOS Apps" --width=360 --center \
+                    yad --info --title="ShedOS Apps" --width=360 --center --button="OK!gtk-ok:0" \
                         --text="No network configuration tool found.\nInstall nm-connection-editor or run <tt>nmtui</tt> manually." \
                         2>/dev/null
                 fi
@@ -184,7 +184,7 @@ while IFS=$'\t' read -r pkg cat name desc _icon; do
 done < "$CATALOG"
 
 if [[ ${#AUR[@]} -eq 0 ]]; then
-    yad --info --title="ShedOS Apps" --width=360 --center \
+    yad --info --title="ShedOS Apps" --width=360 --center --button="OK!gtk-ok:0" \
         --text="No apps in the catalog. Nothing to do." 2>/dev/null
     touch "$MARKER"
     exit 0
@@ -241,7 +241,7 @@ if [[ ${#PKGS[@]} -eq 0 ]]; then
     # Nothing selected = user consciously skipped everything. Mark done
     # so we don't re-prompt on every login.
     touch "$MARKER"
-    yad --info --title="ShedOS Apps" --width=360 --center \
+    yad --info --title="ShedOS Apps" --width=360 --center --button="OK!gtk-ok:0" \
         --text="No apps selected. You can install anything later from the <b>ShedOS Apps</b> entry in your app launcher." \
         2>/dev/null
     exit 0
@@ -253,7 +253,7 @@ fi
 # final command string are what's under test; the package install is just
 # yay doing yay things.
 if [[ $DRY_RUN -eq 0 ]] && ! command -v yay >/dev/null 2>&1; then
-    yad --error --title="ShedOS Apps" --width=400 --center \
+    yad --error --title="ShedOS Apps" --width=400 --center --button="OK!gtk-ok:0" \
         --text="<b>yay is not installed.</b>\n\nInstall it with:\n<tt>sudo pacman -S yay</tt>\n\nThen re-run ShedOS Apps from the launcher." \
         2>/dev/null
     exit 1
@@ -276,7 +276,7 @@ for t in kitty alacritty foot wezterm xterm; do
 done
 
 if [[ ${#TERM_CMD[@]} -eq 0 ]]; then
-    yad --error --title="ShedOS Apps" --width=380 --center \
+    yad --error --title="ShedOS Apps" --width=380 --center --button="OK!gtk-ok:0" \
         --text="No terminal emulator found. Install kitty, alacritty, foot, or xterm." \
         2>/dev/null
     exit 1
@@ -330,7 +330,7 @@ if [[ "$RC" == "0" ]]; then
     # Dry runs don't persist the marker — keeps the dev UI loop runnable
     # and leaves a real first-boot user's state untouched.
     [[ $DRY_RUN -eq 0 ]] && touch "$MARKER"
-    yad --info --title="ShedOS Apps" --width=420 --center \
+    yad --info --title="ShedOS Apps" --width=420 --center --button="OK!gtk-ok:0" \
         --window-icon=emblem-default \
         --image=emblem-default \
         --text="<b>Done!</b>\n\nInstalled: <tt>${PKGS[*]}</tt>\n\nLaunch them from your app launcher. You can add more any time via <b>ShedOS Apps</b>." \
@@ -338,7 +338,7 @@ if [[ "$RC" == "0" ]]; then
         2>/dev/null
     exit 0
 else
-    yad --warning --title="ShedOS Apps" --width=440 --center \
+    yad --warning --title="ShedOS Apps" --width=440 --center --button="OK!gtk-ok:0" \
         --text="<b>Some packages didn't install.</b>\n\nyay exited with status <tt>$RC</tt>. Try again after reading the terminal output — the usual culprits are missing PGP keys or expired AUR packages.\n\nRe-open this installer from your app launcher when you're ready." \
         2>/dev/null
     exit 1
