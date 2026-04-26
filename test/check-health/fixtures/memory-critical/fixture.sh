@@ -1,3 +1,4 @@
+#!/usr/bin/env bash
 # OOM territory: avg10=75% → critical.
 EXPECT_OVERALL=critical
 EXPECT_WAYBAR_CLASS=critical

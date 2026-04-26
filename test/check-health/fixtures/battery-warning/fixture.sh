@@ -1,3 +1,4 @@
+#!/usr/bin/env bash
 # 2-year-old laptop battery: 75% health → warning.
 EXPECT_OVERALL=warning
 EXPECT_WAYBAR_CLASS=warning

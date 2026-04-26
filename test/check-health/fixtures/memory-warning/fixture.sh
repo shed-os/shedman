@@ -1,3 +1,4 @@
+#!/usr/bin/env bash
 # Stalled: avg10=15% (>10 warn, <60 crit) → warning.
 EXPECT_OVERALL=warning
 EXPECT_WAYBAR_CLASS=warning

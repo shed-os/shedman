@@ -1,3 +1,4 @@
+#!/usr/bin/env bash
 # Aggregation check: memory ok, battery warning, cpu critical → critical wins.
 # Regression guard for the _merge_worst logic.
 EXPECT_OVERALL=critical
