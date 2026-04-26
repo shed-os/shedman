@@ -92,8 +92,8 @@ def manifest_path() -> Path:
 
 def baseline_path(section: str) -> Path:
     """Per-section baseline file. Snapshotted on first apply, never
-    rewritten — represents the install-time state Phase 6A reconcilers
-    are invisible to."""
+    rewritten — represents the install-time state the reconciler
+    treats as invisible (never adopted, never removed)."""
     return state_root() / f"{section}.baseline.json"
 
 
@@ -1040,11 +1040,10 @@ def atomic_write_text(path: Path, text: str, *, mode: int = 0o644) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Cross-cutting Phase 6A scaffolding: three-way merge, baseline + state
+# Cross-cutting reconciler scaffolding: three-way merge, baseline + state
 # files, format-preserving system.toml writes via tomlkit.
 #
-# Every Phase 6A reconciler runs the same algorithm with different
-# identity tuples:
+# Every reconciler runs the same algorithm with different identity tuples:
 #
 #   declared    — set of items in /etc/shedos/system.toml
 #   live        — set of items observed on the system right now
@@ -1075,7 +1074,7 @@ def threeway_merge(
 ) -> MergeResult:
     """Compute add/remove/adopt sets for the bidirectional reconciler.
 
-    Item-by-item rules (matching the table in the Phase 6A plan):
+    Item-by-item rules:
 
       * baseline rows               → invisible; never in any output set
       * declared & live             → aligned (noop)
