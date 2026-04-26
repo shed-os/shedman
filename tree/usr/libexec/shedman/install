@@ -29,19 +29,21 @@ fi
 # Catalog resolution, in priority order:
 #   1. $SHEDOS_APPS_CATALOG if set (explicit dev override)
 #   2. /usr/share/shedos/apps-catalog.tsv (installed package)
-#   3. ../share/shedos/apps-catalog.tsv relative to this script
-#      (in-tree dev checkout: tree/usr/bin/ -> tree/usr/share/shedos/)
+#   3. ../../share/shedos/apps-catalog.tsv relative to this script
+#      (in-tree dev checkout layout:
+#       tree/usr/libexec/shedman/install → tree/usr/share/shedos/)
 #
-# The script-relative fallback means `bash path/to/shedos-apps-installer`
-# works from a git checkout with zero env setup.
+# The script-relative fallback means `bash path/to/install` works from a
+# git checkout with zero env setup. The `../../` is load-bearing — `..`
+# alone gets us to tree/usr/libexec/, not tree/usr/.
 _self="$(readlink -f -- "$0" 2>/dev/null || echo "$0")"
 _self_dir="$(dirname -- "$_self")"
 if [[ -n "${SHEDOS_APPS_CATALOG:-}" ]]; then
     CATALOG="$SHEDOS_APPS_CATALOG"
 elif [[ -r "/usr/share/shedos/apps-catalog.tsv" ]]; then
     CATALOG="/usr/share/shedos/apps-catalog.tsv"
-elif [[ -r "$_self_dir/../share/shedos/apps-catalog.tsv" ]]; then
-    CATALOG="$_self_dir/../share/shedos/apps-catalog.tsv"
+elif [[ -r "$_self_dir/../../share/shedos/apps-catalog.tsv" ]]; then
+    CATALOG="$_self_dir/../../share/shedos/apps-catalog.tsv"
 else
     CATALOG="/usr/share/shedos/apps-catalog.tsv"   # for the error message
 fi
