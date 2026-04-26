@@ -111,6 +111,8 @@ def run_apply(cfg_path: _core.Optional[Path] = None, *,
             print("please answer y, n, or diff")
 
     applied: list[_core.Change] = []
+    checkpoint = _core.StateCheckpoint()
+    checkpoint.snapshot()
     try:
         for change in plan.changes:
             if change.apply_fn is None:
@@ -120,6 +122,7 @@ def run_apply(cfg_path: _core.Optional[Path] = None, *,
     except Exception as e:
         print(_core.colorize(f"\nFAIL during apply: {e}", "red"), file=sys.stderr)
         print("rolling back …", file=sys.stderr)
+        any_undo_failed = False
         for change in reversed(applied):
             if change.undo_fn is None:
                 continue
@@ -128,8 +131,22 @@ def run_apply(cfg_path: _core.Optional[Path] = None, *,
             except Exception as rollback_err:
                 print(f"  rollback of {change.section}:{change.summary} "
                       f"failed: {rollback_err}", file=sys.stderr)
+                any_undo_failed = True
+        if any_undo_failed:
+            restored = checkpoint.restore_all()
+            if restored:
+                print(
+                    f"  restored {len(restored)} state file(s) to pre-apply "
+                    f"snapshot.\n"
+                    f"  Live system may have residual state from the failed "
+                    f"undo — run `shedman doctor` to see what diverged.\n"
+                    f"  Next `shedman apply` will idempotently re-attempt "
+                    f"any state still missing.",
+                    file=sys.stderr,
+                )
         return 1
 
+    checkpoint.commit()
     new_manifest.save()
     print(_core.colorize(f"\napplied {len(applied)} change(s).", "green"))
     return 0

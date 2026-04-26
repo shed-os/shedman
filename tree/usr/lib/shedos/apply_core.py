@@ -105,6 +105,112 @@ def state_path(section: str) -> Path:
 
 
 # ---------------------------------------------------------------------------
+# State-file checkpointing across an apply transaction.
+#
+# Each reconciler's apply_fn writes its own per-section state file as
+# changes go in (firewall, keyring, mounts, cmdline, groups, users
+# today). When an apply fails partway and the rollback loop runs, an
+# undo_fn that itself fails leaves the live system in an unknown
+# intermediate state AND leaves the state file in whatever state the
+# original apply_fn put it in — a guaranteed mismatch.
+#
+# `StateCheckpoint` snapshots every existing per-section state file in
+# memory at apply-loop entry. The apply binary calls `restore_all()`
+# only when at least one undo_fn fails, restoring the manifest to the
+# pre-apply view. Next `shedman apply` then sees the actual live state
+# vs the pre-apply state and idempotently re-attempts whatever
+# diverged. The conservative choice: a wasted re-application call is
+# safe; silently mismatched state isn't.
+#
+# `commit()` is a no-op (snapshots are in-memory, GC'd at scope exit);
+# the binary uses it as a readability flag for the success path.
+# ---------------------------------------------------------------------------
+
+
+class StateCheckpoint:
+    """Context manager snapshotting per-section state files.
+
+    Usage:
+        cp = StateCheckpoint()
+        cp.snapshot()
+        try:
+            <apply loop>
+        except Exception:
+            <undo loop>
+            if any_undo_failed:
+                cp.restore_all()
+            raise
+        cp.commit()
+    """
+
+    def __init__(self) -> None:
+        # path → bytes content at snapshot time, or None if absent.
+        self._snapshots: dict[Path, Optional[bytes]] = {}
+        self._snapshotted = False
+
+    def snapshot(self) -> None:
+        """Read every existing <section>.state.json into memory."""
+        root = state_root()
+        if root.is_dir():
+            for p in sorted(root.glob("*.state.json")):
+                try:
+                    self._snapshots[p] = p.read_bytes()
+                except OSError:
+                    self._snapshots[p] = None
+        self._snapshotted = True
+
+    def restore_all(self) -> list[Path]:
+        """Write every snapshot back to its original path. Returns the
+        list of paths actually restored — callers should log this for
+        transparency.
+
+        Three cases:
+          * snapshot held content → write content back
+          * snapshot held None (file absent at snapshot) → delete current
+          * file currently exists but wasn't in snapshot at all (a section
+            whose first-ever apply just ran and created its state.json)
+            → delete current
+        """
+        if not self._snapshotted:
+            return []
+        restored: list[Path] = []
+        snapshot_paths = set(self._snapshots.keys())
+        for p, content in self._snapshots.items():
+            try:
+                if content is None:
+                    if p.exists():
+                        p.unlink()
+                        restored.append(p)
+                else:
+                    atomic_write_text(p, content.decode("utf-8"), mode=0o644)
+                    restored.append(p)
+            except OSError:
+                # Best-effort — a state file we can't restore now is
+                # one we couldn't have written either, so the system
+                # was already broken before we tried to apply.
+                pass
+        # Remove any state.json that exists now but didn't at snapshot
+        # time — a section whose first-ever apply just ran.
+        root = state_root()
+        if root.is_dir():
+            for p in sorted(root.glob("*.state.json")):
+                if p in snapshot_paths:
+                    continue
+                try:
+                    p.unlink()
+                    restored.append(p)
+                except OSError:
+                    pass
+        return restored
+
+    def commit(self) -> None:
+        """No-op signal that the apply succeeded and snapshots can be
+        forgotten. Symmetry with restore_all() makes the apply-binary
+        flow easier to read."""
+        pass
+
+
+# ---------------------------------------------------------------------------
 # Colorized output — opt-out via NO_COLOR (XDG convention).
 # ---------------------------------------------------------------------------
 
