@@ -26,7 +26,6 @@ EXPECTED=(
     thermald.service
     power-profiles-daemon.service
     cups.socket
-    libvirtd.socket
 )
 
 FIX=0
