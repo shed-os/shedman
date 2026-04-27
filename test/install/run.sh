@@ -127,6 +127,104 @@ else
     _fail T6_catalog_well_formed "catalog $catalog not readable"
 fi
 
+# T7 — yad missing → exits 1 with no marker. Regression test for the
+# v2026.04.27-rc1 silent-failure bug: the previous install would skip
+# the yad-availability check until after the catalog/marker checks,
+# which themselves used yad to render their error dialogs (resulting
+# in cryptic stderr if yad was missing).
+no_yad_stub=$tmp/no-yad-stubs
+mkdir -p "$no_yad_stub"
+for bin in bash id mkdir touch git getent grep cut date readlink dirname stat sleep rm cat sed awk head curl mktemp mkfifo kill wait nmcli; do
+    src=$(command -v "$bin" 2>/dev/null)
+    [[ -n $src ]] && ln -sf "$src" "$no_yad_stub/$bin"
+done
+
+HOME_T7=$tmp/home-t7
+mkdir -p "$HOME_T7/.local/state/shedos"
+out=$(env -i \
+    PATH="$no_yad_stub" \
+    HOME="$HOME_T7" \
+    USER=test_not_calamares \
+    XDG_STATE_HOME="$HOME_T7/.local/state" \
+    SHEDOS_APPS_CATALOG="$catalog" \
+    "$tool" 2>&1); rc=$?
+
+if (( rc == 1 )) && \
+   [[ ! -f "$HOME_T7/.local/state/shedos/apps-installer-done" ]] && \
+   grep -q "yad not installed" "$HOME_T7/.local/state/shedos/install.log" 2>/dev/null; then
+    _ok T7_yad_missing_exits_1_no_marker
+else
+    log_content=$(cat "$HOME_T7/.local/state/shedos/install.log" 2>/dev/null || echo "(no log)")
+    marker_state=$([[ -f "$HOME_T7/.local/state/shedos/apps-installer-done" ]] && echo present || echo absent)
+    _fail T7_yad_missing_exits_1_no_marker "rc=$rc marker=$marker_state log=${log_content//$'\n'/ | }"
+fi
+
+# T8 — --dry-run-no-yad prints the exact yay command line the
+# autonomous flow will run. Confirms the autonomous flag set is wired
+# correctly: --noconfirm + --answerclean N + --answerdiff N +
+# --answeredit N + --cleanafter + --removemake + --mflags=--skippgpcheck.
+HOME_T8=$tmp/home-t8
+mkdir -p "$HOME_T8/.local/state/shedos"
+mini_catalog=$tmp/mini-catalog.tsv
+cat > "$mini_catalog" <<'EOF'
+# minimal test catalog
+foo-bin	Editors	Foo	desc1	icon
+bar-bin	Browsers	Bar	desc2	icon
+EOF
+out=$(env -i \
+    PATH="$PATH" \
+    HOME="$HOME_T8" \
+    USER=test_not_calamares \
+    XDG_STATE_HOME="$HOME_T8/.local/state" \
+    SHEDOS_APPS_CATALOG="$mini_catalog" \
+    SHEDOS_TEST_PKGS="foo-bin bar-bin" \
+    "$tool" --dry-run-no-yad 2>&1); rc=$?
+
+expected_args=(
+    "yay -S --needed --noconfirm"
+    "--answerclean N --answerdiff N --answeredit N"
+    "--cleanafter --removemake"
+    "--mflags=--skippgpcheck"
+    "foo-bin bar-bin"
+)
+ok_t8=1
+if (( rc != 0 )); then
+    ok_t8=0
+fi
+for needle in "${expected_args[@]}"; do
+    if ! grep -qF -- "$needle" <<<"$out"; then
+        ok_t8=0
+    fi
+done
+if (( ok_t8 == 1 )); then
+    _ok T8_dry_run_emits_autonomous_flag_set
+else
+    _fail T8_dry_run_emits_autonomous_flag_set "rc=$rc out=$out"
+fi
+
+# T9 — --dry-run-no-yad with empty SHEDOS_TEST_PKGS exits without
+# attempting to run anything (no apps selected = "user picked
+# nothing", marker SHOULD be written so we don't re-prompt forever).
+# Note: when DRY_RUN=1 we skip the actual install, but the no-apps-
+# selected branch still touches the marker — that's the right policy
+# for a real run too.
+HOME_T9=$tmp/home-t9
+mkdir -p "$HOME_T9/.local/state/shedos"
+out=$(env -i \
+    PATH="$PATH" \
+    HOME="$HOME_T9" \
+    USER=test_not_calamares \
+    XDG_STATE_HOME="$HOME_T9/.local/state" \
+    SHEDOS_APPS_CATALOG="$mini_catalog" \
+    SHEDOS_TEST_PKGS="" \
+    "$tool" --dry-run-no-yad 2>&1); rc=$?
+if (( rc == 0 )) && [[ -f "$HOME_T9/.local/state/shedos/apps-installer-done" ]]; then
+    _ok T9_dry_run_no_pkgs_marks_done
+else
+    marker_state=$([[ -f "$HOME_T9/.local/state/shedos/apps-installer-done" ]] && echo present || echo absent)
+    _fail T9_dry_run_no_pkgs_marks_done "rc=$rc marker=$marker_state out=$out"
+fi
+
 # Summary
 total=$((pass + fail))
 echo
