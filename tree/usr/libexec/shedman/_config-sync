@@ -182,11 +182,9 @@ _pkg_policy() {
     awk 'NF && $1 !~ /^#/ { print; exit }' "$f"
 }
 
-# ---------------------------------------------------------------------------
 # Walk defaults and build a plan.
 # Each entry: "<case>\t<pkg>\t<relpath>\t<src>\t<dst>\t<last>"
 # case ∈ seed | noop | auto | conflict
-# ---------------------------------------------------------------------------
 _load_user_excludes
 
 plan=()
@@ -232,10 +230,8 @@ for pkg_root in "$SHEDOS_DEFAULTS_ROOT"/*/defaults; do
     done < <(find "$pkg_root" -type f -print0)
 done
 
-# ---------------------------------------------------------------------------
 # --rebuild-manifest: hash current $HOME files against current defaults and
 # write last-seen = sha(src) unconditionally. Does NOT copy files.
-# ---------------------------------------------------------------------------
 if (( REBUILD_MANIFEST )); then
     n=0
     for entry in "${plan[@]}"; do
@@ -286,9 +282,7 @@ if (( REBUILD_MANIFEST )); then
     exit 0
 fi
 
-# ---------------------------------------------------------------------------
 # Print plan.
-# ---------------------------------------------------------------------------
 seed_n=0 auto_n=0 conflict_n=0 noop_n=0
 for entry in "${plan[@]}"; do
     IFS=$'\t' read -r kind pkg relpath _ _ _ <<<"$entry"
@@ -352,9 +346,7 @@ if (( DRY_RUN )); then
     exit 0
 fi
 
-# ---------------------------------------------------------------------------
 # Prompt (skipped in --yes mode; conflicts still produce .shedosnew).
-# ---------------------------------------------------------------------------
 if ! (( YES )); then
     while :; do
         read -rp "Apply this plan? [y/N/list-diffs] " yn
@@ -375,9 +367,7 @@ if ! (( YES )); then
     done
 fi
 
-# ---------------------------------------------------------------------------
 # Apply.
-# ---------------------------------------------------------------------------
 for entry in "${plan[@]}"; do
     IFS=$'\t' read -r kind pkg relpath src dst last <<<"$entry"
 

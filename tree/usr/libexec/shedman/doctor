@@ -88,12 +88,9 @@ import apply_core as _core  # noqa: E402
 DOCTOR_STATE = "doctor.state.json"
 
 
-# ---------------------------------------------------------------------------
-# Hysteresis — remember which drift fingerprint we last notified about so
-# the timer-driven invocation doesn't spam the same message every 6 hours.
-# ---------------------------------------------------------------------------
-
-
+# Hysteresis — remember which drift fingerprint we last notified about
+# so the timer-driven invocation doesn't spam the same message every
+# 6 hours.
 def _doctor_state_path() -> Path:
     return _core.state_root() / DOCTOR_STATE
 
@@ -122,13 +119,9 @@ def _save_last_hash(hash_value: str) -> None:
     )
 
 
-# ---------------------------------------------------------------------------
-# Plan acquisition — shared entry for every mode. Returns (rc, plan) where
-# rc is 0=aligned, 1=drift, 2=error. On rc==2 plan is None and an error has
-# already been printed to stderr.
-# ---------------------------------------------------------------------------
-
-
+# Plan acquisition — shared entry for every mode. Returns (rc, plan)
+# where rc is 0=aligned, 1=drift, 2=error. On rc==2 plan is None and an
+# error has already been printed to stderr.
 def _compute_plan(cfg_path: "_core.Optional[Path]") -> tuple[int, "_core.Optional[_core.Plan]"]:
     try:
         cfg = _core.load_config(cfg_path)
@@ -147,11 +140,7 @@ def _compute_plan(cfg_path: "_core.Optional[Path]") -> tuple[int, "_core.Optiona
     return (0 if plan.is_empty() else 1), plan
 
 
-# ---------------------------------------------------------------------------
 # Subprocess hooks — env-overridable for tests.
-# ---------------------------------------------------------------------------
-
-
 def _notify_send(title: str, body: str) -> None:
     override = os.environ.get("SHEDOS_DOCTOR_NOTIFY_CMD")
     if override is not None:
@@ -192,11 +181,6 @@ def _delegate_apply(cfg_path: "_core.Optional[Path]") -> int:
         print(f"shedman doctor: cannot exec shedman apply: {e}", file=sys.stderr)
         return 2
     return r.returncode
-
-
-# ---------------------------------------------------------------------------
-# Output modes
-# ---------------------------------------------------------------------------
 
 
 def _emit_human(plan: _core.Plan) -> None:
@@ -247,11 +231,6 @@ def _waybar_payload(plan: _core.Plan) -> dict[str, str]:
         "class": "drift",
         "alt": "drift",
     }
-
-
-# ---------------------------------------------------------------------------
-# CLI
-# ---------------------------------------------------------------------------
 
 
 def main() -> int:

@@ -43,9 +43,7 @@ from difflib import SequenceMatcher, unified_diff
 from pathlib import Path
 from typing import Optional
 
-# ---------------------------------------------------------------------------
 # Constants and paths
-# ---------------------------------------------------------------------------
 
 HOME = Path(os.environ.get("HOME", os.path.expanduser("~")))
 STATE_ROOT = Path(os.environ.get("XDG_STATE_HOME", HOME / ".local/state")) / "shedos"
@@ -79,9 +77,7 @@ UNDO_DEPTH = 32
 LONG_LINE_HL_CUTOFF = 2000
 
 
-# ---------------------------------------------------------------------------
 # Data types
-# ---------------------------------------------------------------------------
 
 
 class Side(str, enum.Enum):
@@ -158,9 +154,7 @@ class UnresolvedHunk(Exception):
         self.hunk = hunk
 
 
-# ---------------------------------------------------------------------------
 # Low-level helpers
-# ---------------------------------------------------------------------------
 
 
 def _char_width(ch: str) -> int:
@@ -334,9 +328,7 @@ def draft_path_for(relpath: str) -> Path:
     return DRAFT_ROOT / f"{relpath}{DRAFT_SUFFIX}"
 
 
-# ---------------------------------------------------------------------------
 # Scan — discover .shedosnew conflicts under $HOME and classify each.
-# ---------------------------------------------------------------------------
 
 
 def find_pkg_and_src(relpath: str) -> tuple[Optional[str], Optional[Path]]:
@@ -431,10 +423,8 @@ def _classify(relpath: str, yours: Path, theirs: Path) -> Conflict:
     )
 
 
-# ---------------------------------------------------------------------------
 # Auto-resolve at scan: identical content (byte-for-byte) should just delete
 # .shedosnew and bump the manifest — never surfaced to the user.
-# ---------------------------------------------------------------------------
 
 
 def auto_resolve_identical(conflicts: list[Conflict]) -> tuple[list[Conflict], int]:
@@ -478,9 +468,7 @@ def _update_manifest(relpath: str, src_path: Path) -> None:
         pass
 
 
-# ---------------------------------------------------------------------------
 # Hunk extraction (3-way + 2-way)
-# ---------------------------------------------------------------------------
 
 
 def extract_hunks_3way(base: list[str], yours: list[str],
@@ -656,9 +644,7 @@ def extract_hunks_2way(yours: list[str], theirs: list[str]) -> list[Hunk]:
     return hunks
 
 
-# ---------------------------------------------------------------------------
 # Assembly
-# ---------------------------------------------------------------------------
 
 
 def assemble(state: MergeState) -> list[str]:
@@ -707,7 +693,6 @@ def _assemble_2way(state: MergeState) -> list[str]:
     return out
 
 
-# ---------------------------------------------------------------------------
 # Aligned-row model for the 3-pane merge viewer.
 #
 # The merge UI shows YOURS | BASE | THEIRS as three parallel columns with the
@@ -716,7 +701,6 @@ def _assemble_2way(state: MergeState) -> list[str]:
 # the three pane heights stay equal. This is the data model IntelliJ's merge
 # viewer shows; we need the alignment here so vertical scroll stays in sync
 # without the reader having to cross-reference line numbers.
-# ---------------------------------------------------------------------------
 
 
 @dataclass
@@ -983,9 +967,7 @@ def build_aligned_rows(state: MergeState) -> list[AlignedRow]:
     return rows
 
 
-# ---------------------------------------------------------------------------
 # Load a merge state for one conflict.
-# ---------------------------------------------------------------------------
 
 
 def load_merge_state(c: Conflict, force_2way: bool = False) -> MergeState:
@@ -1035,9 +1017,7 @@ def load_merge_state(c: Conflict, force_2way: bool = False) -> MergeState:
     )
 
 
-# ---------------------------------------------------------------------------
 # Atomic write-back
-# ---------------------------------------------------------------------------
 
 
 class ConcurrentModification(Exception):
@@ -1121,9 +1101,7 @@ def sweep_leftover_tmps() -> int:
     return removed
 
 
-# ---------------------------------------------------------------------------
 # Drafts
-# ---------------------------------------------------------------------------
 
 
 def save_draft(state: MergeState, current_hunk: int) -> None:
@@ -1237,9 +1215,7 @@ def apply_draft(state: MergeState, draft: dict) -> bool:
     return True
 
 
-# ---------------------------------------------------------------------------
 # Process lock
-# ---------------------------------------------------------------------------
 
 
 class LockAcquireError(Exception):
@@ -1266,9 +1242,7 @@ def release_lock(fd: int) -> None:
     os.close(fd)
 
 
-# ---------------------------------------------------------------------------
 # CLI entry + dispatch
-# ---------------------------------------------------------------------------
 
 
 def _human_size(n: int) -> str:
@@ -1329,9 +1303,7 @@ def cmd_dry_run(conflicts: list[Conflict], force_2way: bool = False) -> int:
     return 0
 
 
-# ---------------------------------------------------------------------------
 # Textual app (lazy-imported)
-# ---------------------------------------------------------------------------
 
 
 def _run_textual(conflicts: list[Conflict], *, start_file: Optional[str] = None,
@@ -1534,11 +1506,9 @@ def _run_app_inline(*args, **kwargs) -> int:  # noqa: ARG001
     return 1
 
 
-# ---------------------------------------------------------------------------
 # Textual UI — lazy-loaded so --list / --dry-run / --stdin-decisions don't
 # pay the import cost. Everything below this point requires python-textual
 # and python-rich.
-# ---------------------------------------------------------------------------
 
 
 def _load_textual_ui() -> None:

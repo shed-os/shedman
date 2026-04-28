@@ -47,11 +47,9 @@ from dataclasses import dataclass
 from typing import Optional
 
 
-# ---------------------------------------------------------------------------
 # Small data helpers — kept importable without Textual so tests can exercise
 # them cheaply and the main script degrades gracefully when textual is
 # unavailable.
-# ---------------------------------------------------------------------------
 
 
 @dataclass
@@ -198,10 +196,8 @@ def copy_to_clipboard(text: str) -> bool:
     return False
 
 
-# ---------------------------------------------------------------------------
 # Filter state — held as a tiny value type so the UI can print it verbatim
 # and the tests can assert on it without booting Textual.
-# ---------------------------------------------------------------------------
 
 
 @dataclass
@@ -238,9 +234,7 @@ class FilterState:
                 f"window={self.window_label}{regex}")
 
 
-# ---------------------------------------------------------------------------
 # Validation for the regex prompt. Tests cover this directly.
-# ---------------------------------------------------------------------------
 
 
 def validate_regex(pattern: str) -> Optional[str]:
@@ -254,10 +248,8 @@ def validate_regex(pattern: str) -> Optional[str]:
     return None
 
 
-# ---------------------------------------------------------------------------
 # Textual UI — lazy-loaded so that `--help` and unit tests can run without
 # the dep.
-# ---------------------------------------------------------------------------
 
 
 LogsApp = None  # populated by build_app_class() — exposed so tests can pilot it.
@@ -640,9 +632,7 @@ def _run_app() -> int:
     return 0
 
 
-# ---------------------------------------------------------------------------
 # Entrypoint
-# ---------------------------------------------------------------------------
 
 
 def main() -> int:

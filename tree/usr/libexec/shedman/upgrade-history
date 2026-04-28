@@ -36,10 +36,8 @@ from datetime import datetime
 from typing import Optional
 
 
-# ---------------------------------------------------------------------------
 # Data model — kept importable without Textual so tests can exercise the
 # parser cheaply.
-# ---------------------------------------------------------------------------
 
 
 @dataclass
@@ -71,9 +69,7 @@ class HistoryView:
     manual: list[Snapshot] = field(default_factory=list)   # non-shedos-update snapshots
 
 
-# ---------------------------------------------------------------------------
 # snapper JSON parsing
-# ---------------------------------------------------------------------------
 
 
 def _snapshot_from_obj(obj: dict) -> Snapshot:
@@ -181,9 +177,7 @@ def group_into_runs(snapshots: list[Snapshot]) -> HistoryView:
     return HistoryView(runs=runs, orphans=orphans, manual=manual)
 
 
-# ---------------------------------------------------------------------------
 # snapper status → package diff
-# ---------------------------------------------------------------------------
 
 
 PACMAN_LOCAL = "/var/lib/pacman/local/"
@@ -267,9 +261,7 @@ def summarize_changes(changes: list[PackageChange]) -> tuple[int, int, int]:
     return added, removed, updated
 
 
-# ---------------------------------------------------------------------------
 # subprocess wiring
-# ---------------------------------------------------------------------------
 
 
 def _run(cmd: list[str], env_override: Optional[str] = None) -> tuple[int, str]:
@@ -317,10 +309,8 @@ def trigger_rollback(pre_number: int) -> tuple[int, str]:
     )
 
 
-# ---------------------------------------------------------------------------
 # Date normalisation — snapper emits assorted formats depending on version
 # and the `--iso` flag. We show whatever we parse back as "YYYY-MM-DD HH:MM".
-# ---------------------------------------------------------------------------
 
 
 def _normalize_date(raw: str) -> str:
@@ -350,9 +340,7 @@ def render_run_row(run: UpgradeRun) -> tuple[str, str, str]:
     return id_range, when, desc
 
 
-# ---------------------------------------------------------------------------
 # Textual UI (lazy-loaded).
-# ---------------------------------------------------------------------------
 
 
 UpgradeHistoryApp = None  # populated by build_app_class(); test hook.
@@ -690,9 +678,7 @@ def _run_app() -> int:
     return 0
 
 
-# ---------------------------------------------------------------------------
 # Entrypoint
-# ---------------------------------------------------------------------------
 
 
 def _print_plain(view: HistoryView) -> None:

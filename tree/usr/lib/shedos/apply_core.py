@@ -43,9 +43,7 @@ from typing import Any, Callable, Optional
 SCHEMA_VERSION = 1
 
 
-# ---------------------------------------------------------------------------
 # Paths — env-overridable so tests can steer at a disposable tree.
-# ---------------------------------------------------------------------------
 
 
 def etc_root() -> Path:
@@ -104,7 +102,6 @@ def state_path(section: str) -> Path:
     return state_root() / f"{section}.state.json"
 
 
-# ---------------------------------------------------------------------------
 # State-file checkpointing across an apply transaction.
 #
 # Each reconciler's apply_fn writes its own per-section state file as
@@ -124,7 +121,6 @@ def state_path(section: str) -> Path:
 #
 # `commit()` is a no-op (snapshots are in-memory, GC'd at scope exit);
 # the binary uses it as a readability flag for the success path.
-# ---------------------------------------------------------------------------
 
 
 class StateCheckpoint:
@@ -210,9 +206,7 @@ class StateCheckpoint:
         pass
 
 
-# ---------------------------------------------------------------------------
 # Colorized output — opt-out via NO_COLOR (XDG convention).
-# ---------------------------------------------------------------------------
 
 
 def _supports_color() -> bool:
@@ -239,10 +233,8 @@ def colorize(text: str, color: str) -> str:
     return f"{_ANSI.get(color, '')}{text}{_ANSI['reset']}"
 
 
-# ---------------------------------------------------------------------------
 # Change + Plan value types. Reconcilers emit these and never mutate state
 # during planning; the runner is what calls ``change.apply()``.
-# ---------------------------------------------------------------------------
 
 
 @dataclass
@@ -298,11 +290,9 @@ class Plan:
         }
 
 
-# ---------------------------------------------------------------------------
 # Schema validation — hand-rolled because the schema is small and we want
 # stdlib-only. ``validate_doc`` returns a normalized dict or raises
 # ``SchemaError`` with a pointed message.
-# ---------------------------------------------------------------------------
 
 
 class SchemaError(ValueError):
@@ -1086,11 +1076,9 @@ def load_config(path: Optional[Path] = None) -> ValidatedConfig:
     return validate_doc(doc)
 
 
-# ---------------------------------------------------------------------------
 # Manifest — records which drop-ins shedos-apply currently owns. Drives the
 # "remove when dropped from TOML" behavior. File lives under /var/lib/shedos
 # so /etc stays pacman-clean.
-# ---------------------------------------------------------------------------
 
 
 @dataclass
@@ -1123,10 +1111,8 @@ def sha256_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-# ---------------------------------------------------------------------------
 # Atomic writes — tmp + fsync + rename. Reused across every reconciler so a
 # crash mid-apply never leaves a half-written file at the live path.
-# ---------------------------------------------------------------------------
 
 
 def atomic_write_text(path: Path, text: str, *, mode: int = 0o644) -> None:
@@ -1145,7 +1131,6 @@ def atomic_write_text(path: Path, text: str, *, mode: int = 0o644) -> None:
         raise
 
 
-# ---------------------------------------------------------------------------
 # Cross-cutting reconciler scaffolding: three-way merge, baseline + state
 # files, format-preserving system.toml writes via tomlkit.
 #
@@ -1159,7 +1144,6 @@ def atomic_write_text(path: Path, text: str, *, mode: int = 0o644) -> None:
 # Items in `baseline` are invisible to the reconciler — never adopted,
 # never removed when omitted from TOML. Items elsewhere flow through
 # `to_add` / `to_remove` / `to_adopt` per the merge rules below.
-# ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
@@ -1272,9 +1256,7 @@ def atomic_write_system_toml(
     atomic_write_text(path, new_doc_text, mode=0o644)
 
 
-# ---------------------------------------------------------------------------
 # Reconciler: systemd
-# ---------------------------------------------------------------------------
 
 
 def _systemctl_run(args: list[str], *, check: bool = True) -> tuple[int, str]:
@@ -1345,9 +1327,7 @@ def plan_systemd(cfg: ValidatedConfig) -> list[Change]:
     return out
 
 
-# ---------------------------------------------------------------------------
 # Reconciler: drop-ins
-# ---------------------------------------------------------------------------
 
 
 def _dropin_diff(relpath: str, current: Optional[str], desired: Optional[str]) -> str:
@@ -1425,9 +1405,7 @@ def _make_remove_dropin(target: Path, *, backup: Optional[str]) -> Callable[[], 
     return fn
 
 
-# ---------------------------------------------------------------------------
 # Reconciler: snapper root config
-# ---------------------------------------------------------------------------
 
 
 SNAPPER_KEY_MAP = {
@@ -1522,13 +1500,11 @@ def plan_snapper(cfg: ValidatedConfig) -> list[Change]:
     return changes
 
 
-# ---------------------------------------------------------------------------
 # Reconciler: pacman repos — fence-block rewrite of /etc/pacman.conf
 #
 # The fence markers below match those emitted by shedos-system.install so
 # existing installs upgrade smoothly: the install hook writes an initial
 # fence on first install, and shedos-apply takes over subsequent edits.
-# ---------------------------------------------------------------------------
 
 
 PACMAN_FENCE_OPEN = "# >>> shedos <<<"
@@ -1610,12 +1586,10 @@ def plan_pacman(cfg: ValidatedConfig) -> list[Change]:
     )]
 
 
-# ---------------------------------------------------------------------------
 # Reconciler: services.postgresql — declarative wrapper over the two
 # existing bootstrap units. auto-init and per-user-db are user-facing knobs
 # that desugar to ordinary systemctl enable/disable calls, so the actual
 # mutation piggy-backs on _systemd_change.
-# ---------------------------------------------------------------------------
 
 
 POSTGRES_AUTO_INIT_UNIT = "shedos-pg-initdb.service"
@@ -1647,7 +1621,6 @@ def plan_services(cfg: ValidatedConfig) -> list[Change]:
     return out
 
 
-# ---------------------------------------------------------------------------
 # Reconciler: network.firewall — declarative ufw with bidirectional adoption.
 #
 # Three-way merge against (declared, live, last_applied, baseline). Tool-
@@ -1660,7 +1633,6 @@ def plan_services(cfg: ValidatedConfig) -> list[Change]:
 # Wire-format: every rule we ADD goes through `ufw <action> <args>
 # comment '<text>'`. We never tag rules with a `shedos:` prefix —
 # ownership is tracked via the state file, not via the comment.
-# ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
@@ -2176,7 +2148,6 @@ def _render_system_toml_with_firewall(
     return tomlkit.dumps(doc)
 
 
-# ---------------------------------------------------------------------------
 # Reconciler: security.keyring — declarative pacman-key trust with
 # bidirectional adoption.
 #
@@ -2188,7 +2159,6 @@ def _render_system_toml_with_firewall(
 #
 # Live-state source: `pacman-key --list-keys --with-colons`. We treat
 # every `fpr:` record as locally-trusted on this system.
-# ---------------------------------------------------------------------------
 
 
 _PACMAN_KEY_FPR_RE = re.compile(r"^fpr:::::::::([0-9A-F]{40}):", re.MULTILINE)
@@ -2370,7 +2340,6 @@ def _render_system_toml_with_keyring(
     return tomlkit.dumps(doc)
 
 
-# ---------------------------------------------------------------------------
 # Reconciler: fs.mounts — declarative /etc/fstab entries with baseline
 # protection for Calamares' install-time lines.
 #
@@ -2386,7 +2355,6 @@ def _render_system_toml_with_keyring(
 #     <device>\t<target>\t<fstype>\t<options>\t<dump>\t<pass>
 #     # <<< shedos-mounts >>>
 # Baseline entries stay outside the fence, byte-preserved.
-# ---------------------------------------------------------------------------
 
 
 _FSTAB_FENCE_OPEN = "# >>> shedos-mounts <<<"
@@ -2651,7 +2619,6 @@ def _render_system_toml_with_mounts(
     return tomlkit.dumps(doc)
 
 
-# ---------------------------------------------------------------------------
 # Reconciler: kernel.cmdline — declarative Limine kernel cmdline tokens
 # with baseline protection.
 #
@@ -2663,7 +2630,6 @@ def _render_system_toml_with_mounts(
 # Live source: /boot/limine.conf (or $SHEDOS_APPLY_BOOT_ROOT/limine.conf).
 # We locate the default entry's `cmdline=` line and parse tokens
 # whitespace-separated.
-# ---------------------------------------------------------------------------
 
 
 _LIMINE_CMDLINE_RE = re.compile(
@@ -2854,7 +2820,6 @@ def _render_system_toml_with_cmdline(
     return tomlkit.dumps(doc)
 
 
-# ---------------------------------------------------------------------------
 # Reconciler: users + groups — strictly additive.
 #
 # Posture: warn-and-preserve-membership. Removing a user/group from
@@ -2871,7 +2836,6 @@ def _render_system_toml_with_cmdline(
 #   user existence:       (user_name,)  via the `users.state` section
 #   group membership:     (user, group) via the `users-memberships.state`
 #                         section
-# ---------------------------------------------------------------------------
 
 
 def _getent_run(table: str, *, check: bool = True) -> list[str]:
@@ -3291,9 +3255,7 @@ def _render_system_toml_with_users(
     return tomlkit.dumps(doc)
 
 
-# ---------------------------------------------------------------------------
 # Aggregate planner
-# ---------------------------------------------------------------------------
 
 
 def build_plan(cfg: ValidatedConfig,

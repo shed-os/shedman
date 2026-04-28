@@ -42,7 +42,6 @@ case "${1:-}" in
         ;;
 esac
 
-# ---------------------------------------------------------------------------
 # --pg-bootstrap implementation
 #
 # Belt-and-suspenders for the Calamares-time bootstrap in shedos_finalize:
@@ -51,7 +50,6 @@ esac
 # alone. No password is set — Arch's default pg_hba has `local all all
 # peer` so the OS user connects with no flags; they can set a password
 # later with psql \password if they want TCP auth.
-# ---------------------------------------------------------------------------
 
 # Type=notify on postgresql.service means the unit reports active only when
 # postgres is actually accepting connections — but we still do a short
