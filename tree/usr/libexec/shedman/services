@@ -22,10 +22,8 @@ EXPECTED=(
     shedos-pg-user-bootstrap.service
     docker.service
     cronie.service
-    avahi-daemon.service
     thermald.service
     power-profiles-daemon.service
-    cups.socket
 )
 
 FIX=0
