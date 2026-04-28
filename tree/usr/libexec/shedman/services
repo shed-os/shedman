@@ -23,7 +23,6 @@ EXPECTED=(
     docker.service
     cronie.service
     thermald.service
-    power-profiles-daemon.service
 )
 
 FIX=0
