@@ -1,31 +1,12 @@
 #!/bin/bash
-# shedos-apps-installer — opt-in installer for proprietary AUR apps that
-# ShedOS can't redistribute (VS Code, Chrome, Slack, …). Runs as step 2
-# of the first-boot welcome flow and stays re-runnable from the app
-# launcher.
-#
-# UX contract:
-#   1. If offline, surface a clear "connect to WiFi" screen.
-#   2. Present a single checklist grouped by category, everything
-#      unchecked by default. Skip is always free.
-#   3. After the user clicks Install, the install runs HANDS-OFF: no
-#      terminal window, no PKGBUILD review prompts, no "Proceed?"
-#      prompts, no password prompt (the wheel sudoers rule is NOPASSWD
-#      on ShedOS by default). A yad --progress dialog shows live status.
-#      Cancel kills yay cleanly.
-#   4. On success, drop a marker so the welcome flow won't re-launch.
-#      Partial/failed installs leave the marker off so the user can
-#      retry from the launcher entry.
-#
-# Failure modes that DO NOT write the marker (so the user can retry):
-#   - yad missing or fails to launch
-#   - User clicks Cancel during install
-#   - yay exits non-zero (build failure, network drop, …)
-#
-# Exits 0 on success, 1 on unrecoverable error, 2 on misuse.
+# Opt-in installer for proprietary AUR apps (VS Code, Chrome, Slack, …)
+# that we can't redistribute. Runs after `shedman welcome`, also
+# re-runnable from the launcher. Hands-off install: yad checklist →
+# yay --noconfirm + auto-answer flags → yad --progress dialog. Marker
+# only lands on a successful run; cancels and failures leave it off.
 
 set -u
-# Intentionally no `-e`: yad returns non-zero on Cancel, which is normal.
+# No `-e`: yad returns non-zero on Cancel and we handle that explicitly.
 
 LOG_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/shedos"
 LOG="$LOG_DIR/install.log"
@@ -45,19 +26,12 @@ notify_yad_missing() {
     fi
 }
 
-# ── Argument handling ───────────────────────────────────────────────
-
 if [[ "${1:-}" == "--help-summary" ]]; then
     echo "opt-in installer for proprietary AUR apps (VS Code, Chrome, …)"
     exit 0
 fi
 
-# Catalog resolution, in priority order:
-#   1. $SHEDOS_APPS_CATALOG if set (explicit dev override)
-#   2. /usr/share/shedos/apps-catalog.tsv (installed package)
-#   3. ../../share/shedos/apps-catalog.tsv relative to this script
-#      (in-tree dev checkout layout:
-#       tree/usr/libexec/shedman/install → tree/usr/share/shedos/)
+# Catalog: $SHEDOS_APPS_CATALOG > /usr/share > script-relative dev tree.
 _self="$(readlink -f -- "$0" 2>/dev/null || echo "$0")"
 _self_dir="$(dirname -- "$_self")"
 if [[ -n "${SHEDOS_APPS_CATALOG:-}" ]]; then
@@ -79,11 +53,7 @@ for arg in "$@"; do
     case "$arg" in
         --force|-f) FORCE=1 ;;
         --dry-run|-n) DRY_RUN=1 ;;
-        --dry-run-no-yad)
-            # Test-harness only: bypass the yad UI entirely, run the
-            # install pipeline against $SHEDOS_TEST_PKGS (whitespace-
-            # separated), capture command lines instead of executing.
-            # Documented in test/install/run.sh. Not in --help.
+        --dry-run-no-yad) # test harness; bypasses yad, uses $SHEDOS_TEST_PKGS
             DRY_RUN_NO_YAD=1
             DRY_RUN=1
             ;;
@@ -117,16 +87,12 @@ EOF
     esac
 done
 
-# ── Guard rails ─────────────────────────────────────────────────────
-
-# Don't run in the live ISO or during Calamares.
 if [[ -d /run/archiso ]] || \
    { [[ "${USER:-}" == "shedos" ]] && [[ -f /etc/calamares/settings.conf ]]; }; then
     log "skip: running inside live ISO / calamares"
     exit 0
 fi
 
-# Refuse root — yay refuses too, but fail fast with a clearer message.
 if [[ "$(id -u)" -eq 0 ]]; then
     log "refusing to run as root"
     if command -v yad >/dev/null 2>&1 && [[ $DRY_RUN_NO_YAD -eq 0 ]]; then
@@ -138,8 +104,7 @@ if [[ "$(id -u)" -eq 0 ]]; then
     exit 2
 fi
 
-# yad availability check — must come before catalog check, which itself
-# uses yad to display its error dialog.
+# yad must come before the catalog check (which uses yad for its error).
 if [[ $DRY_RUN_NO_YAD -eq 0 ]] && ! command -v yad >/dev/null 2>&1; then
     log "yad not installed — exiting without marker; user can re-run after \`pacman -S yad\`"
     notify_yad_missing
@@ -225,8 +190,6 @@ if [[ $DRY_RUN_NO_YAD -eq 0 ]] && ! check_connectivity; then
     fi
 fi
 
-# ── Catalog → yad checklist ─────────────────────────────────────────
-
 declare -a AUR=() CAT=() NAME=() DESC=()
 while IFS=$'\t' read -r pkg cat name desc _icon; do
     [[ -z "${pkg:-}" || "${pkg:0:1}" == "#" ]] && continue
@@ -246,19 +209,14 @@ if [[ ${#AUR[@]} -eq 0 ]]; then
     exit 0
 fi
 
-# ── Selection ───────────────────────────────────────────────────────
-
 PKGS=()
 LIST_CODE=0
 
 if [[ $DRY_RUN_NO_YAD -eq 1 ]]; then
-    # Test-harness path: take packages from $SHEDOS_TEST_PKGS, skip the
-    # yad UI entirely.
     read -r -a PKGS <<< "${SHEDOS_TEST_PKGS:-}"
     log "dry-run-no-yad: PKGS=${PKGS[*]}"
 else
-    # Build yad --list args. Separator is ASCII Unit Separator so
-    # descriptions with spaces / punctuation round-trip cleanly.
+    # ASCII Unit Separator so app descriptions can contain anything.
     SEP=$'\x1f'
     LIST_ROWS=()
     for i in "${!AUR[@]}"; do
@@ -301,13 +259,10 @@ else
             done <<< "$SELECTION"
             ;;
         1)
-            # Skip button: user actively chose to defer.
             log "user clicked Skip — no marker, can re-run from launcher"
             exit 0
             ;;
         *)
-            # yad failed (252 = WM-closed, 70 = GTK init, 127 = not found,
-            # other non-zero = misc). Don't set marker so user can retry.
             log "yad checklist failed (exit $LIST_CODE) — exiting without marker"
             exit 0
             ;;
@@ -325,9 +280,6 @@ if [[ ${#PKGS[@]} -eq 0 ]]; then
     exit 0
 fi
 
-# ── Install with yay (autonomous) ───────────────────────────────────
-
-# yay must exist for a real install.
 if [[ $DRY_RUN -eq 0 ]] && ! command -v yay >/dev/null 2>&1; then
     log "yay missing"
     yad --error --title="ShedOS Apps" --width=400 --center --button="OK!gtk-ok:0" \
@@ -336,19 +288,9 @@ if [[ $DRY_RUN -eq 0 ]] && ! command -v yay >/dev/null 2>&1; then
     exit 1
 fi
 
-# Compose the yay command line. The flags here are the autonomous
-# contract:
-#   --noconfirm                       skip yay's "Proceed?" prompts
-#   --answerclean N --answerdiff N    skip diff prompts (default: don't review)
-#   --answeredit N                    skip "edit PKGBUILD?" prompts
-#   --cleanafter --removemake         tidy /var/cache/yay after each build
-#   --mflags=--skippgpcheck           skip PGP signature prompts on AUR
-#                                     fetches (TOFU model — see plan
-#                                     Risks). Trade-off documented in
-#                                     install.log.
-# Sudo never prompts because /etc/sudoers.d/wheel is NOPASSWD: ALL on
-# ShedOS by default; yay's internal `sudo pacman …` calls pass straight
-# through.
+# Hands-off flag set: --noconfirm + auto-N answers + skip PGP checks
+# (TOFU; AUR is implicitly trust-on-first-use). Wheel is NOPASSWD on
+# ShedOS so yay's internal sudo passes silently.
 YAY_CMD=(
     yay -S --needed --noconfirm
     --answerclean N --answerdiff N --answeredit N
@@ -361,7 +303,6 @@ log "yay command: ${YAY_CMD[*]}"
 
 if [[ $DRY_RUN -eq 1 ]]; then
     if [[ $DRY_RUN_NO_YAD -eq 1 ]]; then
-        # Test-harness output is exactly the command line for assertion.
         printf '%s\n' "${YAY_CMD[*]}"
     else
         yad --info --title="ShedOS Apps — Dry run" --width=520 --center --button="OK!gtk-ok:0" \
@@ -370,8 +311,6 @@ if [[ $DRY_RUN -eq 1 ]]; then
     fi
     exit 0
 fi
-
-# ── Background yay + foreground yad --progress UI ───────────────────
 
 FIFO_DIR=$(mktemp -d -t shedos-apps-XXXXXX)
 FIFO="$FIFO_DIR/yay.fifo"
@@ -387,45 +326,34 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-# Run yay in the background, all output to the fifo.
 ( "${YAY_CMD[@]}" > "$FIFO" 2>&1; printf '__SHEDOS_YAY_RC__=%s\n' "$?" > "$FIFO_DIR/rc" ) &
 YAY_PID=$!
 log "yay started pid=$YAY_PID"
 
-# Stream the fifo into yad --progress. yay's output isn't a stable API,
-# so we parse `:: Building <pkg>...` and `:: Installing <pkg>...` lines
-# as progress markers; everything else is forwarded to the log dialog
-# tail. If we see no markers, the bar pulses (--auto-close=false).
+# Parse yay's `:: Building` / `:: Installing` lines for progress.
+# Anything we don't recognise just keeps the bar at its current spot.
 TOTAL=${#PKGS[@]}
 DONE=0
 {
     printf '0\n'
     printf '#Preparing to install %d package(s)…\n' "$TOTAL"
     while IFS= read -r line; do
-        # Mirror to log so the user always has the full transcript.
         printf '%s\n' "$line" >> "$LOG"
-
-        # Strip ANSI escapes for the progress detail line — yay emits
-        # color codes that confuse pango markup.
+        # Strip ANSI escapes — they confuse pango markup.
         clean=$(printf '%s' "$line" | sed -E $'s/\x1b\\[[0-9;]*[a-zA-Z]//g')
-
         case "$clean" in
             *":: Building "*|*":: Downloading "*|*":: Cloning "*)
                 printf '#%s\n' "${clean:0:120}"
                 ;;
             *":: Installing "*|*"installed "*)
-                # `*installed *` also catches "reinstalled" — that's
-                # fine, both count as one package landing.
+                # `installed ` matches `reinstalled ` too; both count.
                 DONE=$((DONE + 1))
                 pct=$(( DONE * 100 / TOTAL ))
                 (( pct > 99 )) && pct=99
                 printf '%d\n' "$pct"
                 printf '#%s\n' "${clean:0:120}"
                 ;;
-            *)
-                # Any other line: just keep the user's bar moving by
-                # repeating the latest percent.
-                : ;;
+            *) : ;;
         esac
     done < "$FIFO"
     printf '100\n'
@@ -450,8 +378,6 @@ wait "$YAD_PID"
 yad_rc=$?
 
 if [[ $yad_rc -ne 0 ]]; then
-    # User clicked Cancel (or closed window). Kill yay and surface a
-    # warning. No marker.
     log "user cancelled (yad exit=$yad_rc) — terminating yay pid=$YAY_PID"
     kill -TERM "$YAY_PID" 2>/dev/null || true
     wait "$YAY_PID" 2>/dev/null || true
@@ -461,8 +387,6 @@ if [[ $yad_rc -ne 0 ]]; then
     exit 1
 fi
 
-# yad closed normally (auto-close on EOF). Wait on yay to harvest its
-# real exit code.
 wait "$YAY_PID" 2>/dev/null || true
 if [[ -r "$FIFO_DIR/rc" ]]; then
     yay_rc=$(grep '__SHEDOS_YAY_RC__=' "$FIFO_DIR/rc" 2>/dev/null | tail -1 \
