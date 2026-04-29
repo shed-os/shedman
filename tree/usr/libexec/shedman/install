@@ -326,44 +326,30 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-( "${YAY_CMD[@]}" > "$FIFO" 2>&1; printf '__SHEDOS_YAY_RC__=%s\n' "$?" > "$FIFO_DIR/rc" ) &
+( stdbuf -oL -eL "${YAY_CMD[@]}" > "$FIFO" 2>&1; printf '__SHEDOS_YAY_RC__=%s\n' "$?" > "$FIFO_DIR/rc" ) &
 YAY_PID=$!
 log "yay started pid=$YAY_PID"
 
-# Parse yay's `:: Building` / `:: Installing` lines for progress.
-# Anything we don't recognise just keeps the bar at its current spot.
-TOTAL=${#PKGS[@]}
-DONE=0
+# Pulse the progress bar instead of trying to count packages — yay/pacman
+# output format isn't a stable interface and the line patterns we'd need
+# to count don't appear when stdout isn't a TTY. Every yay line becomes a
+# status-text update; the pulsing bar shows motion while work happens.
 {
-    printf '0\n'
-    printf '#Preparing to install %d package(s)…\n' "$TOTAL"
+    printf '#Preparing to install %d package(s)…\n' "${#PKGS[@]}"
     while IFS= read -r line; do
         printf '%s\n' "$line" >> "$LOG"
         # Strip ANSI escapes — they confuse pango markup.
         clean=$(printf '%s' "$line" | sed -E $'s/\x1b\\[[0-9;]*[a-zA-Z]//g')
-        case "$clean" in
-            *":: Building "*|*":: Downloading "*|*":: Cloning "*)
-                printf '#%s\n' "${clean:0:120}"
-                ;;
-            *":: Installing "*|*"installed "*)
-                # `installed ` matches `reinstalled ` too; both count.
-                DONE=$((DONE + 1))
-                pct=$(( DONE * 100 / TOTAL ))
-                (( pct > 99 )) && pct=99
-                printf '%d\n' "$pct"
-                printf '#%s\n' "${clean:0:120}"
-                ;;
-            *) : ;;
-        esac
+        [[ -z "${clean// /}" ]] && continue
+        printf '#%s\n' "${clean:0:140}"
     done < "$FIFO"
-    printf '100\n'
-    printf '#Done.\n'
+    printf '#Finishing up…\n'
 } | yad --progress \
+    --pulsate \
     --title="ShedOS Apps — Installing" \
     --width=560 --center \
     --window-icon=system-software-install \
     --text="Installing ${#PKGS[@]} package(s):\n<tt>${PKGS[*]}</tt>" \
-    --percentage=0 \
     --auto-close \
     --auto-kill \
     --button="Cancel:1" \
