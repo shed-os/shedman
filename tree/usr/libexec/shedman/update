@@ -270,18 +270,17 @@ if _snapper_available; then
     fi
 fi
 
+# Past the y/N (or --yes) gate the user has already given consent — run
+# pacman / yay / config-sync hands-off without re-prompting. Conflicts in
+# config-sync still surface as .shedosnew (no silent overwrite), and the
+# review TUI is offered automatically at the end if any are produced.
+
 if (( pac_n > 0 )); then
     echo
     _hr
-    if (( YES )); then
-        echo "Running pacman -Syu --noconfirm…"
-    else
-        echo "Running pacman -Syu (pacman will prompt again with the full list)…"
-    fi
+    echo "Running pacman -Syu --noconfirm…"
     _hr
-    pacman_args=(-Syu)
-    (( YES )) && pacman_args+=(--noconfirm)
-    sudo pacman "${pacman_args[@]}" || {
+    sudo pacman -Syu --noconfirm || {
         echo "pacman exited non-zero; aborting before config sync." >&2
         # Still create the post-snapshot so the pre/post pair is complete —
         # snapper's cleanup will collapse empty pairs on its next run. Leaving
@@ -294,23 +293,12 @@ fi
 if (( aur_n > 0 )); then
     echo
     _hr
-    if (( YES )); then
-        echo "Running yay -Sua --noconfirm…"
-    else
-        echo "Running yay -Sua…"
-        echo
-        echo "yay will pause at a 'Packages to exclude:' prompt. This is the"
-        echo "main interactive gate — press ENTER to accept all $aur_n AUR"
-        echo "update(s), or type numbers (e.g. '1 3') to skip specific ones."
-        echo "After that, pacman will ask one more time to confirm the install."
-    fi
+    echo "Running yay -Sua --noconfirm…"
     _hr
-    aur_args=(-Sua)
-    (( YES )) && aur_args+=(--noconfirm)
     if command -v yay >/dev/null 2>&1; then
-        yay "${aur_args[@]}" || echo "yay exited non-zero; continuing." >&2
+        yay -Sua --noconfirm || echo "yay exited non-zero; continuing." >&2
     elif command -v paru >/dev/null 2>&1; then
-        paru "${aur_args[@]}" || echo "paru exited non-zero; continuing." >&2
+        paru -Sua --noconfirm || echo "paru exited non-zero; continuing." >&2
     fi
 fi
 
@@ -320,16 +308,10 @@ _snap_post "$pre_snap"
 
 echo
 _hr
-if (( YES )); then
-    echo "Syncing ShedOS config defaults (--yes; conflicts → .shedosnew)…"
-else
-    echo "Syncing ShedOS config defaults (will prompt before applying)…"
-fi
+echo "Syncing ShedOS config defaults (conflicts → .shedosnew)…"
 _hr
 if [[ -x /usr/libexec/shedman/_config-sync ]]; then
-    sync_args=()
-    (( YES )) && sync_args+=(--yes)
-    /usr/bin/shedman config --sync "${sync_args[@]}" || echo "config sync skipped or failed." >&2
+    /usr/bin/shedman config --sync --yes || echo "config sync skipped or failed." >&2
 else
     echo "config sync helper not installed; skipping config sync."
 fi
@@ -361,23 +343,18 @@ fi
 
 if (( conflict_n > 0 )); then
     if (( YES )); then
-        # Unattended: never launch a TUI. Just tell the user how many are
-        # waiting — they'll see it in the journal and can resolve on their
-        # next interactive session.
+        # Unattended (--yes from cron / systemd timer): never launch a
+        # TUI. Just tell the user how many are waiting — they'll see it
+        # in the journal and can resolve on their next interactive session.
         echo
         echo "$conflict_n config conflict(s) remain as .shedosnew files."
         echo "Resolve interactively with: shedman config --review"
     else
+        # Interactive: the user accepted at the start with y. Open the
+        # conflict resolver right now without asking a second time.
         echo
-        read -rp "$conflict_n config conflict(s) remain. Review now with shedman config --review? [Y/n] " yn
-        case "$yn" in
-            ""|[yY]|[yY][eE][sS])
-                exec /usr/bin/shedman config --review
-                ;;
-            *)
-                echo "Skipped. Run 'shedman config --review' whenever you're ready."
-                ;;
-        esac
+        echo "$conflict_n config conflict(s) found — opening resolver…"
+        exec /usr/bin/shedman config --review
     fi
 fi
 
