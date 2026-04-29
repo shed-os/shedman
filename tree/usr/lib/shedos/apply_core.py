@@ -2628,12 +2628,14 @@ def _render_system_toml_with_mounts(
 # Identity = single token string.
 #
 # Live source: /boot/limine.conf (or $SHEDOS_APPLY_BOOT_ROOT/limine.conf).
-# We locate the default entry's `cmdline=` line and parse tokens
-# whitespace-separated.
+# We locate the default entry's `kernel_cmdline:` line and parse tokens
+# whitespace-separated. The keyword set covers Limine's modern syntax
+# (kernel_cmdline, with `:` separator) and the legacy GRUB-flavored
+# variants (cmdline / CMD_LINE / KERNEL_CMDLINE, with `=`) for tests.
 
 
 _LIMINE_CMDLINE_RE = re.compile(
-    r"^(?P<lead>\s*(?:cmdline|CMD_LINE|KERNEL_CMDLINE)\s*=)\s*(?P<tokens>.*)$",
+    r"^(?P<lead>\s*(?:kernel_cmdline|cmdline|CMD_LINE|KERNEL_CMDLINE)\s*[=:])\s*(?P<tokens>.*)$",
     re.MULTILINE,
 )
 
@@ -2683,7 +2685,7 @@ def plan_kernel_cmdline(cfg: ValidatedConfig) -> list[Change]:
     line, lead, live_tokens = _parse_limine_cmdline(limine_text)
     if line is None:
         raise SchemaError(
-            f"could not find a cmdline= line in {limine_path}; "
+            f"could not find a kernel_cmdline: line in {limine_path}; "
             f"unsupported Limine config format. Please file an issue."
         )
 
