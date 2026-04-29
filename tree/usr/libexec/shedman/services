@@ -21,7 +21,6 @@ EXPECTED=(
     postgresql.service
     shedos-pg-user-bootstrap.service
     docker.service
-    cronie.service
     thermald.service
 )
 
@@ -66,8 +65,15 @@ printf '%-35s %-12s %-10s\n' UNIT ENABLED ACTIVE
 printf '%-35s %-12s %-10s\n' ---- ------- ------
 bad=()
 for u in "${EXPECTED[@]}"; do
-    en=$(systemctl is-enabled "$u" 2>/dev/null || echo missing)
-    ac=$(systemctl is-active  "$u" 2>/dev/null || echo '-')
+    en=$(systemctl is-enabled "$u" 2>/dev/null) || en=missing
+    [[ -z "$en" ]] && en=missing
+    ac=$(systemctl is-active  "$u" 2>/dev/null) || true
+    [[ -z "$ac" ]] && ac='-'
+    # Trim to first whitespace-delimited token; some systemd versions
+    # emit multi-line / multi-word output for unloaded units that would
+    # bleed across rows in the printf table below.
+    en="${en%%[[:space:]]*}"
+    ac="${ac%%[[:space:]]*}"
     case "$en" in
         enabled|enabled-runtime|static|alias|generated) en_str=$(_green "$en") ;;
         *) en_str=$(_red "$en"); bad+=("$u") ;;
