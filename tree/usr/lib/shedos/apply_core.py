@@ -645,7 +645,7 @@ def validate_doc(doc: dict) -> ValidatedConfig:
         if "/" not in key:
             raise SchemaError(
                 f"[drop-ins] key {key!r} must include a directory — "
-                f"e.g. 'sddm.conf.d/theme.conf', not a bare filename"
+                f"e.g. 'greetd/config.toml', not a bare filename"
             )
         if key.startswith("/") or ".." in key.split("/"):
             raise SchemaError(
