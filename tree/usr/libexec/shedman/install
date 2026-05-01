@@ -1,398 +1,93 @@
 #!/bin/bash
-# Opt-in installer for proprietary AUR apps (VS Code, Chrome, Slack, …)
-# that we can't redistribute. Runs after `shedman welcome`, also
-# re-runnable from the launcher. Hands-off install: yad checklist →
-# yay --noconfirm + auto-answer flags → yad --progress dialog. Marker
-# only lands on a successful run; cancels and failures leave it off.
+# Install packages from official Arch repos, [shedos], or AUR.
+# Source detection runs per-package: pacman first, then yay/AUR.
 
-set -u
-# No `-e`: yad returns non-zero on Cancel and we handle that explicitly.
+set -euo pipefail
 
-LOG_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/shedos"
-LOG="$LOG_DIR/install.log"
+usage() {
+    cat <<'EOF'
+Usage:
+  shedman install <pkg> [<pkg>...]      Install one or more packages.
+  shedman install -s|--search <query>   Search across pacman + AUR.
+  shedman install -h|--help             Show this message.
 
-log() {
-    mkdir -p "$LOG_DIR" 2>/dev/null || return 0
-    printf '%s [%d] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$$" "$*" \
-        >> "$LOG" 2>/dev/null || true
-}
-
-notify_yad_missing() {
-    if command -v notify-send >/dev/null 2>&1; then
-        notify-send -u critical -i system-software-install \
-            "ShedOS Apps" \
-            "yad is not installed; the apps installer can't run. Install yad and re-run \`shedman install\`." \
-            >/dev/null 2>&1 || true
-    fi
-}
-
-if [[ "${1:-}" == "--help-summary" ]]; then
-    echo "opt-in installer for proprietary AUR apps (VS Code, Chrome, …)"
-    exit 0
-fi
-
-# Catalog: $SHEDOS_APPS_CATALOG > /usr/share > script-relative dev tree.
-_self="$(readlink -f -- "$0" 2>/dev/null || echo "$0")"
-_self_dir="$(dirname -- "$_self")"
-if [[ -n "${SHEDOS_APPS_CATALOG:-}" ]]; then
-    CATALOG="$SHEDOS_APPS_CATALOG"
-elif [[ -r "/usr/share/shedos/apps-catalog.tsv" ]]; then
-    CATALOG="/usr/share/shedos/apps-catalog.tsv"
-elif [[ -r "$_self_dir/../../share/shedos/apps-catalog.tsv" ]]; then
-    CATALOG="$_self_dir/../../share/shedos/apps-catalog.tsv"
-else
-    CATALOG="/usr/share/shedos/apps-catalog.tsv"   # for the error message
-fi
-STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/shedos"
-MARKER="$STATE_DIR/apps-installer-done"
-
-FORCE=0
-DRY_RUN=0
-DRY_RUN_NO_YAD=0
-for arg in "$@"; do
-    case "$arg" in
-        --force|-f) FORCE=1 ;;
-        --dry-run|-n) DRY_RUN=1 ;;
-        --dry-run-no-yad) # test harness; bypasses yad, uses $SHEDOS_TEST_PKGS
-            DRY_RUN_NO_YAD=1
-            DRY_RUN=1
-            ;;
-        --help|-h)
-            cat <<'EOF'
-Usage: shedman install [--force] [--dry-run]
-
-Opt-in installer for proprietary apps (VS Code, Chrome, Slack, …) that
-can't be bundled in the default ShedOS image.
-
-The install runs hands-off: tick the apps you want, click Install, walk
-away. A progress dialog shows status; no terminal window opens, no
-PKGBUILD review prompts appear. Cancel cleanly aborts the install.
-
-  -f, --force     Re-run even if the first-boot step has already completed.
-  -n, --dry-run   Walk the UI but print the yay command instead of
-                  running it. Writes no marker. Useful for dev testing.
-  -h, --help      Show this message.
-
-Environment:
-  SHEDOS_APPS_CATALOG   Override the catalog path (dev testing).
-  SHEDOS_TEST_PKGS      With --dry-run-no-yad, the package list to
-                        feed the pipeline (whitespace-separated).
-
-Files:
-  ~/.local/state/shedos/apps-installer-done  marker; presence skips run
-  ~/.local/state/shedos/install.log          diagnostic log (append-only)
+Per-package source detection:
+  1. pacman -Si  (official + [shedos])
+  2. yay -Si     (AUR fallback; yay must be installed)
 EOF
-            exit 0
-            ;;
-    esac
-done
+}
 
-if [[ -d /run/archiso ]] || \
-   { [[ "${USER:-}" == "shedos" ]] && [[ -f /etc/calamares/settings.conf ]]; }; then
-    log "skip: running inside live ISO / calamares"
-    exit 0
+if [[ $# -eq 0 ]]; then
+    usage
+    exit 1
 fi
 
-if [[ "$(id -u)" -eq 0 ]]; then
-    log "refusing to run as root"
-    if command -v yad >/dev/null 2>&1 && [[ $DRY_RUN_NO_YAD -eq 0 ]]; then
-        yad --error --title="ShedOS Apps" --width=380 --center --button="OK!gtk-ok:0" \
-            --text="Don't run this as root.\n\nyay builds AUR packages as a regular user and calls sudo itself." \
-            2>>"$LOG"
-    fi
-    echo "shedman install: refuse to run as root" >&2
+case "$1" in
+    -h|--help)
+        usage
+        exit 0
+        ;;
+    --help-summary)
+        echo "install packages from official, shedos, or AUR repos"
+        exit 0
+        ;;
+    -s|--search)
+        shift
+        if [[ $# -eq 0 ]]; then
+            echo "shedman install: --search needs a query" >&2
+            exit 1
+        fi
+        echo "=== pacman ==="
+        pacman -Ss "$@" || true
+        echo
+        echo "=== AUR ==="
+        if command -v yay >/dev/null 2>&1; then
+            yay -Ss --aur "$@" || true
+        else
+            echo "(yay not installed; pacman -S yay to enable AUR search)"
+        fi
+        exit 0
+        ;;
+esac
+
+if [[ $(id -u) -eq 0 ]]; then
+    echo "shedman install: don't run as root — yay drops privileges itself" >&2
     exit 2
 fi
 
-# yad must come before the catalog check (which uses yad for its error).
-if [[ $DRY_RUN_NO_YAD -eq 0 ]] && ! command -v yad >/dev/null 2>&1; then
-    log "yad not installed — exiting without marker; user can re-run after \`pacman -S yad\`"
-    notify_yad_missing
-    echo "shedman install: yad is required" >&2
-    exit 1
-fi
+pkgs=("$@")
+pacman_pkgs=()
+aur_pkgs=()
+unknown=()
 
-if [[ ! -r "$CATALOG" ]]; then
-    log "catalog not readable: $CATALOG"
-    if [[ $DRY_RUN_NO_YAD -eq 0 ]]; then
-        yad --error --title="ShedOS Apps" --width=380 --center --button="OK!gtk-ok:0" \
-            --text="App catalog missing:\n<tt>$CATALOG</tt>\n\nThis is a packaging bug — please report it." \
-            2>>"$LOG"
-    fi
-    exit 1
-fi
-
-if [[ $FORCE -eq 1 ]]; then
-    log "--force: removing marker"
-    rm -f "$MARKER"
-fi
-
-if [[ -f "$MARKER" && $FORCE -eq 0 ]]; then
-    log "skip: marker already present"
-    exit 0
-fi
-
-mkdir -p "$STATE_DIR"
-
-# ── Network check ───────────────────────────────────────────────────
-
-check_connectivity() {
-    local state=""
-    if command -v nmcli >/dev/null 2>&1; then
-        state=$(nmcli -t -f CONNECTIVITY general 2>/dev/null | head -n1)
-    fi
-    if [[ "$state" == "full" ]]; then
-        return 0
-    fi
-    if curl -fsS --max-time 4 https://aur.archlinux.org/ >/dev/null 2>&1; then
-        return 0
-    fi
-    return 1
-}
-
-prompt_connect() {
-    while true; do
-        local resp
-        yad --question \
-            --title="ShedOS Apps — No internet" \
-            --width=440 --center \
-            --window-icon=network-offline \
-            --image=network-offline \
-            --text="<b>You're offline.</b>\n\nThese apps are downloaded from vendor sites and the AUR, so a working internet connection is required.\n\nConnect to a network, then retry." \
-            --button="Skip for now:2" \
-            --button="Open network settings:1" \
-            --button="Retry:0" \
-            2>>"$LOG"
-        resp=$?
-        case "$resp" in
-            0) check_connectivity && return 0 ;;
-            1)
-                if command -v nm-connection-editor >/dev/null 2>&1; then
-                    nm-connection-editor >/dev/null 2>&1 &
-                elif command -v kitty >/dev/null 2>&1 && command -v nmtui >/dev/null 2>&1; then
-                    kitty --title "Network settings" -e nmtui >/dev/null 2>&1
-                else
-                    yad --info --title="ShedOS Apps" --width=360 --center --button="OK!gtk-ok:0" \
-                        --text="No network configuration tool found.\nInstall nm-connection-editor or run <tt>nmtui</tt> manually." \
-                        2>>"$LOG"
-                fi
-                ;;
-            *) return 1 ;;
-        esac
-    done
-}
-
-if [[ $DRY_RUN_NO_YAD -eq 0 ]] && ! check_connectivity; then
-    log "offline — prompting user to connect"
-    if ! prompt_connect; then
-        log "user declined to connect — exiting without marker"
-        exit 0
-    fi
-fi
-
-declare -a AUR=() CAT=() NAME=() DESC=()
-while IFS=$'\t' read -r pkg cat name desc _icon; do
-    [[ -z "${pkg:-}" || "${pkg:0:1}" == "#" ]] && continue
-    AUR+=("$pkg")
-    CAT+=("$cat")
-    NAME+=("$name")
-    DESC+=("$desc")
-done < "$CATALOG"
-
-if [[ ${#AUR[@]} -eq 0 ]]; then
-    log "catalog empty — nothing to install"
-    if [[ $DRY_RUN_NO_YAD -eq 0 ]]; then
-        yad --info --title="ShedOS Apps" --width=360 --center --button="OK!gtk-ok:0" \
-            --text="No apps in the catalog. Nothing to do." 2>>"$LOG"
-    fi
-    touch "$MARKER"
-    exit 0
-fi
-
-PKGS=()
-LIST_CODE=0
-
-if [[ $DRY_RUN_NO_YAD -eq 1 ]]; then
-    read -r -a PKGS <<< "${SHEDOS_TEST_PKGS:-}"
-    log "dry-run-no-yad: PKGS=${PKGS[*]}"
-else
-    # ASCII Unit Separator so app descriptions can contain anything.
-    SEP=$'\x1f'
-    LIST_ROWS=()
-    for i in "${!AUR[@]}"; do
-        LIST_ROWS+=(
-            "FALSE"
-            "${CAT[$i]}"
-            "${NAME[$i]}"
-            "${DESC[$i]}"
-            "${AUR[$i]}"
-        )
-    done
-
-    SELECTION=$(yad --list --checklist \
-        --title="ShedOS Apps" \
-        --window-icon=system-software-install \
-        --image=system-software-install \
-        --text="<b>Install extra apps</b>\n\nThese are proprietary or vendor-hosted apps we can't ship by default.\nTick anything you want, then hit Install. The install runs hands-off — no further prompts, no terminal windows, no password. Cancel any time from the progress dialog." \
-        --width=760 --height=480 --center \
-        --separator="$SEP" \
-        --print-column=5 \
-        --column="" \
-        --column="Category" \
-        --column="App" \
-        --column="Description" \
-        --column="AUR:HD" \
-        "${LIST_ROWS[@]}" \
-        --button="Skip:1" \
-        --button="Install:0" \
-        2>>"$LOG")
-    LIST_CODE=$?
-
-    log "checklist exit_code=$LIST_CODE"
-
-    case "$LIST_CODE" in
-        0)
-            # Install — parse selection.
-            while IFS= read -r line; do
-                line="${line%"$SEP"}"
-                [[ -n "$line" ]] && PKGS+=("$line")
-            done <<< "$SELECTION"
-            ;;
-        1)
-            log "user clicked Skip — no marker, can re-run from launcher"
-            exit 0
-            ;;
-        *)
-            log "yad checklist failed (exit $LIST_CODE) — exiting without marker"
-            exit 0
-            ;;
-    esac
-fi
-
-if [[ ${#PKGS[@]} -eq 0 ]]; then
-    log "no packages selected — marking done"
-    touch "$MARKER"
-    if [[ $DRY_RUN_NO_YAD -eq 0 ]]; then
-        yad --info --title="ShedOS Apps" --width=360 --center --button="OK!gtk-ok:0" \
-            --text="No apps selected. You can install anything later from the <b>ShedOS Apps</b> entry in your app launcher." \
-            2>>"$LOG"
-    fi
-    exit 0
-fi
-
-if [[ $DRY_RUN -eq 0 ]] && ! command -v yay >/dev/null 2>&1; then
-    log "yay missing"
-    yad --error --title="ShedOS Apps" --width=400 --center --button="OK!gtk-ok:0" \
-        --text="<b>yay is not installed.</b>\n\nInstall it with:\n<tt>sudo pacman -S yay</tt>\n\nThen re-run ShedOS Apps from the launcher." \
-        2>>"$LOG"
-    exit 1
-fi
-
-# Hands-off flag set: --noconfirm + auto-N answers + skip PGP checks
-# (TOFU; AUR is implicitly trust-on-first-use). Wheel is NOPASSWD on
-# ShedOS so yay's internal sudo passes silently.
-YAY_CMD=(
-    yay -S --needed --noconfirm
-    --answerclean N --answerdiff N --answeredit N
-    --cleanafter --removemake
-    --mflags=--skippgpcheck
-    "${PKGS[@]}"
-)
-
-log "yay command: ${YAY_CMD[*]}"
-
-if [[ $DRY_RUN -eq 1 ]]; then
-    if [[ $DRY_RUN_NO_YAD -eq 1 ]]; then
-        printf '%s\n' "${YAY_CMD[*]}"
+for pkg in "${pkgs[@]}"; do
+    if pacman -Si "$pkg" >/dev/null 2>&1; then
+        pacman_pkgs+=("$pkg")
+    elif command -v yay >/dev/null 2>&1 && yay -Si --aur "$pkg" >/dev/null 2>&1; then
+        aur_pkgs+=("$pkg")
     else
-        yad --info --title="ShedOS Apps — Dry run" --width=520 --center --button="OK!gtk-ok:0" \
-            --text="<b>Dry run.</b> Would execute:\n\n<tt>${YAY_CMD[*]}</tt>" \
-            2>>"$LOG"
+        unknown+=("$pkg")
     fi
-    exit 0
-fi
+done
 
-FIFO_DIR=$(mktemp -d -t shedos-apps-XXXXXX)
-FIFO="$FIFO_DIR/yay.fifo"
-mkfifo "$FIFO"
-
-# shellcheck disable=SC2329  # invoked via trap
-cleanup() {
-    local rc=$?
-    [[ -n "${YAY_PID:-}" ]] && kill -TERM "$YAY_PID" 2>/dev/null
-    [[ -n "${YAD_PID:-}" ]] && kill -TERM "$YAD_PID" 2>/dev/null
-    rm -rf "$FIFO_DIR"
-    log "cleanup: rc=$rc, fifo_dir=$FIFO_DIR removed"
-}
-trap cleanup EXIT INT TERM
-
-( stdbuf -oL -eL "${YAY_CMD[@]}" > "$FIFO" 2>&1; printf '__SHEDOS_YAY_RC__=%s\n' "$?" > "$FIFO_DIR/rc" ) &
-YAY_PID=$!
-log "yay started pid=$YAY_PID"
-
-# Pulse the progress bar instead of trying to count packages — yay/pacman
-# output format isn't a stable interface and the line patterns we'd need
-# to count don't appear when stdout isn't a TTY. Every yay line becomes a
-# status-text update; the pulsing bar shows motion while work happens.
-{
-    printf '#Preparing to install %d package(s)…\n' "${#PKGS[@]}"
-    while IFS= read -r line; do
-        printf '%s\n' "$line" >> "$LOG"
-        # Strip ANSI escapes — they confuse pango markup.
-        clean=$(printf '%s' "$line" | sed -E $'s/\x1b\\[[0-9;]*[a-zA-Z]//g')
-        [[ -z "${clean// /}" ]] && continue
-        printf '#%s\n' "${clean:0:140}"
-    done < "$FIFO"
-    printf '#Finishing up…\n'
-} | yad --progress \
-    --pulsate \
-    --title="ShedOS Apps — Installing" \
-    --width=560 --center \
-    --window-icon=system-software-install \
-    --text="Installing ${#PKGS[@]} package(s):\n<tt>${PKGS[*]}</tt>" \
-    --auto-close \
-    --auto-kill \
-    --button="Cancel:1" \
-    2>>"$LOG" &
-YAD_PID=$!
-log "yad --progress started pid=$YAD_PID"
-
-# Wait for either yay to finish or yad to be cancelled.
-yad_rc=0
-yay_rc=0
-wait "$YAD_PID"
-yad_rc=$?
-
-if [[ $yad_rc -ne 0 ]]; then
-    log "user cancelled (yad exit=$yad_rc) — terminating yay pid=$YAY_PID"
-    kill -TERM "$YAY_PID" 2>/dev/null || true
-    wait "$YAY_PID" 2>/dev/null || true
-    yad --warning --title="ShedOS Apps" --width=420 --center --button="OK!gtk-ok:0" \
-        --text="<b>Install cancelled.</b>\n\nNothing partial has been left behind by yay's --needed flag, but your selection wasn't installed.\n\nRe-run from <b>ShedOS Apps</b> when you're ready." \
-        2>>"$LOG"
+if [[ ${#unknown[@]} -gt 0 ]]; then
+    echo "shedman install: not found in any repo: ${unknown[*]}" >&2
     exit 1
 fi
 
-wait "$YAY_PID" 2>/dev/null || true
-if [[ -r "$FIFO_DIR/rc" ]]; then
-    yay_rc=$(grep '__SHEDOS_YAY_RC__=' "$FIFO_DIR/rc" 2>/dev/null | tail -1 \
-        | sed 's/^.*=//' || echo 1)
-else
-    yay_rc=1
+if [[ ${#pacman_pkgs[@]} -gt 0 ]]; then
+    sudo pacman -S --needed --noconfirm "${pacman_pkgs[@]}"
 fi
-log "yay finished rc=$yay_rc"
 
-if [[ "$yay_rc" == "0" ]]; then
-    touch "$MARKER"
-    yad --info --title="ShedOS Apps" --width=460 --center --button="OK!gtk-ok:0" \
-        --window-icon=emblem-default \
-        --image=emblem-default \
-        --text="<b>Done!</b>\n\nInstalled: <tt>${PKGS[*]}</tt>\n\nLaunch them from your app launcher. You can add more any time via <b>ShedOS Apps</b>." \
-        2>>"$LOG"
-    exit 0
-else
-    yad --warning --title="ShedOS Apps" --width=520 --center --button="OK!gtk-ok:0" \
-        --text="<b>Some packages didn't install.</b>\n\nyay exited with status <tt>$yay_rc</tt>. The full transcript is at:\n\n<tt>$LOG</tt>\n\nUsual culprits are missing PGP keys or expired AUR packages. Re-open this installer from your app launcher when you're ready." \
-        2>>"$LOG"
-    exit 1
+if [[ ${#aur_pkgs[@]} -gt 0 ]]; then
+    if ! command -v yay >/dev/null 2>&1; then
+        echo "shedman install: AUR packages found but yay missing: ${aur_pkgs[*]}" >&2
+        echo "Install yay first: pacman -S yay" >&2
+        exit 1
+    fi
+    yay -S --needed --noconfirm \
+        --answerclean N --answerdiff N --answeredit N \
+        --cleanafter --removemake \
+        --mflags=--skippgpcheck \
+        "${aur_pkgs[@]}"
 fi
