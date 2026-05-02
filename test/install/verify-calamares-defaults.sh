@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# Post-install integration check: confirm the four proprietary apps
-# installed by shedos_optional_apps during Calamares are present.
+# Post-install check: confirm the four proprietary apps are installed.
 # Run inside the freshly-installed system after Calamares finishes.
 
 set -uo pipefail
@@ -36,11 +35,5 @@ if (( ${#missing[@]} == 0 )); then
 fi
 
 echo "Missing: ${missing[*]}" >&2
-echo "" >&2
-echo "Likely causes:" >&2
-echo "  1. yay-as-user could not sudo without a password — see" >&2
-echo "     /etc/sudoers.d/wheel and Calamares' user-creation log." >&2
-echo "  2. No internet during install; yay couldn't reach AUR." >&2
-echo "  3. Upstream PKGBUILD broke (vendor moved a download URL)." >&2
-echo "  4. Re-run: yay -S ${missing[*]}" >&2
+echo "Recover: yay -S ${missing[*]}" >&2
 exit 1
