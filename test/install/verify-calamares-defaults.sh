@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Post-install check: confirm the four proprietary apps are installed.
+# They land via Calamares unpackfs of install.sfs (built offline in CI).
 # Run inside the freshly-installed system after Calamares finishes.
 
 set -uo pipefail
@@ -35,5 +36,7 @@ if (( ${#missing[@]} == 0 )); then
 fi
 
 echo "Missing: ${missing[*]}" >&2
+echo "Likely cause: install.sfs was built without these (check build-aur" >&2
+echo "logs for missing .pkg.tar.zst in archiso/shedos-repo/)" >&2
 echo "Recover: yay -S ${missing[*]}" >&2
 exit 1
