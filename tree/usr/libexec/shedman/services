@@ -16,7 +16,7 @@ EXPECTED=(
     NetworkManager.service
     bluetooth.service
     iwd.service
-    sddm.service
+    greetd.service
     fstrim.timer
     postgresql.service
     shedos-pg-user-bootstrap.service
