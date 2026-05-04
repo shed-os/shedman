@@ -2639,6 +2639,27 @@ _LIMINE_CMDLINE_RE = re.compile(
     re.MULTILINE,
 )
 
+# ESP mirrors of /boot/limine.conf. UEFI firmware loads limine from the
+# ESP and limine reads its config from there — /boot/limine.conf is just
+# a staging file. Without these mirrors, kernel cmdline writes never
+# reach the running kernel.
+_ESP_LIMINE_MIRRORS = (
+    "/boot/efi/EFI/limine/limine.conf",
+    "/boot/efi/limine.conf",
+    "/efi/EFI/limine/limine.conf",
+    "/efi/limine.conf",
+)
+
+
+def _sync_limine_to_esp(text: str) -> None:
+    for path_str in _ESP_LIMINE_MIRRORS:
+        p = Path(path_str)
+        if p.exists():
+            try:
+                atomic_write_text(p, text, mode=0o644)
+            except OSError:
+                pass
+
 
 def _read_limine_config() -> tuple[Optional[Path], Optional[str]]:
     """Return (path, text) for the Limine config or (None, None) if
@@ -2768,10 +2789,12 @@ def plan_kernel_cmdline(cfg: ValidatedConfig) -> list[Change]:
 
         def apply_cmdline() -> None:
             atomic_write_text(limine_path, new_limine_text, mode=0o644)
+            _sync_limine_to_esp(new_limine_text)
             save_state_set(state_p, declared_set | merge.to_adopt)
 
         def undo_cmdline() -> None:
             atomic_write_text(limine_path, limine_text, mode=0o644)
+            _sync_limine_to_esp(limine_text)
 
         changes.append(Change(
             kind="~", section="kernel.cmdline",
