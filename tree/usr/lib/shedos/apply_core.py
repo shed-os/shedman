@@ -2639,10 +2639,6 @@ _LIMINE_CMDLINE_RE = re.compile(
     re.MULTILINE,
 )
 
-# ESP mirrors of /boot/limine.conf. UEFI firmware loads limine from the
-# ESP and limine reads its config from there — /boot/limine.conf is just
-# a staging file. Without these mirrors, kernel cmdline writes never
-# reach the running kernel.
 _ESP_LIMINE_MIRRORS = (
     "/boot/efi/EFI/limine/limine.conf",
     "/boot/efi/limine.conf",
