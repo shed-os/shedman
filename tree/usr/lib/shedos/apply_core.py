@@ -301,7 +301,7 @@ class SchemaError(ValueError):
 
 _ALLOWED_TOP = {"schema", "systemd", "drop-ins", "snapper",
                 "pacman", "services", "network", "security", "fs",
-                "kernel", "users", "groups"}
+                "kernel", "users", "groups", "theme"}
 _ALLOWED_SYSTEMD = {"system", "user"}
 _ALLOWED_SYSTEMD_SUB = {"enable", "disable"}
 _ALLOWED_SNAPPER = {"timeline", "cleanup"}
