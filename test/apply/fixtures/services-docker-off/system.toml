@@ -1,0 +1,4 @@
+schema = 1
+
+[services.docker]
+enable = false

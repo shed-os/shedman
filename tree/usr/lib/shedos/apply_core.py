@@ -311,8 +311,9 @@ _ALLOWED_SNAPPER_CLEANUP = {"number"}
 _ALLOWED_SNAPPER_CLEANUP_NUMBER = {"limit"}
 _ALLOWED_PACMAN = {"repos"}
 _ALLOWED_PACMAN_REPO_KEYS = {"server", "siglevel"}
-_ALLOWED_SERVICES = {"postgresql"}
+_ALLOWED_SERVICES = {"postgresql", "docker"}
 _ALLOWED_SERVICES_POSTGRES = {"auto-init", "per-user-db"}
+_ALLOWED_SERVICES_DOCKER = {"enable"}
 _ALLOWED_NETWORK = {"firewall"}
 _ALLOWED_FIREWALL_TOP = {"enabled", "incoming", "outgoing", "routed", "rules"}
 _ALLOWED_FIREWALL_RULE_KEYS = {
@@ -440,11 +441,20 @@ class PostgresqlServices:
 
 
 @dataclass
-class ServicesSection:
-    postgresql: PostgresqlServices = field(default_factory=PostgresqlServices)
+class DockerServices:
+    enable: Optional[bool] = None
 
     def is_empty(self) -> bool:
-        return self.postgresql.is_empty()
+        return self.enable is None
+
+
+@dataclass
+class ServicesSection:
+    postgresql: PostgresqlServices = field(default_factory=PostgresqlServices)
+    docker: DockerServices = field(default_factory=DockerServices)
+
+    def is_empty(self) -> bool:
+        return self.postgresql.is_empty() and self.docker.is_empty()
 
 
 @dataclass
@@ -745,6 +755,16 @@ def validate_doc(doc: dict) -> ValidatedConfig:
             if "per-user-db" in pg_raw:
                 cfg.services.postgresql.per_user_db = _check_bool(
                     "services.postgresql.per-user-db", pg_raw["per-user-db"])
+
+        docker_raw = svc_raw.get("docker", {})
+        if docker_raw:
+            if not isinstance(docker_raw, dict):
+                raise SchemaError("[services.docker] must be a table")
+            _check_keys("services.docker", docker_raw,
+                        _ALLOWED_SERVICES_DOCKER)
+            if "enable" in docker_raw:
+                cfg.services.docker.enable = _check_bool(
+                    "services.docker.enable", docker_raw["enable"])
 
     net_raw = doc.get("network", {})
     if net_raw:
@@ -1594,6 +1614,7 @@ def plan_pacman(cfg: ValidatedConfig) -> list[Change]:
 
 POSTGRES_AUTO_INIT_UNIT = "shedos-pg-initdb.service"
 POSTGRES_PER_USER_DB_UNIT = "shedos-pg-user-bootstrap.service"
+DOCKER_UNIT = "docker.service"
 
 
 def plan_services(cfg: ValidatedConfig) -> list[Change]:
@@ -1606,6 +1627,8 @@ def plan_services(cfg: ValidatedConfig) -> list[Change]:
          "services.postgresql.auto-init"),
         (cfg.services.postgresql.per_user_db, POSTGRES_PER_USER_DB_UNIT,
          "services.postgresql.per-user-db"),
+        (cfg.services.docker.enable, DOCKER_UNIT,
+         "services.docker.enable"),
     ]
     for desired, unit, label in flags:
         if desired is None:
