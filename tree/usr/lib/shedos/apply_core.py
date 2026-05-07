@@ -2732,7 +2732,6 @@ def plan_kernel_cmdline(cfg: ValidatedConfig) -> list[Change]:
             f"could not find a kernel_cmdline: line in {limine_path}; "
             f"unsupported Limine config format. Please file an issue."
         )
-    primary_lead = entries[0][1]
     live_tokens = entries[0][2]
 
     declared_set: set[tuple] = {(t,) for t in cfg.kernel.cmdline.append}
@@ -2803,6 +2802,14 @@ def plan_kernel_cmdline(cfg: ValidatedConfig) -> list[Change]:
     # entry keeps its own install-time tokens (e.g. the fallback's
     # bare-essentials root=/rootflags=/rw) while sharing the declared
     # additions like fbcon=nodefer,map:99.
+    #
+    # We use re.sub with a callable rather than str.replace because a
+    # fallback whose tokens are a strict prefix of the primary's
+    # (typical: minimal essentials vs essentials+decorations) would
+    # collide with str.replace — the fallback's full line text appears
+    # as a substring inside the primary line and replace would patch
+    # the wrong occurrence. re.sub walks matches in document order and
+    # stitches replacements by position, which sidesteps the overlap.
     declared_strs: set[str] = {t[0] for t in declared_set} | {
         t[0] for t in merge.to_adopt
     }
@@ -2810,22 +2817,30 @@ def plan_kernel_cmdline(cfg: ValidatedConfig) -> list[Change]:
         t[0] for t in (last_applied - declared_set)
     }
 
-    new_limine_text = limine_text
-    any_changed = False
     n_entries_changed = 0
-    for line, lead, entry_tokens in entries:
-        if entry_tokens == live_tokens and lead == primary_lead:
+    match_idx = [0]
+
+    def _entry_replacement(m: "re.Match[str]") -> str:
+        nonlocal n_entries_changed
+        idx = match_idx[0]
+        match_idx[0] += 1
+        line = m.group(0)
+        lead = m.group("lead")
+        entry_tokens = m.group("tokens").split()
+        if idx == 0:
             entry_target = primary_target
         else:
             kept = [t for t in entry_tokens if t not in formerly_declared_strs]
             kept_set = set(kept)
             additions = sorted(t for t in declared_strs if t not in kept_set)
             entry_target = kept + additions
-        if entry_target != entry_tokens:
-            new_line = lead + " " + " ".join(entry_target)
-            new_limine_text = new_limine_text.replace(line, new_line, 1)
-            any_changed = True
-            n_entries_changed += 1
+        if entry_target == entry_tokens:
+            return line
+        n_entries_changed += 1
+        return lead + " " + " ".join(entry_target)
+
+    new_limine_text = _LIMINE_CMDLINE_RE.sub(_entry_replacement, limine_text)
+    any_changed = new_limine_text != limine_text
 
     if any_changed:
         diff_iter = difflib.unified_diff(
