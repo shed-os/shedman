@@ -2695,15 +2695,19 @@ def _read_limine_config() -> tuple[Optional[Path], Optional[str]]:
     return None, None
 
 
-def _parse_limine_cmdline(text: str) -> tuple[Optional[str], Optional[str], list[str]]:
-    """Find the first cmdline assignment line in the Limine config.
-    Returns (whole_line, lead_text, tokens). On no match → (None, None, [])."""
-    m = _LIMINE_CMDLINE_RE.search(text)
-    if not m:
-        return None, None, []
-    line = m.group(0)
-    tokens = m.group("tokens").split()
-    return line, m.group("lead"), tokens
+def _parse_limine_cmdlines_all(text: str) -> list[tuple[str, str, list[str]]]:
+    """Find every cmdline assignment line. Returns list of
+    (whole_line, lead_text, tokens) tuples in document order. The
+    first entry is the default kernel; later entries are typically
+    fallback or alternate kernels. Each entry has its own install-
+    time tokens that we preserve, but they all share the same
+    declared additions from [kernel.cmdline].append."""
+    out: list[tuple[str, str, list[str]]] = []
+    for m in _LIMINE_CMDLINE_RE.finditer(text):
+        line = m.group(0)
+        tokens = m.group("tokens").split()
+        out.append((line, m.group("lead"), tokens))
+    return out
 
 
 def plan_kernel_cmdline(cfg: ValidatedConfig) -> list[Change]:
@@ -2722,12 +2726,14 @@ def plan_kernel_cmdline(cfg: ValidatedConfig) -> list[Change]:
         # without /boot fixtures).
         return []
 
-    line, lead, live_tokens = _parse_limine_cmdline(limine_text)
-    if line is None:
+    entries = _parse_limine_cmdlines_all(limine_text)
+    if not entries:
         raise SchemaError(
             f"could not find a kernel_cmdline: line in {limine_path}; "
             f"unsupported Limine config format. Please file an issue."
         )
+    primary_lead = entries[0][1]
+    live_tokens = entries[0][2]
 
     declared_set: set[tuple] = {(t,) for t in cfg.kernel.cmdline.append}
     live_set: set[tuple] = {(t,) for t in live_tokens}
@@ -2772,27 +2778,56 @@ def plan_kernel_cmdline(cfg: ValidatedConfig) -> list[Change]:
             apply_fn=apply_adopt, undo_fn=undo_adopt,
         ))
 
-    # Compute target cmdline tokens: baseline + (declared ∪ adopted),
-    # preserving baseline order then appending non-baseline in
-    # original-position order where possible.
-    target_tokens: list[str] = []
+    # Compute target cmdline tokens for the primary entry: baseline +
+    # (declared ∪ adopted), preserving baseline order then appending
+    # non-baseline in original-position order where possible.
+    primary_target: list[str] = []
     seen: set[str] = set()
-    # Preserve baseline order.
     for tok in live_tokens:
         if (tok,) in baseline and tok not in seen:
-            target_tokens.append(tok)
+            primary_target.append(tok)
             seen.add(tok)
-    # Append declared/adopted non-baseline tokens. Sort for stability.
     nonbase = sorted({t for t in cfg.kernel.cmdline.append} |
                      {t[0] for t in merge.to_adopt})
     for tok in nonbase:
         if tok not in seen:
-            target_tokens.append(tok)
+            primary_target.append(tok)
             seen.add(tok)
 
-    if target_tokens != live_tokens:
-        new_line = lead + " " + " ".join(target_tokens)
-        new_limine_text = limine_text.replace(line, new_line, 1)
+    # Build new_limine_text by updating every kernel_cmdline entry.
+    # The primary entry uses the baseline-aware target above. Non-
+    # primary entries (typically fallback kernels) get a simpler pass:
+    # preserve everything they currently have except formerly-declared
+    # tokens that are no longer in the declaration, then ensure all
+    # currently-declared (or adopted) tokens are present. That way each
+    # entry keeps its own install-time tokens (e.g. the fallback's
+    # bare-essentials root=/rootflags=/rw) while sharing the declared
+    # additions like fbcon=nodefer,map:99.
+    declared_strs: set[str] = {t[0] for t in declared_set} | {
+        t[0] for t in merge.to_adopt
+    }
+    formerly_declared_strs: set[str] = {
+        t[0] for t in (last_applied - declared_set)
+    }
+
+    new_limine_text = limine_text
+    any_changed = False
+    n_entries_changed = 0
+    for line, lead, entry_tokens in entries:
+        if entry_tokens == live_tokens and lead == primary_lead:
+            entry_target = primary_target
+        else:
+            kept = [t for t in entry_tokens if t not in formerly_declared_strs]
+            kept_set = set(kept)
+            additions = sorted(t for t in declared_strs if t not in kept_set)
+            entry_target = kept + additions
+        if entry_target != entry_tokens:
+            new_line = lead + " " + " ".join(entry_target)
+            new_limine_text = new_limine_text.replace(line, new_line, 1)
+            any_changed = True
+            n_entries_changed += 1
+
+    if any_changed:
         diff_iter = difflib.unified_diff(
             limine_text.splitlines(keepends=True),
             new_limine_text.splitlines(keepends=True),
@@ -2803,8 +2838,9 @@ def plan_kernel_cmdline(cfg: ValidatedConfig) -> list[Change]:
         diff = "".join(l if l.endswith("\n") else l + "\n" for l in diff_iter)
         n_added = len(merge.to_add)
         n_removed = len(merge.to_remove)
+        suffix = f" across {n_entries_changed} entries" if len(entries) > 1 else ""
         summary = (f"reboot to apply: cmdline +{n_added} -{n_removed} "
-                   f"token(s)")
+                   f"token(s){suffix}")
 
         def apply_cmdline() -> None:
             atomic_write_text(limine_path, new_limine_text, mode=0o644)
@@ -2821,8 +2857,8 @@ def plan_kernel_cmdline(cfg: ValidatedConfig) -> list[Change]:
             apply_fn=apply_cmdline, undo_fn=undo_cmdline,
         ))
     else:
-        # Aligned cmdline. Update state file regardless (records
-        # adoption).
+        # All entries already aligned. Update state file regardless
+        # (records adoption).
         if changes:
             prev = changes[0].apply_fn
 
