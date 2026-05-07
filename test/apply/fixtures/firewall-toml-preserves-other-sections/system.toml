@@ -7,7 +7,7 @@ enable = ["snapper-timeline.timer", "snapper-cleanup.timer"]
 enable = ["shedos-update-check.timer"]
 
 [pacman.repos.shedos]
-server = "https://repo.shedos.org/$arch"
+server = "https://repo.shedos.org/stable/$arch"
 siglevel = "Required DatabaseRequired"
 
 [network.firewall]
