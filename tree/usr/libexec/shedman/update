@@ -325,6 +325,16 @@ fi
 # .shedosnew files during this run. --tick surfaces them on waybar + mako.
 /usr/bin/shedman conflicts --tick 2>/dev/null || true
 
+# Per-user post-upgrade hooks. Packages drop idempotent scripts into
+# /usr/libexec/shedos-postupgrade/ for one-shot retrofits that need to
+# touch user-level state — they run as the invoking user (i.e. you).
+if [[ -d /usr/libexec/shedos-postupgrade ]]; then
+    for _hook in /usr/libexec/shedos-postupgrade/*; do
+        [[ -x $_hook ]] || continue
+        "$_hook" || echo "post-upgrade hook $(basename "$_hook") exited non-zero." >&2
+    done
+fi
+
 # Count leftover .shedosnew conflicts. A sync may have produced new ones, or
 # there may be old ones the user never resolved — either way they block the
 # "in sync" guarantee, so surface them now.
