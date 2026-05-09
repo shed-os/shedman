@@ -60,6 +60,10 @@ The headline set:
 *shedman install*
 	First-boot proprietary apps installer.
 
+*shedman fingerprint*
+	Manage user fingerprint enrollments and characterise the
+	matcher's reliability. See *shedman-fingerprint*(1).
+
 *shedman migrate*
 	One-shot retrofit for installs dated before the April 2026
 	packaging cut-over. Idempotent — runs on a packaged install
@@ -100,7 +104,7 @@ the per-command man pages.
 
 *shedman-update*(1), *shedman-apply*(1), *shedman-doctor*(1),
 *shedman-rollback*(1), *shedman-config*(1), *shedman-status*(1),
-*pacman*(8), *yay*(8).
+*shedman-fingerprint*(1), *pacman*(8), *yay*(8).
 
 The web reference at https://shedos.org/docs/commands covers every
 subcommand and flag with examples.
