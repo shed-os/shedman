@@ -32,7 +32,7 @@ NOTIFY_STATE="$STATE_DIR/last-notified-health"
 HYSTERESIS_FILE="$STATE_DIR/last-health-notified-at"
 HYSTERESIS_SECONDS=600
 
-# Test hooks — every input source is overridable so test/check-health/run.sh
+# Test hooks: every input source is overridable so test/check-health/run.sh
 # can feed synthetic data without mocking /proc or /sys at the kernel level.
 # Production never sets these; the defaults read the real paths.
 PSI_FILE="${SHEDOS_HEALTH_PSI_FILE:-/proc/pressure/memory}"
@@ -181,7 +181,7 @@ _notify_if_new() {
     fi
 
     # Suppress re-fire while still at the same non-ok class unless the
-    # hysteresis window has elapsed — otherwise a chattering metric spams
+    # hysteresis window has elapsed; otherwise a chattering metric spams
     # mako every tick.
     cleared=$(_read_state "$HYSTERESIS_FILE" 0)
     if [[ $class == "$last" ]] && (( now - cleared < HYSTERESIS_SECONDS )); then

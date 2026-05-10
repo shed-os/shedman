@@ -129,7 +129,7 @@ do_undo() {
     trap 'umount "$tmp" 2>/dev/null; rmdir "$tmp" 2>/dev/null' EXIT
     mount_top_level "$tmp"
 
-    # Pick the newest @.rollback-* backup — filenames are ISO-8601ish so
+    # Pick the newest @.rollback-* backup. Filenames are ISO-8601ish so
     # lexicographic sort is chronological.
     mapfile -t backups < <(ls -1 "$tmp" 2>/dev/null | grep -E '^@\.rollback-' | sort)
     if (( ${#backups[@]} == 0 )); then
