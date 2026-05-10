@@ -56,9 +56,13 @@ _shedman() {
                 *)
                     local bin=/usr/libexec/shedman/$cmd
                     if [[ -x $bin ]]; then
-                        _flags=( "${(@f)$("$bin" --complete-zsh 2>/dev/null)}" )
+                        local prev_word=""
+                        if (( CURRENT > 2 )); then
+                            prev_word=${words[CURRENT-1]}
+                        fi
+                        _flags=( "${(@f)$("$bin" --complete-zsh "$prev_word" 2>/dev/null)}" )
                         if (( ${#_flags} )); then
-                            _arguments "*:: :($_flags)" '*:filename:_files'
+                            _describe -t completions "$cmd argument" _flags
                             return 0
                         fi
                     fi
