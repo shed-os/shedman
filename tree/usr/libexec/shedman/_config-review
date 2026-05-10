@@ -328,7 +328,7 @@ def draft_path_for(relpath: str) -> Path:
     return DRAFT_ROOT / f"{relpath}{DRAFT_SUFFIX}"
 
 
-# Scan — discover .shedosnew conflicts under $HOME and classify each.
+# Scan: discover .shedosnew conflicts under $HOME and classify each.
 
 
 def find_pkg_and_src(relpath: str) -> tuple[Optional[str], Optional[Path]]:
@@ -362,7 +362,7 @@ def scan_conflicts() -> tuple[list[Conflict], list[str]]:
     if not HOME.is_dir():
         return conflicts, excluded
     for dirpath, dirnames, filenames in os.walk(HOME, followlinks=False):
-        # Prune excluded trees early for speed — but first check if they
+        # Prune excluded trees early for speed, but first check if they
         # contain any .shedosnew files so we can surface them.
         rel_dir = os.path.relpath(dirpath, HOME)
         if rel_dir != "." and is_excluded(rel_dir.replace(os.sep, "/") + "/"):
@@ -424,7 +424,7 @@ def _classify(relpath: str, yours: Path, theirs: Path) -> Conflict:
 
 
 # Auto-resolve at scan: identical content (byte-for-byte) should just delete
-# .shedosnew and bump the manifest — never surfaced to the user.
+# .shedosnew and bump the manifest. Never surfaced to the user.
 
 
 def auto_resolve_identical(conflicts: list[Conflict]) -> tuple[list[Conflict], int]:
@@ -551,7 +551,7 @@ def _merge_change_regions(y_changes, t_changes, n_base, n_yours, n_theirs):
         elif t[1] <= y[0]:
             merged.append(("t", t)); t_idx += 1
         else:
-            # Overlap — coalesce into a both-changed block. Extend as needed
+            # Overlap: coalesce into a both-changed block. Extend as needed
             # by sweeping forward until the combined base range no longer
             # overlaps the next region from either side.
             bs = min(y[0], t[0])
@@ -586,9 +586,8 @@ def _merge_change_regions(y_changes, t_changes, n_base, n_yours, n_theirs):
     for tag, reg in merged:
         if tag == "y":
             a_lo, a_hi, b_lo, b_hi = reg
-            # THEIRS is unchanged across this base range — project base→theirs
-            # by identity offset from the t_changes we've already walked. Do
-            # this with a helper.
+            # THEIRS is unchanged across this base range; project base→theirs
+            # by identity offset from the t_changes we've already walked.
             ts_lo = _project_base_to_side(a_lo, t_changes, n_base, n_theirs)
             ts_hi = _project_base_to_side(a_hi, t_changes, n_base, n_theirs)
             out.append((a_lo, a_hi, b_lo, b_hi, ts_lo, ts_hi, "yours-only"))
@@ -617,7 +616,7 @@ def _project_base_to_side(base_pos: int, side_changes, n_base: int, n_side: int)
         if base_pos >= a_hi:
             offset += (b_hi - b_lo) - (a_hi - a_lo)
         else:
-            # base_pos falls inside a changed region — snap to b_lo.
+            # base_pos falls inside a changed region; snap to b_lo.
             return b_lo
     return base_pos + offset
 
@@ -1193,7 +1192,7 @@ def install_signal_handlers() -> None:
 
 def apply_draft(state: MergeState, draft: dict) -> bool:
     """Try to apply decisions from a draft. Returns True if applied."""
-    # Only apply if load-time SHAs still match — otherwise the world moved.
+    # Only apply if load-time SHAs still match; otherwise the world moved.
     checks = [
         ("yours_sha_at_load", state.yours_sha_at_load),
         ("theirs_sha_at_load", state.theirs_sha_at_load),
@@ -1499,14 +1498,14 @@ def _run_stdin_decisions(conflicts: list[Conflict], *, force_2way: bool,
     return 0
 
 
-# Placeholder runner — overwritten later if Textual UI loads.
+# Placeholder runner; overwritten later if Textual UI loads.
 def _run_app_inline(*args, **kwargs) -> int:  # noqa: ARG001
     print("shedman config --review: Textual UI not available. "
           "Install python-textual + python-rich.", file=sys.stderr)
     return 1
 
 
-# Textual UI — lazy-loaded so --list / --dry-run / --stdin-decisions don't
+# Textual UI, lazy-loaded so --list / --dry-run / --stdin-decisions don't
 # pay the import cost. Everything below this point requires python-textual
 # and python-rich.
 
@@ -1617,7 +1616,7 @@ def _load_textual_ui() -> None:
             # Cap total width to terminal columns using east-asian-aware math
             # (the dot glyphs render ambiguous-width; spaces + ASCII legend
             # are single-cell). The widget itself is a one-line Static, so
-            # overflow would silently clip — do it ourselves so the user sees
+            # overflow would silently clip; do it ourselves so the user sees
             # an ellipsis instead of a mystery cut.
             term_cols = self.size.width or shutil.get_terminal_size((80, 24)).columns
             padding = 2
@@ -1632,8 +1631,8 @@ def _load_textual_ui() -> None:
     #
     # The left (YOURS) and right (THEIRS) panes always show their own side's
     # content. The middle pane is a LIVE RESULT PREVIEW: for every hunk it
-    # reflects the user's current decision (y/t/b/B/x) — its cells mirror
-    # the chosen side so the user sees the merged output take shape as they
+    # reflects the user's current decision (y/t/b/B/x); cells mirror the
+    # chosen side so the user sees the merged output take shape as they
     # make calls. Undecided hunks are marked with a yellow "?" so pending
     # work is obvious. Outside hunks the middle pane shows base (ancestor)
     # content unchanged.
@@ -1643,7 +1642,7 @@ def _load_textual_ui() -> None:
     #   equal / ctx    →  neutral text, no marker
     #   add            →  green "+" + green text   (side introduced this line)
     #   del            →  red   "-" + red   text   (side deleted this base line)
-    #   und            →  yellow "?" + yellow text (hunk still undecided — only
+    #   und            →  yellow "?" + yellow text (hunk still undecided; only
     #                                              ever appears in middle pane)
     #
     # Padding rows (cells with ``text is None``) draw a dim "~" placeholder
@@ -2007,8 +2006,8 @@ MERGE SCREEN
 
         def on_data_table_row_selected(self, event) -> None:
             # Fired when the user presses Enter (or double-clicks) on a row.
-            # DataTable owns the Enter key — screen-level Enter binding never
-            # fires — so activation has to go through this handler.
+            # DataTable owns the Enter key, so the screen-level Enter binding
+            # never fires; activation has to go through this handler.
             visible = self._visible_conflicts()
             idx = getattr(event, "cursor_row", None)
             if idx is None or idx < 0 or idx >= len(visible):
@@ -2084,7 +2083,7 @@ MERGE SCREEN
         #   y/t/b/B/x              → decision on current hunk (advances)
         # Footer displays every binding with show=True in insertion order.
         # We surface the scroll keys (even the obvious arrow aliases) so the
-        # user can verify the TUI actually handles them — the previous
+        # user can verify the TUI actually handles them. The previous
         # hidden-arrow design made it look like scroll was broken.
         BINDINGS = [
             Binding("j,down",       "scroll_down",      "↓ line"),
@@ -2145,7 +2144,7 @@ MERGE SCREEN
                                  self.pane_theirs, id="merge-row")
             self.strip = HunkStrip()
             yield self.strip
-            # Footer auto-renders every `show=True` binding — it's our source
+            # Footer auto-renders every `show=True` binding; it's our source
             # of truth for "what keys do what", so the user never has to
             # memorize or hit `?` just to find ctrl-d/pgup/g/G.
             yield Footer()
