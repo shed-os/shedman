@@ -58,8 +58,8 @@ _notify_if_new() {
     # Fire a desktop notification when `current` is greater than the last
     # count we already notified about. Reset state when current drops to 0
     # so a future 0→N transition fires again. Silently no-op when the
-    # notification stack isn't reachable (e.g. TTY login, SSH session with
-    # no DBus, notify-send missing) — the waybar badge stays authoritative.
+    # notification stack isn't reachable (TTY login, SSH without DBus,
+    # notify-send missing); the waybar badge stays authoritative.
     local current="$1"
 
     if (( current == 0 )); then

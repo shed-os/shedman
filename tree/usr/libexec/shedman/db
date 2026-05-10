@@ -6,9 +6,6 @@
 #                      postgres LOGIN+CREATEDB role and a same-named
 #                      database they own. Idempotent. Called on boot
 #                      by shedos-pg-user-bootstrap.service.
-#
-# Future siblings (--mariadb-bootstrap, etc.) slot in under the same
-# flag-dispatch pattern without needing a new top-level shedman subcommand.
 
 set -u
 
