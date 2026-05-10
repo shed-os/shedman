@@ -36,7 +36,7 @@ from datetime import datetime
 from typing import Optional
 
 
-# Data model — kept importable without Textual so tests can exercise the
+# Data model, kept importable without Textual so tests can exercise the
 # parser cheaply.
 
 
@@ -56,7 +56,7 @@ class UpgradeRun:
     pre: Snapshot
     post: Snapshot
     # Package counts are filled lazily by load_package_diff() when the user
-    # opens the diff pane — listing is cheap, `snapper status` isn't.
+    # opens the diff pane; listing is cheap, `snapper status` isn't.
     pacman_added: int = 0
     pacman_removed: int = 0
     pacman_updated: int = 0
@@ -163,7 +163,7 @@ def group_into_runs(snapshots: list[Snapshot]) -> HistoryView:
     for snap in snapshots:
         if snap.number in seen_in_pair:
             continue
-        # Snapper emits number 0 as a live-state marker ("current") — it
+        # Snapper emits number 0 as a live-state marker ("current"). It
         # isn't a real snapshot the user can roll back to, so drop it.
         if snap.number == 0:
             continue
@@ -226,7 +226,7 @@ def parse_snapper_status(raw: str) -> list[PackageChange]:
         if idx < 0:
             continue
         tail = line[idx + len(PACMAN_LOCAL):]
-        # Only care about the immediate subdirectory — e.g. "foo-1.2-1/desc".
+        # Only care about the immediate subdirectory, e.g. "foo-1.2-1/desc".
         seg = tail.split("/", 1)[0]
         if not seg or seg in (".", ""):
             continue
@@ -309,7 +309,7 @@ def trigger_rollback(pre_number: int) -> tuple[int, str]:
     )
 
 
-# Date normalisation — snapper emits assorted formats depending on version
+# Date normalisation: snapper emits assorted formats depending on version
 # and the `--iso` flag. We show whatever we parse back as "YYYY-MM-DD HH:MM".
 
 

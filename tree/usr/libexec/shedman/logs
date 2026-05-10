@@ -47,7 +47,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 
-# Small data helpers — kept importable without Textual so tests can exercise
+# Small data helpers, kept importable without Textual so tests can exercise
 # them cheaply and the main script degrades gracefully when textual is
 # unavailable.
 
@@ -196,7 +196,7 @@ def copy_to_clipboard(text: str) -> bool:
     return False
 
 
-# Filter state — held as a tiny value type so the UI can print it verbatim
+# Filter state, held as a tiny value type so the UI can print it verbatim
 # and the tests can assert on it without booting Textual.
 
 
@@ -248,8 +248,7 @@ def validate_regex(pattern: str) -> Optional[str]:
     return None
 
 
-# Textual UI — lazy-loaded so that `--help` and unit tests can run without
-# the dep.
+# Textual UI, lazy-loaded so `--help` and unit tests can run without the dep.
 
 
 LogsApp = None  # populated by build_app_class() — exposed so tests can pilot it.
@@ -485,9 +484,9 @@ def build_app_class():
 
         def action_copy_line(self) -> None:
             log = self.query_one(RichLog)
-            # RichLog exposes its rendered lines via `.lines` — each entry
-            # is a Strip, whose `.text` attr joins the segments. Copy the
-            # last visible line as a pragmatic "copy current".
+            # RichLog exposes rendered lines via `.lines`; each entry is a
+            # Strip whose `.text` attr joins the segments. Copy the last
+            # visible line as a pragmatic "copy current".
             if not log.lines:
                 self._status("no line to copy.", kind="err")
                 return

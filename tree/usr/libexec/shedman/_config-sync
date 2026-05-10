@@ -244,7 +244,7 @@ if (( REBUILD_MANIFEST )); then
     done
     echo "Rebuilt manifest: $n entries under $STATE_ROOT"
 
-    # Also clean stale state for newly-excluded paths — rebuild-manifest is the
+    # Also clean stale state for newly-excluded paths. rebuild-manifest is the
     # "align my world" command, so dropping leftovers the user has opted out of
     # fits the contract.
     purged=$(_purge_excluded_stale)
@@ -253,9 +253,9 @@ if (( REBUILD_MANIFEST )); then
     fi
 
     # Scan for stranded conflict/backup artefacts the user may have forgotten
-    # about. After --rebuild-manifest the tool's view of the world is "aligned
-    # now", which means any remaining .shedosnew is definitionally a file the
-    # user hasn't reviewed yet — point them at it.
+    # about. After --rebuild-manifest the tool's view of the world is aligned,
+    # so any remaining .shedosnew is definitionally a file the user hasn't
+    # reviewed yet; point them at it.
     mapfile -t _new  < <(find "$HOME" -xdev -type f -name '*.shedosnew' 2>/dev/null)
     mapfile -t _bak  < <(find "$HOME" -xdev -type f -name '*.shedosbak' 2>/dev/null)
     if (( ${#_new[@]} + ${#_bak[@]} > 0 )); then
@@ -332,7 +332,7 @@ echo "Summary: $seed_n seed, $auto_n auto-update, $conflict_n conflict, $noop_n 
 
 # Preview stale state for paths the user has newly excluded (e.g. added a
 # matcher to ~/.config/shedos/sync-exclude after the last sync). Normal apply
-# path purges these below — in dry-run, we only list.
+# path purges these below; in dry-run, we only list.
 if (( DRY_RUN )); then
     stale_any=0
     while IFS= read -r -d '' relpath; do
@@ -386,8 +386,8 @@ for entry in "${plan[@]}"; do
             ;;
         conflict)
             cp --preserve=mode "$src" "$dst.shedosnew"
-            # Intentionally do NOT update $last or CONTENT_ROOT — we want the
-            # previous BASE preserved so shedos-review-configs can render a
+            # Intentionally do NOT update $last or CONTENT_ROOT; the previous
+            # BASE must be preserved so shedos-review-configs can render a
             # real 3-way diff against it.
             ;;
         noop) ;;
