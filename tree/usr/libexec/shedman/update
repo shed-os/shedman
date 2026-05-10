@@ -278,9 +278,11 @@ fi
 if (( pac_n > 0 )); then
     echo
     _hr
-    echo "Running pacman -Syu --noconfirm…"
+    echo "Running pacman -Syu --noconfirm --ask=4…"
     _hr
-    sudo pacman -Syu --noconfirm || {
+    # --ask=4 makes conflicts=() work under --noconfirm; without it,
+    # pacman defaults the conflict-remove prompt to NO and aborts.
+    sudo pacman -Syu --noconfirm --ask=4 || {
         echo "pacman exited non-zero; aborting before config sync." >&2
         # Still create the post-snapshot so the pre/post pair is complete —
         # snapper's cleanup will collapse empty pairs on its next run. Leaving
