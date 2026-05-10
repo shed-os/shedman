@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# shedman rollback — restore the root subvolume (`@`) from a snapper snapshot.
+# shedman rollback; restore the root subvolume (`@`) from a snapper snapshot.
 #
 # The btrfs-layout rollback model used by ShedOS:
-#   1. Mount the top-level btrfs (subvolid=5) at a tmpdir — this exposes
+#   1. Mount the top-level btrfs (subvolid=5) at a tmpdir; this exposes
 #      every subvolume (@, @snapshots, etc.) by name.
 #   2. Validate the target snapshot exists at @snapshots/<N>/snapshot.
 #   3. Rename the live @ to @.rollback-<ts> (kept as a safety net; user can

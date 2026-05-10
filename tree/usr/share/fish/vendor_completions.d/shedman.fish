@@ -1,14 +1,14 @@
 # fish completion for the shedman unified CLI.
 #
 # Subcommand list is discovered at completion time by globbing
-# /usr/libexec/shedman/* — same pattern as the bash + zsh completers.
+# /usr/libexec/shedman/*; same pattern as the bash + zsh completers.
 # Filenames prefixed with `_` (internal helpers) are hidden.
 #
 # Per-subcommand flag completion defers to `shedman <cmd>
 # --complete-fish` if the subcommand honors it. Other subcommands fall
 # back to filename completion.
 #
-# This file is structurally simple — fish's completion API is
+# This file is structurally simple; fish's completion API is
 # designed for one-line `complete -c` directives, so we don't need
 # a function dispatch like bash/zsh.
 

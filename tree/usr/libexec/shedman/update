@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# shedman update — interactive ShedOS upgrade flow.
+# shedman update; interactive ShedOS upgrade flow.
 #
 # The user is prompted to confirm before ANYTHING is applied, and pacman /
 # yay re-prompt with their own package lists. No silent paths by default.
@@ -15,7 +15,7 @@
 #   8. shedman config --sync → 3-way merge for $HOME dotfiles (own prompt)
 #
 # --yes flips every prompt to auto-accept (noconfirm across the chain).
-# NOTE: --yes does NOT auto-resolve config conflicts — a "conflict" means
+# NOTE: --yes does NOT auto-resolve config conflicts; a "conflict" means
 # you AND upstream edited the same file, and silently picking a side is
 # exactly the data loss `shedman config --sync` exists to prevent. Conflicts
 # still land as <file>.shedosnew for you to reconcile by hand later.
@@ -257,7 +257,7 @@ if ! (( YES )); then
     esac
 fi
 
-# Pre-upgrade btrfs snapshot — only on machines where snapper is configured
+# Pre-upgrade btrfs snapshot; only on machines where snapper is configured
 # (which, on a standard ShedOS install, is everywhere after shedos-system is
 # installed). Skip silently in live/ISO environments where snapper may not be
 # usable against a live root.
@@ -270,7 +270,7 @@ if _snapper_available; then
     fi
 fi
 
-# Past the y/N (or --yes) gate the user has already given consent — run
+# Past the y/N (or --yes) gate the user has already given consent; run
 # pacman / yay / config-sync hands-off without re-prompting. Conflicts in
 # config-sync still surface as .shedosnew (no silent overwrite), and the
 # review TUI is offered automatically at the end if any are produced.
@@ -329,7 +329,7 @@ fi
 
 # Per-user post-upgrade hooks. Packages drop idempotent scripts into
 # /usr/libexec/shedos-postupgrade/ for one-shot retrofits that need to
-# touch user-level state — they run as the invoking user (i.e. you).
+# touch user-level state; they run as the invoking user (i.e. you).
 if [[ -d /usr/libexec/shedos-postupgrade ]]; then
     for _hook in /usr/libexec/shedos-postupgrade/*; do
         [[ -x $_hook ]] || continue
@@ -338,7 +338,7 @@ if [[ -d /usr/libexec/shedos-postupgrade ]]; then
 fi
 
 # Count leftover .shedosnew conflicts. A sync may have produced new ones, or
-# there may be old ones the user never resolved — either way they block the
+# there may be old ones the user never resolved; either way they block the
 # "in sync" guarantee, so surface them now.
 conflict_n=0
 if [[ -x /usr/libexec/shedman/_config-review ]]; then
@@ -356,7 +356,7 @@ fi
 if (( conflict_n > 0 )); then
     if (( YES )); then
         # Unattended (--yes from cron / systemd timer): never launch a
-        # TUI. Just tell the user how many are waiting — they'll see it
+        # TUI. Just tell the user how many are waiting; they'll see it
         # in the journal and can resolve on their next interactive session.
         echo
         echo "$conflict_n config conflict(s) remain as .shedosnew files."

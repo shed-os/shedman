@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# shedman config — umbrella for packaged-default dotfile operations.
+# shedman config; umbrella for packaged-default dotfile operations.
 # `--sync` seeds/updates $HOME from /usr/share/shedos/*/defaults/ (non-interactive).
 # `--review` opens the IntelliJ-style merge TUI for `.shedosnew` conflicts.
 

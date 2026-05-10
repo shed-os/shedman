@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# shedman conflicts — count unresolved .shedosnew dotfile conflicts
+# shedman conflicts; count unresolved .shedosnew dotfile conflicts
 # under $HOME. Mirror of `shedman updates` but for the other half of
 # the upgrade story: once pacman updates land, `shedman config --sync`
 # may drop <file>.shedosnew files the user hasn't reconciled yet.

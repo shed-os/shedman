@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# shedos-sync-configs — 3-way merge for $HOME dotfiles shipped by ShedOS.
+# shedos-sync-configs; 3-way merge for $HOME dotfiles shipped by ShedOS.
 #
 # For each file under /usr/share/shedos/<pkg>/defaults/ we compare three
 # states:
@@ -7,17 +7,17 @@
 #   dst      the user's live copy in $HOME
 #   last     the last-seen sha256 we wrote after the previous sync
 #
-# Case A (no dst)               seed  — copy src → dst, record last.
-# Case B (src == last)          noop  — nothing changed upstream.
-# Case C (dst == last, ≠ src)   auto  — backup dst → .shedosbak, copy src, record.
-# Case D (otherwise)            conflict — write src → dst.shedosnew, NO record.
+# Case A (no dst)               seed ; copy src → dst, record last.
+# Case B (src == last)          noop ; nothing changed upstream.
+# Case C (dst == last, ≠ src)   auto ; backup dst → .shedosbak, copy src, record.
+# Case D (otherwise)            conflict; write src → dst.shedosnew, NO record.
 #
 # Case D never touches dst: a file the user edited is never clobbered. The
 # manifest is intentionally NOT updated on conflict so the next run re-offers
 # the same resolution.
 #
 # Per-package policy file /usr/share/shedos/<pkg>/sync-policy may contain:
-#   always-conflict   treat Case C as Case D (stricter — for shedos-nvim)
+#   always-conflict   treat Case C as Case D (stricter; for shedos-nvim)
 #
 # Exclusion list: runtime state we must never track.
 #   .config/nvim/lazy-lock.json
@@ -134,7 +134,7 @@ _write_sha() {
 
 _write_content() {
     # Snapshot a BASE content file. $1 = relpath (key), $2 = source to copy.
-    # shedos-review-configs needs BASE content — not just the hash — to show a
+    # shedos-review-configs needs BASE content; not just the hash; to show a
     # real 3-way diff. We mirror the manifest layout under CONTENT_ROOT so the
     # review tool can locate BASE via the same relpath key.
     local dest="$CONTENT_ROOT/$1"

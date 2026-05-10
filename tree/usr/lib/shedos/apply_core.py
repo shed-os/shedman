@@ -43,7 +43,7 @@ from typing import Any, Callable, Optional
 SCHEMA_VERSION = 1
 
 
-# Paths — env-overridable so tests can steer at a disposable tree.
+# Paths; env-overridable so tests can steer at a disposable tree.
 
 
 def etc_root() -> Path:
@@ -109,7 +109,7 @@ def state_path(section: str) -> Path:
 # today). When an apply fails partway and the rollback loop runs, an
 # undo_fn that itself fails leaves the live system in an unknown
 # intermediate state AND leaves the state file in whatever state the
-# original apply_fn put it in — a guaranteed mismatch.
+# original apply_fn put it in; a guaranteed mismatch.
 #
 # `StateCheckpoint` snapshots every existing per-section state file in
 # memory at apply-loop entry. The apply binary calls `restore_all()`
@@ -181,12 +181,12 @@ class StateCheckpoint:
                     atomic_write_text(p, content.decode("utf-8"), mode=0o644)
                     restored.append(p)
             except OSError:
-                # Best-effort — a state file we can't restore now is
+                # Best-effort; a state file we can't restore now is
                 # one we couldn't have written either, so the system
                 # was already broken before we tried to apply.
                 pass
         # Remove any state.json that exists now but didn't at snapshot
-        # time — a section whose first-ever apply just ran.
+        # time; a section whose first-ever apply just ran.
         root = state_root()
         if root.is_dir():
             for p in sorted(root.glob("*.state.json")):
@@ -206,7 +206,7 @@ class StateCheckpoint:
         pass
 
 
-# Colorized output — opt-out via NO_COLOR (XDG convention).
+# Colorized output; opt-out via NO_COLOR (XDG convention).
 
 
 def _supports_color() -> bool:
@@ -243,10 +243,10 @@ class Change:
     section: str        # "systemd.system", "drop-ins", etc — display-only
     summary: str        # one-line label for the plan view
     diff: Optional[str] = None  # optional unified-diff block for `diff` prompt
-    # The actual mutation — a zero-arg callable returning None. Allowed to
+    # The actual mutation; a zero-arg callable returning None. Allowed to
     # raise; the runner catches and rolls back.
     apply_fn: Optional[Callable[[], None]] = None
-    # Optional undo function — called in LIFO order if a later change raises.
+    # Optional undo function; called in LIFO order if a later change raises.
     undo_fn: Optional[Callable[[], None]] = None
 
 
@@ -290,7 +290,7 @@ class Plan:
         }
 
 
-# Schema validation — hand-rolled because the schema is small and we want
+# Schema validation; hand-rolled because the schema is small and we want
 # stdlib-only. ``validate_doc`` returns a normalized dict or raises
 # ``SchemaError`` with a pointed message.
 
@@ -1096,7 +1096,7 @@ def load_config(path: Optional[Path] = None) -> ValidatedConfig:
     return validate_doc(doc)
 
 
-# Manifest — records which drop-ins shedos-apply currently owns. Drives the
+# Manifest; records which drop-ins shedos-apply currently owns. Drives the
 # "remove when dropped from TOML" behavior. File lives under /var/lib/shedos
 # so /etc stays pacman-clean.
 
@@ -1131,7 +1131,7 @@ def sha256_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-# Atomic writes — tmp + fsync + rename. Reused across every reconciler so a
+# Atomic writes; tmp + fsync + rename. Reused across every reconciler so a
 # crash mid-apply never leaves a half-written file at the live path.
 
 
@@ -1156,12 +1156,12 @@ def atomic_write_text(path: Path, text: str, *, mode: int = 0o644) -> None:
 #
 # Every reconciler runs the same algorithm with different identity tuples:
 #
-#   declared    — set of items in /etc/shedos/system.toml
-#   live        — set of items observed on the system right now
-#   last_applied— set we wrote on the previous apply
-#   baseline    — set captured on first apply; protected forever
+#   declared   ; set of items in /etc/shedos/system.toml
+#   live       ; set of items observed on the system right now
+#   last_applied; set we wrote on the previous apply
+#   baseline   ; set captured on first apply; protected forever
 #
-# Items in `baseline` are invisible to the reconciler — never adopted,
+# Items in `baseline` are invisible to the reconciler; never adopted,
 # never removed when omitted from TOML. Items elsewhere flow through
 # `to_add` / `to_remove` / `to_adopt` per the merge rules below.
 
@@ -1193,7 +1193,7 @@ def threeway_merge(
       * not declared & live & not last_applied & not baseline
                                     → to_adopt (user added via raw tool)
     """
-    # baseline trumps everything — strip it from the inputs first.
+    # baseline trumps everything; strip it from the inputs first.
     declared = declared - baseline
     live = live - baseline
     last_applied = last_applied - baseline
@@ -1520,7 +1520,7 @@ def plan_snapper(cfg: ValidatedConfig) -> list[Change]:
     return changes
 
 
-# Reconciler: pacman repos — fence-block rewrite of /etc/pacman.conf
+# Reconciler: pacman repos; fence-block rewrite of /etc/pacman.conf
 #
 # The fence markers below match those emitted by shedos-system.install so
 # existing installs upgrade smoothly: the install hook writes an initial
@@ -1606,7 +1606,7 @@ def plan_pacman(cfg: ValidatedConfig) -> list[Change]:
     )]
 
 
-# Reconciler: services.postgresql — declarative wrapper over the two
+# Reconciler: services.postgresql; declarative wrapper over the two
 # existing bootstrap units. auto-init and per-user-db are user-facing knobs
 # that desugar to ordinary systemctl enable/disable calls, so the actual
 # mutation piggy-backs on _systemd_change.
@@ -1644,7 +1644,7 @@ def plan_services(cfg: ValidatedConfig) -> list[Change]:
     return out
 
 
-# Reconciler: network.firewall — declarative ufw with bidirectional adoption.
+# Reconciler: network.firewall; declarative ufw with bidirectional adoption.
 #
 # Three-way merge against (declared, live, last_applied, baseline). Tool-
 # added rules ("ufw allow 9090") get adopted into system.toml; TOML
@@ -1746,7 +1746,7 @@ def _parse_ufw_status_numbered(text: str) -> tuple[bool, list[FirewallRule]]:
     for raw in text.splitlines():
         line = raw.rstrip()
         if line.startswith("Status:"):
-            # Match the first word after "Status:" — guard against
+            # Match the first word after "Status:"; guard against
             # "Status: inactive" matching the substring "active".
             tail = line.split(":", 1)[1].strip().lower().split()
             active = bool(tail) and tail[0] == "active"
@@ -1793,7 +1793,7 @@ def _decode_ufw_rule_body(body: str) -> Optional[FirewallRule]:
     action = m.group("action").lower()
     direction = {"in": "in", "out": "out", "fwd": "in"}[m.group("dir").lower()]
 
-    # Decode dst — `<port>/<proto>` | `<addr>` | `<addr> <port>` |
+    # Decode dst; `<port>/<proto>` | `<addr>` | `<addr> <port>` |
     # `App profile`.
     port: Optional[int] = None
     to_port: Optional[int] = None
@@ -1904,7 +1904,7 @@ def plan_firewall(cfg: ValidatedConfig) -> list[Change]:
     live_set: set[tuple] = {r.to_tuple() for r in live_rules}
     last_applied: set[tuple] = load_state_set(state_p)
 
-    # First apply seeds the baseline as the empty set — bypassing the
+    # First apply seeds the baseline as the empty set; bypassing the
     # baseline-protection path because the firewall ship state is "off,
     # no rules". This matches the user-approved behavior: any rules
     # already present at first apply get adopted into TOML.
@@ -1995,7 +1995,7 @@ def plan_firewall(cfg: ValidatedConfig) -> list[Change]:
         return []
 
     if not needs_live:
-        # Adoption-only — write state and return.
+        # Adoption-only; write state and return.
         def apply_state_only() -> None:
             save_state_set(state_p, declared_set | merge.to_adopt)
         # Splice the state save into the adoption Change's apply_fn.
@@ -2171,7 +2171,7 @@ def _render_system_toml_with_firewall(
     return tomlkit.dumps(doc)
 
 
-# Reconciler: security.keyring — declarative pacman-key trust with
+# Reconciler: security.keyring; declarative pacman-key trust with
 # bidirectional adoption.
 #
 # Posture: warn-don't-remove. TOML omission of a previously-managed
@@ -2280,7 +2280,7 @@ def plan_keyring(cfg: ValidatedConfig) -> list[Change]:
             ))
 
     # We also need to update last_applied even when there are no
-    # mutations — to record the merged "post-apply" set so future
+    # mutations; to record the merged "post-apply" set so future
     # removals work. The state-save needs to happen on adoption-only
     # paths too.
     if not changes and not merge.to_add:
@@ -2296,7 +2296,7 @@ def plan_keyring(cfg: ValidatedConfig) -> list[Change]:
                 _pacman_key_run(["--lsign-key", fp])
             save_state_set(state_p, declared | merge.to_adopt)
 
-        # No undo for lsign — it's idempotent; rollback is no-op.
+        # No undo for lsign; it's idempotent; rollback is no-op.
         changes.append(Change(
             kind="+", section="security.keyring",
             summary=f"locally-sign {len(add_fps)} fingerprint(s)",
@@ -2363,7 +2363,7 @@ def _render_system_toml_with_keyring(
     return tomlkit.dumps(doc)
 
 
-# Reconciler: fs.mounts — declarative /etc/fstab entries with baseline
+# Reconciler: fs.mounts; declarative /etc/fstab entries with baseline
 # protection for Calamares' install-time lines.
 #
 # Posture: reconcile (TOML removal → fstab line removal), but ONLY for
@@ -2431,7 +2431,7 @@ def _parse_fstab_line(line: str,
     if len(parts) < 4:
         return None
     device, target, fstype, options = parts[0], parts[1], parts[2], parts[3]
-    # Be strict about target — only absolute paths and `none` (swap) are
+    # Be strict about target; only absolute paths and `none` (swap) are
     # valid fstab targets. Anything else means the line is malformed
     # (or we're scanning shell prose / comment text). Silently skip.
     if not (target.startswith("/") or target == "none"):
@@ -2547,13 +2547,13 @@ def plan_mounts(cfg: ValidatedConfig) -> list[Change]:
     # baseline (which never lands in the fence).
     managed_ids = sorted((declared | merge.to_adopt) - baseline,
                          key=lambda t: t[1])
-    # Resolve each managed id to a MountEntry — prefer declared shape
+    # Resolve each managed id to a MountEntry; prefer declared shape
     # over live (lets options/fstype updates take effect).
     managed_entries: list[MountEntry] = []
     for mid in managed_ids:
         managed_entries.append(declared_entries.get(mid) or live_by_id[mid])
 
-    # Outside-fence lines — strip out tool-managed entries that lived
+    # Outside-fence lines; strip out tool-managed entries that lived
     # outside the fence (they're being moved into it).
     new_outside: list[str] = []
     managed_target_set = {e.target for e in managed_entries}
@@ -2562,7 +2562,7 @@ def plan_mounts(cfg: ValidatedConfig) -> list[Change]:
         if stripped and not stripped.startswith("#"):
             parts = stripped.split()
             if len(parts) >= 2 and parts[1] in managed_target_set:
-                # Drop — moves into the fence.
+                # Drop; moves into the fence.
                 continue
         new_outside.append(raw)
 
@@ -2642,7 +2642,7 @@ def _render_system_toml_with_mounts(
     return tomlkit.dumps(doc)
 
 
-# Reconciler: kernel.cmdline — declarative Limine kernel cmdline tokens
+# Reconciler: kernel.cmdline; declarative Limine kernel cmdline tokens
 # with baseline protection.
 #
 # Posture: reconcile (non-baseline tokens only). Install-time tokens
@@ -2721,7 +2721,7 @@ def plan_kernel_cmdline(cfg: ValidatedConfig) -> list[Change]:
 
     limine_path, limine_text = _read_limine_config()
     if limine_path is None or limine_text is None:
-        # No Limine config to manage — silently skip (this is a normal
+        # No Limine config to manage; silently skip (this is a normal
         # state on systems that use a different bootloader, or in tests
         # without /boot fixtures).
         return []
@@ -2806,7 +2806,7 @@ def plan_kernel_cmdline(cfg: ValidatedConfig) -> list[Change]:
     # We use re.sub with a callable rather than str.replace because a
     # fallback whose tokens are a strict prefix of the primary's
     # (typical: minimal essentials vs essentials+decorations) would
-    # collide with str.replace — the fallback's full line text appears
+    # collide with str.replace; the fallback's full line text appears
     # as a substring inside the primary line and replace would patch
     # the wrong occurrence. re.sub walks matches in document order and
     # stitches replacements by position, which sidesteps the overlap.
@@ -2915,7 +2915,7 @@ def _render_system_toml_with_cmdline(
     return tomlkit.dumps(doc)
 
 
-# Reconciler: users + groups — strictly additive.
+# Reconciler: users + groups; strictly additive.
 #
 # Posture: warn-and-preserve-membership. Removing a user/group from
 # TOML never `userdel`/`groupdel`s; removing a group from a user's
@@ -2923,7 +2923,7 @@ def _render_system_toml_with_cmdline(
 # become ⚠ doctor warnings.
 #
 # Live state from `getent group` / `getent passwd`. Mutations via
-# `groupadd`, `useradd`, `gpasswd -a`. (No `chsh` for now — shell
+# `groupadd`, `useradd`, `gpasswd -a`. (No `chsh` for now; shell
 # updates are deferred; declared shell is just used at user creation.)
 #
 # Identity tuples:
@@ -3083,7 +3083,7 @@ def plan_groups(cfg: ValidatedConfig) -> list[Change]:
             apply_fn=apply_groupadd,
         ))
     else:
-        # No live mutations — splice state-save into first Change or
+        # No live mutations; splice state-save into first Change or
         # save now.
         if changes:
             prev = changes[0].apply_fn

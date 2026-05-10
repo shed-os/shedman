@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# shedman db — umbrella for database-service bootstrap/admin tools.
+# shedman db; umbrella for database-service bootstrap/admin tools.
 #
 # Modes (flag-style dispatch; each mode is a self-contained action):
 #   --pg-bootstrap     Ensure each regular Linux user has a matching
@@ -44,12 +44,12 @@ esac
 # Belt-and-suspenders for the Calamares-time bootstrap in shedos_finalize:
 # if that fails silently for any reason, this oneshot unit catches it on
 # first (and every) boot. Idempotent: existing roles/databases are left
-# alone. No password is set — Arch's default pg_hba has `local all all
+# alone. No password is set; Arch's default pg_hba has `local all all
 # peer` so the OS user connects with no flags; they can set a password
 # later with psql \password if they want TCP auth.
 
 # Type=notify on postgresql.service means the unit reports active only when
-# postgres is actually accepting connections — but we still do a short
+# postgres is actually accepting connections; but we still do a short
 # pg_isready spin as belt-and-suspenders, because we're also reachable via
 # manual invocation.
 for _ in $(seq 1 30); do

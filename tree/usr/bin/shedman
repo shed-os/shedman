@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# shedman — unified dispatcher for ShedOS utilities.
+# shedman; unified dispatcher for ShedOS utilities.
 #
 # Every executable file under /usr/libexec/shedman/ is a subcommand.
 # `shedman foo args…` execs /usr/libexec/shedman/foo with argv preserved.
@@ -33,7 +33,7 @@ _summary() {
     if line=$("$bin" --help-summary 2>/dev/null); then
         [[ -n $line ]] && { printf '%s\n' "$line"; return; }
     fi
-    # --help fallback — strip usage prefixes so a "Usage: …" line doesn't
+    # --help fallback; strip usage prefixes so a "Usage: …" line doesn't
     # become the summary.
     if line=$("$bin" --help 2>/dev/null \
             | awk 'NF && !/^[Uu]sage:/ { print; exit }'); then
@@ -59,7 +59,7 @@ _list() {
 
 _did_you_mean() {
     # Print the closest matches from the subcommand index. Uses a simple
-    # substring match — if the user typed `updat` we want to suggest
+    # substring match; if the user typed `updat` we want to suggest
     # `update` and `updates`. A full edit-distance pass isn't worth the
     # awk dance for a handful of names.
     local needle=$1 f name hits=()

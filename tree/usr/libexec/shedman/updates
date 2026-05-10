@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# shedman updates — count pending pacman + AUR updates.
+# shedman updates; count pending pacman + AUR updates.
 #
 # Modes:
 #   (no args)            Print a human summary.
@@ -86,7 +86,7 @@ _notify_if_new() {
         body="$current package updates are ready. Run \`shedman update\` to review."
     fi
 
-    # `timeout` guards against a misbehaving DBus — this runs on a user
+    # `timeout` guards against a misbehaving DBus; this runs on a user
     # timer and must never block the service forever.
     timeout 2s notify-send \
         --app-name=ShedOS \

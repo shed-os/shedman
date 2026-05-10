@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# shedos-check-health — aggregate hardware health signals for waybar.
+# shedos-check-health; aggregate hardware health signals for waybar.
 #
 # Modes mirror shedos-check-updates:
 #   (no args)            Human summary.
@@ -16,13 +16,13 @@
 # conflicts=9, health=10.
 #
 # Metrics (each resolves to ok|warning|critical|unavailable):
-#   disk    — df free% on / and $HOME (warn <20% free, crit <5% free)
-#   memory  — /proc/pressure/memory 'some' avg10 (warn >10%, crit >60%)
-#   battery — energy_full / energy_full_design on BAT* (warn <80%, crit <60%)
-#   cpu     — `sensors -u` max temp*_input (warn >=80°C, crit >=90°C)
+#   disk   ; df free% on / and $HOME (warn <20% free, crit <5% free)
+#   memory ; /proc/pressure/memory 'some' avg10 (warn >10%, crit >60%)
+#   battery; energy_full / energy_full_design on BAT* (warn <80%, crit <60%)
+#   cpu    ; `sensors -u` max temp*_input (warn >=80°C, crit >=90°C)
 #
 # Overall class is worst-of non-unavailable. A machine where every metric
-# is unavailable (no PSI, no battery, no sensors) reports "ok" — we don't
+# is unavailable (no PSI, no battery, no sensors) reports "ok"; we don't
 # paint a pill yellow just because something is missing.
 
 set -u
