@@ -57,11 +57,18 @@ _shedman() {
     fi
 
     # Delegate to the subcommand's --complete-bash if it honors it.
-    # Otherwise fall back to filename completion.
+    # Pass the word before the cursor so subcommands can do positional
+    # completion (e.g. `shedman fingerprint enroll <tab>` returns finger
+    # names rather than verbs). Subcommands that don't care just ignore
+    # the extra arg; legacy --complete-bash with no args still works.
     local bin="$libexec/$cmd"
     if [[ -x $bin ]]; then
         local flags
-        flags=$("$bin" --complete-bash 2>/dev/null)
+        if (( cword > 2 )); then
+            flags=$("$bin" --complete-bash "$prev" 2>/dev/null)
+        else
+            flags=$("$bin" --complete-bash 2>/dev/null)
+        fi
         if [[ -n $flags ]]; then
             COMPREPLY=( $(compgen -W "$flags" -- "$cur") )
             return 0
