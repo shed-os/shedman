@@ -1,18 +1,16 @@
 # bash completion for the shedman unified CLI.
 #
-# Subcommand list is discovered at completion time by globbing
-# /usr/libexec/shedman/* — so packages that drop new subcommands into
-# that directory become completable without reinstalling this file.
-# Filenames prefixed with `_` (internal helpers) are hidden.
+# Subcommand list discovered at completion time by globbing
+# /usr/libexec/shedman/*. Packages dropping new subcommands there
+# become completable without reinstalling this file. Filenames
+# prefixed with `_` (internal helpers) are hidden.
 #
 # Per-subcommand flag completion defers to `shedman <cmd>
 # --complete-bash` if the subcommand honors it. Every other subcommand
 # falls back to filename completion.
 #
-# This file is intentionally self-contained: it does not call
-# _init_completion / _filedir from the bash-completion package so that
-# sourcing it in isolation (e.g. under `set -u` in a test harness)
-# works without any other dependency.
+# Self-contained: no dependency on the bash-completion package's
+# _init_completion / _filedir helpers.
 
 _shedman() {
     local cur prev cword libexec
@@ -56,11 +54,9 @@ _shedman() {
         return 0
     fi
 
-    # Delegate to the subcommand's --complete-bash if it honors it.
-    # Pass the word before the cursor so subcommands can do positional
+    # Delegate to --complete-bash, passing the prev word for positional
     # completion (e.g. `shedman fingerprint enroll <tab>` returns finger
-    # names rather than verbs). Subcommands that don't care just ignore
-    # the extra arg; legacy --complete-bash with no args still works.
+    # names). Subcommands that don't read the extra arg still work.
     local bin="$libexec/$cmd"
     if [[ -x $bin ]]; then
         local flags

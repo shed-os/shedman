@@ -1,10 +1,10 @@
 #compdef shedman
 # zsh completion for the shedman unified CLI.
 #
-# Subcommand list is discovered at completion time by globbing
-# /usr/libexec/shedman/* — so packages that drop new subcommands into
-# that directory become completable without reinstalling this file.
-# Filenames prefixed with `_` (internal helpers) are hidden.
+# Subcommand list discovered at completion time by globbing
+# /usr/libexec/shedman/*. Packages dropping new subcommands there
+# become completable without reinstalling this file. Filenames
+# prefixed with `_` (internal helpers) are hidden.
 #
 # Per-subcommand argument completion defers to `shedman <cmd>
 # --complete-zsh` if the subcommand honors it. Every other subcommand
