@@ -61,7 +61,7 @@ function __shedman_subcmd_flags
 end
 
 # Bind per-subcommand to the dynamic flag emitter.
-for sub in apply update doctor rollback
+for sub in apply update doctor rollback uninstall
     complete -c shedman -n "__fish_seen_subcommand_from $sub" \
         -a '(__shedman_subcmd_flags)'
 end

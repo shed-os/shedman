@@ -58,7 +58,13 @@ The headline set:
 	Textual journalctl browser TUI.
 
 *shedman install*
-	First-boot proprietary apps installer.
+	Install one or more packages, routing pacman vs yay per-package
+	by source.
+
+*shedman uninstall*
+	Remove installed packages and their now-unused dependency
+	closure, routing pacman vs yay by installed source. See
+	*shedman-uninstall*(1).
 
 *shedman fingerprint*
 	Manage user fingerprint enrollments and characterise the
@@ -104,7 +110,8 @@ the per-command man pages.
 
 *shedman-update*(1), *shedman-apply*(1), *shedman-doctor*(1),
 *shedman-rollback*(1), *shedman-config*(1), *shedman-status*(1),
-*shedman-fingerprint*(1), *pacman*(8), *yay*(8).
+*shedman-fingerprint*(1), *shedman-uninstall*(1), *pacman*(8),
+*yay*(8).
 
 The web reference at https://shedos.org/docs/commands covers every
 subcommand and flag with examples.

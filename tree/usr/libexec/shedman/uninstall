@@ -1,0 +1,144 @@
+#!/bin/bash
+# Uninstall installed packages. Routes pacman vs yay based on whether
+# the package is foreign (pacman -Qm), so AUR removals go through yay
+# for parity with how `shedman install` ran the install side through it.
+
+set -euo pipefail
+
+usage() {
+    cat <<'EOF'
+Usage:
+  shedman uninstall <pkg> [<pkg>...]        Remove one or more packages.
+  shedman uninstall -v|--verbose <pkg>...   Print the command before running.
+  shedman uninstall -s|--search <query>     List installed packages matching.
+  shedman uninstall -h|--help               Show this message.
+
+Removes packages and their now-unused dependency closure
+(pacman -Rns / yay -Rns). Per-package routing by installed-state:
+  pacman -Q <pkg>      → installed (exits non-zero if not)
+  pacman -Qm <pkg>     → installed from AUR (foreign); route through yay
+EOF
+}
+
+if [[ $# -eq 0 ]]; then
+    usage
+    exit 1
+fi
+
+verbose=0
+
+case "$1" in
+    -h|--help)
+        usage
+        exit 0
+        ;;
+    --help-summary)
+        echo "uninstall packages, routing pacman vs yay by installed source"
+        exit 0
+        ;;
+    --complete-bash|--complete-zsh)
+        printf '%s\n' --verbose -v --search -s --help -h
+        pacman -Qq 2>/dev/null || true
+        exit 0
+        ;;
+    --complete-fish)
+        cat <<'EOF'
+--verbose	print the resolved command before running
+-v	print the resolved command before running
+--search	list installed packages matching a query
+-s	list installed packages matching a query
+--help	show usage
+-h	show usage
+EOF
+        pacman -Qq 2>/dev/null || true
+        exit 0
+        ;;
+    -s|--search)
+        shift
+        if [[ $# -eq 0 ]]; then
+            echo "shedman uninstall: --search needs a query" >&2
+            exit 1
+        fi
+        # pacman -Qs prints two lines per hit: "local/<name> <ver>" then
+        # "    <description>". Partition by foreign-set membership.
+        mapfile -t foreign_list < <(pacman -Qmq 2>/dev/null || true)
+        declare -A is_foreign=()
+        for f in "${foreign_list[@]}"; do is_foreign["$f"]=1; done
+
+        official_out=()
+        aur_out=()
+        mapfile -t qs_lines < <(pacman -Qs "$@" 2>/dev/null || true)
+        i=0
+        while [[ $i -lt ${#qs_lines[@]} ]]; do
+            header="${qs_lines[$i]}"
+            desc="${qs_lines[$((i+1))]:-}"
+            if [[ "$header" =~ ^[^/]+/([^[:space:]]+) ]]; then
+                name="${BASH_REMATCH[1]}"
+                if [[ -n "${is_foreign[$name]:-}" ]]; then
+                    aur_out+=("$header"$'\n'"$desc")
+                else
+                    official_out+=("$header"$'\n'"$desc")
+                fi
+            fi
+            i=$((i + 2))
+        done
+
+        echo "=== installed (official + [shedos]) ==="
+        for entry in "${official_out[@]}"; do printf '%s\n' "$entry"; done
+        echo
+        echo "=== installed (AUR) ==="
+        for entry in "${aur_out[@]}"; do printf '%s\n' "$entry"; done
+        exit 0
+        ;;
+    -v|--verbose)
+        verbose=1
+        shift
+        if [[ $# -eq 0 ]]; then
+            echo "shedman uninstall: -v needs at least one package" >&2
+            exit 1
+        fi
+        ;;
+esac
+
+if [[ $(id -u) -eq 0 ]]; then
+    echo "shedman uninstall: don't run as root — yay drops privileges itself" >&2
+    exit 2
+fi
+
+pkgs=("$@")
+pacman_pkgs=()
+aur_pkgs=()
+not_installed=()
+
+for pkg in "${pkgs[@]}"; do
+    if ! pacman -Q "$pkg" >/dev/null 2>&1; then
+        not_installed+=("$pkg")
+    elif pacman -Qm "$pkg" >/dev/null 2>&1; then
+        aur_pkgs+=("$pkg")
+    else
+        pacman_pkgs+=("$pkg")
+    fi
+done
+
+if [[ ${#not_installed[@]} -gt 0 ]]; then
+    echo "shedman uninstall: not installed: ${not_installed[*]}" >&2
+    exit 1
+fi
+
+if [[ ${#pacman_pkgs[@]} -gt 0 ]]; then
+    if (( verbose )); then
+        echo "via pacman: sudo pacman -Rns --noconfirm ${pacman_pkgs[*]}"
+    fi
+    sudo pacman -Rns --noconfirm "${pacman_pkgs[@]}"
+fi
+
+if [[ ${#aur_pkgs[@]} -gt 0 ]]; then
+    if ! command -v yay >/dev/null 2>&1; then
+        echo "shedman uninstall: AUR packages need yay, but yay is missing: ${aur_pkgs[*]}" >&2
+        exit 1
+    fi
+    if (( verbose )); then
+        echo "via yay: yay -Rns --noconfirm ${aur_pkgs[*]}"
+    fi
+    yay -Rns --noconfirm "${aur_pkgs[@]}"
+fi
