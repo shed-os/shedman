@@ -60,12 +60,28 @@ TMP_SUFFIX = ".shedosmerge.tmp"
 DRAFT_SUFFIX = ".draft.json"
 DRAFT_SCHEMA = 1
 
-EXCLUDED_RES = (
-    re.compile(r"^\.config/nvim/lazy-lock\.json$"),
-    re.compile(r"^\.config/nvim/lazyvim\.json$"),
-    re.compile(r"^\.local/state/"),
-    re.compile(r"^\.cache/"),
+SYSTEM_EXCLUDE_PATH = Path("/etc/shedos/review-exclude.toml")
+USER_EXCLUDE_PATH = (
+    Path(os.environ.get("XDG_CONFIG_HOME", HOME / ".config"))
+    / "shedos"
+    / "review-exclude.toml"
 )
+
+DEFAULT_EXCLUDE_PATTERNS = (
+    r"^\.config/nvim/lazy-lock\.json$",
+    r"^\.config/nvim/lazyvim\.json$",
+    r"^\.local/state/",
+    r"^\.cache/",
+    r"^Projects/",
+    r"^src/",
+    r"^code/",
+    r"^dev/",
+    r"^repos/",
+    r"^work/",
+    r"^go/",
+    r"^rust/",
+)
+DEFAULT_SKIP_GIT_TREES = True
 
 MIN_COLS, MIN_ROWS = 70, 24
 NARROW_BASE_COLS = 100
@@ -304,8 +320,86 @@ def atomic_rename(src: Path, dst: Path) -> None:
         pass
 
 
+@dataclass(frozen=True)
+class ExcludeConfig:
+    patterns: tuple[re.Pattern[str], ...]
+    skip_git_trees: bool
+
+
+def _load_exclude_toml(path: Path) -> Optional[dict]:
+    if not path.is_file():
+        return None
+    try:
+        import tomllib
+    except ImportError:
+        sys.stderr.write(
+            "shedman: warning: python tomllib unavailable; using built-in exclude defaults\n"
+        )
+        return None
+    try:
+        with open(path, "rb") as f:
+            return tomllib.load(f)
+    except (OSError, ValueError) as e:
+        sys.stderr.write(
+            f"shedman: warning: failed to parse {path}: {e}; falling back to defaults\n"
+        )
+        return None
+
+
+def _coerce_patterns(raw, source: Path) -> list[str]:
+    if raw is None:
+        return []
+    if not isinstance(raw, list) or not all(isinstance(p, str) for p in raw):
+        sys.stderr.write(
+            f"shedman: warning: {source}: 'patterns' must be a list of strings; ignoring it\n"
+        )
+        return []
+    return list(raw)
+
+
+def _build_exclude_config() -> ExcludeConfig:
+    system = _load_exclude_toml(SYSTEM_EXCLUDE_PATH)
+    user = _load_exclude_toml(USER_EXCLUDE_PATH)
+
+    if system is None:
+        raw_patterns: list[str] = list(DEFAULT_EXCLUDE_PATTERNS)
+    else:
+        raw_patterns = _coerce_patterns(system.get("patterns"), SYSTEM_EXCLUDE_PATH)
+        if not raw_patterns:
+            raw_patterns = list(DEFAULT_EXCLUDE_PATTERNS)
+
+    if user is not None:
+        raw_patterns.extend(_coerce_patterns(user.get("patterns"), USER_EXCLUDE_PATH))
+
+    skip_git = DEFAULT_SKIP_GIT_TREES
+    if system is not None and "skip_git_trees" in system:
+        skip_git = bool(system["skip_git_trees"])
+    if user is not None and "skip_git_trees" in user:
+        skip_git = bool(user["skip_git_trees"])
+
+    compiled: list[re.Pattern[str]] = []
+    for p in raw_patterns:
+        try:
+            compiled.append(re.compile(p))
+        except re.error as e:
+            sys.stderr.write(
+                f"shedman: warning: invalid exclude regex {p!r}: {e}; skipping it\n"
+            )
+    return ExcludeConfig(patterns=tuple(compiled), skip_git_trees=skip_git)
+
+
+_EXCLUDE_CONFIG: Optional[ExcludeConfig] = None
+
+
+def get_exclude_config() -> ExcludeConfig:
+    global _EXCLUDE_CONFIG
+    if _EXCLUDE_CONFIG is None:
+        _EXCLUDE_CONFIG = _build_exclude_config()
+    return _EXCLUDE_CONFIG
+
+
 def is_excluded(relpath: str) -> bool:
-    return any(r.search(relpath) for r in EXCLUDED_RES)
+    return any(r.search(relpath) for r in get_exclude_config().patterns)
 
 
 def safe_relpath(relpath: str) -> str:
@@ -361,10 +455,20 @@ def scan_conflicts() -> tuple[list[Conflict], list[str]]:
     excluded: list[str] = []
     if not HOME.is_dir():
         return conflicts, excluded
+    cfg = get_exclude_config()
     for dirpath, dirnames, filenames in os.walk(HOME, followlinks=False):
+        rel_dir = os.path.relpath(dirpath, HOME)
+        # Silently prune git working trees (other than $HOME itself, so
+        # users tracking their dotfiles in a HOME-level repo still scan).
+        if (
+            cfg.skip_git_trees
+            and rel_dir != "."
+            and (".git" in dirnames or ".git" in filenames)
+        ):
+            dirnames[:] = []
+            continue
         # Prune excluded trees early for speed, but first check if they
         # contain any .shedosnew files so we can surface them.
-        rel_dir = os.path.relpath(dirpath, HOME)
         if rel_dir != "." and is_excluded(rel_dir.replace(os.sep, "/") + "/"):
             for name in filenames:
                 if name.endswith(NEW_SUFFIX):
