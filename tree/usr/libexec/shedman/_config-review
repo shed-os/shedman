@@ -87,8 +87,12 @@ MIN_COLS, MIN_ROWS = 70, 24
 NARROW_BASE_COLS = 100
 VERY_NARROW_COLS = 70
 BINARY_SNIFF_BYTES = 8192
-LARGE_FILE_BYTES = 1 * 1024 * 1024
-LARGE_FILE_LINES = 20_000
+# Env overrides exist so tests can drive the oversized branch without
+# generating multi-MB fixtures.
+LARGE_FILE_BYTES = int(os.environ.get(
+    "SHEDOS_LARGE_FILE_BYTES", str(1 * 1024 * 1024)))
+LARGE_FILE_LINES = int(os.environ.get(
+    "SHEDOS_LARGE_FILE_LINES", "20000"))
 UNDO_DEPTH = 32
 LONG_LINE_HL_CUTOFF = 2000
 
@@ -268,6 +272,21 @@ def sniff_binary(path: Path, sniff_bytes: int = BINARY_SNIFF_BYTES) -> bool:
         with path.open("rb") as f:
             chunk = f.read(sniff_bytes)
         return b"\x00" in chunk
+    except OSError:
+        return False
+
+
+def is_oversized(path: Path) -> bool:
+    # SequenceMatcher is O(n^2) worst-case; an oversized hunk extraction
+    # would lock the TUI. Treat byte size as the cheap gate and only count
+    # lines if the byte size is under the limit.
+    try:
+        size = path.stat().st_size
+        if size > LARGE_FILE_BYTES:
+            return True
+        with path.open("rb") as f:
+            lines = f.read().count(b"\n")
+        return lines > LARGE_FILE_LINES
     except OSError:
         return False
 
@@ -511,6 +530,9 @@ def _classify(relpath: str, yours: Path, theirs: Path) -> Conflict:
         kind = "orphan"
     elif sniff_binary(theirs) or (yours.is_file() and sniff_binary(yours)):
         kind = "binary"
+    elif (is_oversized(yours) or is_oversized(theirs)
+          or (has_base and is_oversized(base))):
+        kind = "oversized"
     else:
         kind = "text"
 
@@ -1519,6 +1541,17 @@ def main(argv: Optional[list[str]] = None) -> int:
             if len(excluded) > 5:
                 print(f"  … and {len(excluded) - 5} more. "
                       "Delete them manually with `rm`.", file=sys.stderr)
+        oversized = [c for c in conflicts if c.kind == "oversized"]
+        if oversized and not args.list:
+            print(f"Note: {len(oversized)} file(s) exceed the merge size "
+                  f"limit ({LARGE_FILE_BYTES} bytes / {LARGE_FILE_LINES} "
+                  f"lines) and will be skipped. Merge in $EDITOR, then "
+                  f"`rm <file>.shedosnew`.", file=sys.stderr)
+            for c in oversized[:5]:
+                print(f"  ~/{c.relpath}.shedosnew", file=sys.stderr)
+            if len(oversized) > 5:
+                print(f"  … and {len(oversized) - 5} more.",
+                      file=sys.stderr)
 
         if args.list:
             populate_hunk_counts(conflicts, force_2way=args.two_way)
