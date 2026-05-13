@@ -771,6 +771,47 @@ def _project_base_to_side(base_pos: int, side_changes, n_base: int, n_side: int)
     return base_pos + offset
 
 
+# Word-level diff: tokenize, run a token-level SequenceMatcher, emit spans.
+# Used by the TUI to highlight changed words within a paired add/del line so
+# the reader can see precisely what changed, not just "the whole line is red."
+
+_WORD_TOKEN_RE = re.compile(r'(\w+|\s+|[^\w\s])')
+
+
+def diff_words(old: str, new: str
+               ) -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
+    """Return (old_spans, new_spans). Each span is (kind, text):
+    kind="equal" — unchanged on both sides
+    kind="removed" — present in old but not new (only on old_spans)
+    kind="added"   — present in new but not old (only on new_spans)
+    """
+    old_tokens = _WORD_TOKEN_RE.findall(old)
+    new_tokens = _WORD_TOKEN_RE.findall(new)
+    sm = SequenceMatcher(a=old_tokens, b=new_tokens, autojunk=False)
+    old_spans: list[tuple[str, str]] = []
+    new_spans: list[tuple[str, str]] = []
+    for op, i1, i2, j1, j2 in sm.get_opcodes():
+        old_text = "".join(old_tokens[i1:i2])
+        new_text = "".join(new_tokens[j1:j2])
+        if op == "equal":
+            if old_text:
+                old_spans.append(("equal", old_text))
+            if new_text:
+                new_spans.append(("equal", new_text))
+        elif op == "delete":
+            if old_text:
+                old_spans.append(("removed", old_text))
+        elif op == "insert":
+            if new_text:
+                new_spans.append(("added", new_text))
+        elif op == "replace":
+            if old_text:
+                old_spans.append(("removed", old_text))
+            if new_text:
+                new_spans.append(("added", new_text))
+    return old_spans, new_spans
+
+
 def extract_hunks_2way(yours: list[str], theirs: list[str]) -> list[Hunk]:
     ops = SequenceMatcher(a=yours, b=theirs, autojunk=False).get_opcodes()
     hunks: list[Hunk] = []
@@ -865,6 +906,11 @@ class Cell:
     #                                    cell.text holds the deleted content)
     #   "ctx"     → neutral, no marker  (context row outside any hunk)
     tag: str = "ctx"
+    # Optional word-level spans for paired add/del rows where both sides
+    # modified the same base line. When set, the renderer walks the spans
+    # and emphasises changed runs ("removed" / "added") instead of styling
+    # the whole text with one colour. None when no pairing was found.
+    spans: Optional[list[tuple[str, str]]] = None
 
 
 @dataclass
@@ -949,16 +995,25 @@ def _hunk_rows_3way(hunk, state_hunk_index: int) -> list[AlignedRow]:
         y_list = y_ins[b]
         t_list = t_ins[b]
         for k in range(max(len(y_list), len(t_list))):
-            if k < len(y_list):
-                y_i = y_list[k]
-                y_cell = Cell(y_base_ln_start + y_i,
-                              yours[y_i], tag="add")
+            y_text = yours[y_list[k]] if k < len(y_list) else None
+            t_text = theirs[t_list[k]] if k < len(t_list) else None
+            # When both sides insert at the same anchor and the texts
+            # differ but are short enough, compute word-level spans so the
+            # renderer can highlight exactly the changed runs.
+            y_spans = t_spans = None
+            if (y_text is not None and t_text is not None
+                    and y_text != t_text
+                    and len(y_text) <= LONG_LINE_HL_CUTOFF
+                    and len(t_text) <= LONG_LINE_HL_CUTOFF):
+                y_spans, t_spans = diff_words(y_text, t_text)
+            if y_text is not None:
+                y_cell = Cell(y_base_ln_start + y_list[k], y_text,
+                              tag="add", spans=y_spans)
             else:
                 y_cell = Cell(None, None, tag="equal")
-            if k < len(t_list):
-                t_i = t_list[k]
-                t_cell = Cell(t_base_ln_start + t_i,
-                              theirs[t_i], tag="add")
+            if t_text is not None:
+                t_cell = Cell(t_base_ln_start + t_list[k], t_text,
+                              tag="add", spans=t_spans)
             else:
                 t_cell = Cell(None, None, tag="equal")
             rows.append(AlignedRow(
@@ -1890,7 +1945,18 @@ def _load_textual_ui() -> None:
                   if cell.lineno is not None else " " * GUTTER_WIDTH)
         line.append(gutter, style=style)
         line.append(marker, style=style)
-        line.append(body + "\n", style=style)
+        if cell.spans is not None:
+            # Walk word-level spans: equal runs use the line's base style,
+            # changed runs get bold for inline emphasis. The whole line's
+            # foreground colour stays the cell's tag colour (red/green).
+            for span_kind, span_text in cell.spans:
+                if span_kind == "equal":
+                    line.append(span_text, style=style)
+                else:
+                    line.append(span_text, style=f"bold {style}")
+            line.append("\n", style=style)
+        else:
+            line.append(body + "\n", style=style)
         return line
 
     def render_pane_text(rows: list[AlignedRow], side: str,
