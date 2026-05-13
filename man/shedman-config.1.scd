@@ -33,11 +33,27 @@ conflicts.
 	defaults (used after manually-resolving a conflict).
 
 *-r*, *--review*
-	Open the merge TUI for every _.shedosnew_ sidecar in $HOME.
-	Per-hunk decisions: y (yours), t (theirs), b (both YT), B (both
-	TY), x (skip), u (undo). Whole-file shortcuts: A (all yours), T
-	(all theirs). Save with *s* — atomic; the previous live file is
-	backed up to _<file>.shedosbak_.
+	Open the merge UI for every _.shedosnew_ sidecar in $HOME. Two
+	backends are available: a Textual TUI and a Meld GUI. When a
+	display is available and *meld* is installed the GUI runs by
+	default; otherwise the TUI runs. Force a backend with *--gui*
+	or *--tui*.
+
+	TUI: per-hunk decisions y (yours), t (theirs), b (both YT), B
+	(both TY), x (skip), u (undo); whole-file shortcuts A (all
+	yours), T (all theirs); save with *s*. The entry screen groups
+	conflicts by directory as a tree; *n* / *p* jump between files.
+
+	GUI (Meld): conflicts are staged into yours/, base/ and theirs/
+	trees and opened as a folder comparison. 3-way and 2-way
+	(BASE-missing) groups open in separate Meld windows. After Meld
+	exits, modified yours/ files are copied back to $HOME; any file
+	containing conflict markers is skipped and its _.shedosnew_
+	kept for re-run. Non-text conflicts (binary, symlink, orphan,
+	missing-yours) are reported and require the TUI.
+
+	Both backends write _<file>.shedosbak_ before replacing the
+	live file and advance the manifest atomically on save.
 
 # FILES
 

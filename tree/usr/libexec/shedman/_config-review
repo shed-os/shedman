@@ -1422,6 +1422,221 @@ def save_merged(state: MergeState, force: bool = False) -> None:
         pass
 
 
+# Meld GUI backend
+
+
+_CONFLICT_MARKER_RE = re.compile(r"^(<{7} |={7}$|>{7} )", re.MULTILINE)
+
+
+def _meld_binary() -> str:
+    """Resolve the meld executable. Test seam via SHEDOS_MELD_BIN."""
+    return os.environ.get("SHEDOS_MELD_BIN", "meld")
+
+
+def _prefer_gui() -> bool:
+    """Auto-detect: prefer Meld when a display and binary are both present."""
+    if not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
+        return False
+    if shutil.which(_meld_binary()) is None:
+        return False
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        return False
+    return True
+
+
+def _has_conflict_markers(path: Path) -> bool:
+    try:
+        text = path.read_text(errors="replace")
+    except OSError:
+        return False
+    return bool(_CONFLICT_MARKER_RE.search(text))
+
+
+def save_merged_from_bytes(c: Conflict, content: bytes) -> None:
+    """Atomic save of new content for a Meld-resolved conflict.
+
+    Same on-disk choreography as save_merged() (tmp+fsync, .shedosbak
+    of pre-merge YOURS, atomic rename, .shedosnew unlink, manifest
+    advance) but takes raw bytes from the Meld staging dir instead of
+    assembling from hunk decisions.
+    """
+    yours = c.yours_path
+    mode = yours.stat().st_mode & 0o777 if yours.exists() else 0o644
+
+    tmp = yours.with_name(yours.name + TMP_SUFFIX + f".{os.getpid()}")
+    if tmp.exists():
+        tmp.unlink()
+    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(content)
+            fh.flush()
+            os.fsync(fh.fileno())
+    except OSError:
+        tmp.unlink(missing_ok=True)
+        raise
+
+    if yours.exists():
+        try:
+            shutil.copy2(yours, yours.with_name(yours.name + BAK_SUFFIX))
+        except OSError as e:
+            _log(f"backup failed for {c.relpath}: {e}")
+
+    atomic_rename(tmp, yours)
+
+    try:
+        c.theirs_path.unlink()
+    except OSError:
+        pass
+
+    if c.src_path and c.src_path.is_file():
+        _update_manifest(c.relpath, c.src_path)
+
+
+def _stage_for_meld(conflicts: list[Conflict], three_way: bool,
+                    staging: Path) -> dict[str, bytes]:
+    """Lay out yours/base/theirs subtrees under staging. Returns a snapshot
+    of each staged yours/<relpath> for the post-Meld change detection."""
+    yours_root = staging / "yours"
+    theirs_root = staging / "theirs"
+    base_root = staging / "base" if three_way else None
+    pre: dict[str, bytes] = {}
+    for c in conflicts:
+        (yours_root / c.relpath).parent.mkdir(parents=True, exist_ok=True)
+        (theirs_root / c.relpath).parent.mkdir(parents=True, exist_ok=True)
+        if three_way:
+            (base_root / c.relpath).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(c.yours_path, yours_root / c.relpath)
+        shutil.copy2(c.theirs_path, theirs_root / c.relpath)
+        if three_way:
+            base_content = CONTENT_ROOT / c.relpath
+            # Caller guarantees has_base; defensively fall back to yours if
+            # the BASE blob disappeared between scan and stage.
+            src = base_content if base_content.is_file() else c.yours_path
+            shutil.copy2(src, base_root / c.relpath)
+        pre[c.relpath] = (yours_root / c.relpath).read_bytes()
+    return pre
+
+
+def _meld_pass(conflicts: list[Conflict], three_way: bool) -> tuple[int, int, int]:
+    """Run one Meld invocation; copy back yours/ files the user edited.
+
+    Returns (saved, marker_skipped, unchanged).
+    """
+    if not conflicts:
+        return (0, 0, 0)
+
+    staging = Path(tempfile.mkdtemp(prefix="shedman-review-"))
+    try:
+        pre = _stage_for_meld(conflicts, three_way, staging)
+        yours_root = staging / "yours"
+        theirs_root = staging / "theirs"
+        if three_way:
+            argv = [_meld_binary(), str(yours_root),
+                    str(staging / "base"), str(theirs_root)]
+        else:
+            argv = [_meld_binary(), str(yours_root), str(theirs_root)]
+        print(f"  → {' '.join(argv)}", file=sys.stderr)
+        try:
+            subprocess.run(argv, check=False)
+        except OSError as e:
+            print(f"failed to launch meld: {e}", file=sys.stderr)
+            return (0, 0, 0)
+
+        saved = marker_skipped = unchanged = 0
+        for c in conflicts:
+            staged = yours_root / c.relpath
+            try:
+                cur = staged.read_bytes()
+            except OSError:
+                continue
+            if cur == pre[c.relpath]:
+                unchanged += 1
+                continue
+            if _has_conflict_markers(staged):
+                print(f"warning: {c.relpath} contains conflict markers; "
+                      f"leaving .shedosnew in place. Re-run after cleanup.",
+                      file=sys.stderr)
+                marker_skipped += 1
+                continue
+            try:
+                save_merged_from_bytes(c, cur)
+                saved += 1
+            except OSError as e:
+                print(f"save failed for {c.relpath}: {e}", file=sys.stderr)
+        return (saved, marker_skipped, unchanged)
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+
+
+def _run_meld(conflicts: list[Conflict], *, force_2way: bool) -> int:
+    """Open Meld in folder-comparison mode for every text conflict.
+
+    Groups by has_base: 3-way (with BASE) and 2-way (BASE missing) run
+    as separate Meld invocations. Non-text conflicts (binary, symlink,
+    orphan, missing-yours) need the TUI's confirm flows; print a notice
+    and skip them.
+    """
+    if not conflicts:
+        print("Nothing to review. All configs are in sync.")
+        return 0
+
+    text_3way = [c for c in conflicts
+                 if c.kind == "text" and c.has_base and not force_2way]
+    text_2way = [c for c in conflicts
+                 if c.kind == "text" and (not c.has_base or force_2way)]
+    non_text = [c for c in conflicts if c.kind != "text"]
+
+    if non_text:
+        print(f"shedman config --review: {len(non_text)} non-text "
+              f"conflict(s) need the TUI. Re-run with --tui to handle them.",
+              file=sys.stderr)
+        for c in non_text[:5]:
+            print(f"  ~/{c.relpath}  [{c.kind}]", file=sys.stderr)
+        if len(non_text) > 5:
+            print(f"  ... and {len(non_text) - 5} more.", file=sys.stderr)
+
+    if not text_3way and not text_2way:
+        return 0
+
+    if text_3way:
+        print(f"Opening Meld for {len(text_3way)} 3-way conflict(s)…",
+              file=sys.stderr)
+    s1, m1, u1 = _meld_pass(text_3way, three_way=True)
+
+    if text_2way:
+        print(f"Opening Meld for {len(text_2way)} 2-way conflict(s) "
+              f"(BASE missing)…", file=sys.stderr)
+    s2, m2, u2 = _meld_pass(text_2way, three_way=False)
+
+    saved = s1 + s2
+    marker_skipped = m1 + m2
+    unchanged = u1 + u2
+
+    summary = []
+    if saved:
+        summary.append(f"{saved} saved")
+    if unchanged:
+        summary.append(f"{unchanged} unchanged (.shedosnew kept for re-run)")
+    if marker_skipped:
+        summary.append(f"{marker_skipped} skipped due to conflict markers")
+    if summary:
+        print("Meld review complete: " + ", ".join(summary) + ".",
+              file=sys.stderr)
+
+    # Refresh the waybar conflict count. Best-effort, mirrors save_merged.
+    try:
+        subprocess.run(
+            ["/usr/bin/shedman", "conflicts", "--refresh-waybar"],
+            check=False, timeout=2,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+    return 0
+
+
 def sweep_leftover_tmps() -> int:
     """Remove stale <path>.shedosmerge.tmp.* artefacts from crashed runs."""
     removed = 0
@@ -1682,6 +1897,13 @@ def main(argv: Optional[list[str]] = None) -> int:
                    help="Force plain output (same as NO_COLOR=1).")
     p.add_argument("--2way-only", dest="two_way", action="store_true",
                    help="Ignore BASE content on disk; always run 2-way.")
+    backend = p.add_mutually_exclusive_group()
+    backend.add_argument("--gui", action="store_true",
+                         help="Open conflicts in Meld (GUI). Default when a "
+                              "display is available and meld is installed.")
+    backend.add_argument("--tui", action="store_true",
+                         help="Force the Textual TUI even if a GUI is "
+                              "available.")
     # Hidden test hook: read decisions from stdin instead of running the TUI.
     p.add_argument("--stdin-decisions", action="store_true",
                    help=argparse.SUPPRESS)
@@ -1765,6 +1987,17 @@ def main(argv: Optional[list[str]] = None) -> int:
                 print(f"shedman config --review: no conflict found for {args.file!r}.",
                       file=sys.stderr)
                 return 1
+
+        # Decide backend: explicit flag wins, else auto-detect.
+        if args.tui:
+            backend = "tui"
+        elif args.gui:
+            backend = "gui"
+        else:
+            backend = "gui" if _prefer_gui() else "tui"
+
+        if backend == "gui":
+            return _run_meld(conflicts, force_2way=args.two_way)
 
         if not sys.stdin.isatty() or not sys.stdout.isatty():
             print("shedman config --review: interactive TUI requires a terminal. "
