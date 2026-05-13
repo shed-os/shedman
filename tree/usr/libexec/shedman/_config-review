@@ -43,6 +43,17 @@ from difflib import SequenceMatcher, unified_diff
 from pathlib import Path
 from typing import Optional
 
+from pygments import lex as pygments_lex
+from pygments.lexer import RegexLexer, words
+from pygments.lexers import (
+    BashLexer, CssLexer, IniLexer, JsonLexer, LuaLexer,
+    PythonLexer, TOMLLexer, YamlLexer,
+)
+from pygments.token import (
+    Comment, Keyword, Name, Number, Operator,
+    Punctuation, String, Text as TextToken, Whitespace,
+)
+
 # Constants and paths
 
 HOME = Path(os.environ.get("HOME", os.path.expanduser("~")))
@@ -812,6 +823,112 @@ def diff_words(old: str, new: str
     return old_spans, new_spans
 
 
+class ShedConfLexer(RegexLexer):
+    """Minimal lexer for Hyprland-style .conf files."""
+
+    name = "ShedConf"
+    aliases = ["shed-conf", "hypr-conf"]
+    filenames = ["*.conf"]
+
+    tokens = {
+        "root": [
+            (r"#.*$", Comment.Single),
+            (r"\$\w+", Name.Variable),
+            (words(("true", "false"), suffix=r"\b"), Keyword.Constant),
+            (r"\b(exec|dispatcher|source|bind\w*|unbind|gesture|monitor|"
+             r"workspace|windowrulev2|windowrule|layerrule|plugin)\b",
+             Name.Builtin),
+            (r"\b(rgba?|hsla?)\b", Name.Function),
+            (r"-?\d+\.\d+", Number.Float),
+            (r"-?\d+", Number.Integer),
+            (r'"[^"\n]*"', String.Double),
+            (r"'[^'\n]*'", String.Single),
+            (r"\b\w+(?=\s*\{)", Name.Class),  # section heads before {
+            (r"\b\w+(?=\s*=)", Name.Attribute),  # keys before =
+            (r"[{}]", Punctuation),
+            (r"=", Operator),
+            (r",", Punctuation),
+            (r"\s+", Whitespace),
+            (r"\w+", Name),
+            (r".", TextToken),
+        ],
+    }
+
+
+_LEXER_BY_SUFFIX: dict[str, type] = {
+    ".lua": LuaLexer,
+    # Pygments has no dedicated zsh lexer; bash is the closest superset.
+    ".zsh": BashLexer,
+    ".zshrc": BashLexer,
+    ".zprofile": BashLexer,
+    ".zlogin": BashLexer,
+    ".toml": TOMLLexer,
+    ".ini": IniLexer,
+    ".css": CssLexer,
+    ".sh": BashLexer,
+    ".bash": BashLexer,
+    ".bashrc": BashLexer,
+    ".py": PythonLexer,
+    ".yaml": YamlLexer,
+    ".yml": YamlLexer,
+    ".json": JsonLexer,
+    ".conf": ShedConfLexer,
+}
+
+_LEXER_BY_FILENAME: dict[str, type] = {
+    ".bashrc": BashLexer,
+    ".zshrc": BashLexer,
+    ".zprofile": BashLexer,
+    ".zlogin": BashLexer,
+    ".profile": BashLexer,
+}
+
+
+def _lexer_for(relpath: str):
+    """Return a Pygments lexer for the file, or None if the type is unknown."""
+    name = Path(relpath).name.lower()
+    if name in _LEXER_BY_FILENAME:
+        return _LEXER_BY_FILENAME[name]()
+    if name.startswith("p10k") or name.endswith(".zsh"):
+        return BashLexer()
+    cls = _LEXER_BY_SUFFIX.get(Path(relpath).suffix.lower())
+    return cls() if cls is not None else None
+
+
+# Most-specific token class first; first parent match wins.
+_TOKEN_PALETTE: list[tuple[object, str]] = [
+    (Comment, "overlay0"),
+    (Keyword.Constant, "yellow"),
+    (Keyword, "mauve"),
+    (Name.Builtin, "red"),
+    (Name.Function, "blue"),
+    (Name.Attribute, "blue"),
+    (Name.Variable, "mauve"),
+    (Name.Class, "yellow"),
+    (String, "green"),
+    (Number, "yellow"),
+    (Operator, "text"),
+    (Punctuation, "overlay0"),
+]
+
+
+def _token_to_palette_key(tok) -> str:
+    for parent, key in _TOKEN_PALETTE:
+        if tok in parent:
+            return key
+    return "text"
+
+
+def syntax_spans(text: str, lexer) -> list[tuple[str, str]]:
+    """Tokenise text and return list of (palette_key, span_text)."""
+    spans: list[tuple[str, str]] = []
+    for tok, span_text in pygments_lex(text, lexer):
+        if not span_text:
+            continue
+        spans.append((_token_to_palette_key(tok), span_text))
+    return spans
+
+
 def extract_hunks_2way(yours: list[str], theirs: list[str]) -> list[Hunk]:
     ops = SequenceMatcher(a=yours, b=theirs, autojunk=False).get_opcodes()
     hunks: list[Hunk] = []
@@ -911,6 +1028,9 @@ class Cell:
     # and emphasises changed runs ("removed" / "added") instead of styling
     # the whole text with one colour. None when no pairing was found.
     spans: Optional[list[tuple[str, str]]] = None
+    # Syntax-highlight spans (palette_key, text); rendered when `spans`
+    # is None and the file's language is recognised.
+    syntax: Optional[list[tuple[str, str]]] = None
 
 
 @dataclass
@@ -1168,6 +1288,17 @@ def build_aligned_rows(state: MergeState) -> list[AlignedRow]:
             hunk_index=None,
         ))
         cy += 1; ct += 1
+
+    # Only highlight equal/ctx cells: add/del keep their red/green so the
+    # change signal isn't lost under token colouring.
+    lexer = _lexer_for(state.relpath)
+    if lexer is not None:
+        for row in rows:
+            for cell in (row.yours, row.base, row.theirs):
+                if (cell.text is not None
+                        and cell.spans is None
+                        and cell.tag in ("equal", "ctx")):
+                    cell.syntax = syntax_spans(cell.text, lexer)
     return rows
 
 
@@ -1954,6 +2085,12 @@ def _load_textual_ui() -> None:
                     line.append(span_text, style=style)
                 else:
                     line.append(span_text, style=f"bold {style}")
+            line.append("\n", style=style)
+        elif cell.syntax is not None:
+            for palette_key, span_text in cell.syntax:
+                tok_fg = PALETTE.get(palette_key, PALETTE["text"])
+                tok_style = f"{tok_fg} on {bg}" if bg else tok_fg
+                line.append(span_text, style=tok_style)
             line.append("\n", style=style)
         else:
             line.append(body + "\n", style=style)
