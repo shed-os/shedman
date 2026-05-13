@@ -2351,8 +2351,9 @@ def main(argv: Optional[list[str]] = None) -> int:
                    help="Ignore BASE content on disk; always run 2-way.")
     backend = p.add_mutually_exclusive_group()
     backend.add_argument("--gui", action="store_true",
-                         help="Open conflicts in Meld (GUI). Default when a "
-                              "display is available and meld is installed.")
+                         help="Open conflicts in the VS Code merge editor. "
+                              "Default when a display is available and "
+                              "`code` (or `codium`) is on PATH.")
     backend.add_argument("--tui", action="store_true",
                          help="Force the Textual TUI even if a GUI is "
                               "available.")
