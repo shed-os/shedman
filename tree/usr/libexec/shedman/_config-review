@@ -1874,8 +1874,9 @@ def _load_textual_ui() -> None:
         from textual.screen import ModalScreen, Screen
         from textual.widget import Widget
         from textual.widgets import (
-            DataTable, Footer, Header, Input, Label, Static,
+            DataTable, Footer, Header, Input, Label, Static, Tree,
         )
+        from textual.widgets.tree import TreeNode
         from textual.reactive import reactive
         from rich.syntax import Syntax
         from rich.text import Text
@@ -2182,13 +2183,16 @@ def _load_textual_ui() -> None:
 
         HELP = """[b]shedman config --review[/b]   keybindings
 
-FILE LIST
-  j ↓    next   |   k ↑      prev
-  g G    top/bottom
-  /      filter by regex
-  enter  open merge screen
-  a      accept-THEIRS for all files (confirm)
-  K      keep-YOURS    for all files (confirm)
+FILE TREE
+  j ↓    next node    |   k ↑    prev node
+  n      next file    |   p      prev file (skip dirs)
+  g G    first/last node
+  enter  leaf: open merge   |  dir: expand/collapse
+  l →    open (same as enter on a leaf)
+  /      filter by substring (relpath)
+  esc    clear filter
+  a      accept-THEIRS for all visible files (confirm)
+  K      keep-YOURS    for all visible files (confirm)
   r      refresh       |   q   quit
 
 MERGE SCREEN
@@ -2321,25 +2325,27 @@ MERGE SCREEN
         def on_input_submitted(self, event) -> None:
             self.dismiss(event.value)
 
-    # ---------- File list screen ----------
-    class FileListScreen(Screen):
-        # All bindings set show=True so the Footer widget advertises them.
-        # DataTable eats Enter (emits RowSelected) and the arrow keys before
-        # screen-level bindings fire; j/k are wired to cursor moves here so
-        # vim-style nav still works inside the DataTable.
+    # ---------- File tree screen ----------
+    class FileTreeScreen(Screen):
+        # Tree widget owns Enter/arrow keys before screen-level bindings
+        # fire, so vim-style nav is routed through the tree's own actions.
+        # `n`/`p` walk between leaves (skipping directories) — the per-file
+        # navigation users actually want when batching through conflicts.
         BINDINGS = [
-            Binding("j",                "cursor_down",      "↓"),
-            Binding("k",                "cursor_up",        "↑"),
-            Binding("g",                "cursor_top",       "top"),
-            Binding("G",                "cursor_bottom",    "bot"),
-            Binding("l,right",          "open",             "open"),
+            Binding("j,down",           "cursor_down",       "↓"),
+            Binding("k,up",             "cursor_up",         "↑"),
+            Binding("n",                "next_leaf",         "next file"),
+            Binding("p",                "prev_leaf",         "prev file"),
+            Binding("g",                "cursor_top",        "top"),
+            Binding("G",                "cursor_bottom",     "bot"),
+            Binding("l,right,enter",    "activate",          "open"),
             Binding("a",                "accept_all_theirs", "take-theirs-all"),
-            Binding("K",                "keep_all_yours",   "keep-yours-all"),
-            Binding("r",                "refresh",          "refresh"),
-            Binding("slash",            "filter",           "filter"),
-            Binding("escape",           "clear_filter",     "clear filter"),
-            Binding("question_mark,f1", "help",             "help"),
-            Binding("q",                "quit",             "quit"),
+            Binding("K",                "keep_all_yours",    "keep-yours-all"),
+            Binding("r",                "refresh",           "refresh"),
+            Binding("slash",            "filter",            "filter"),
+            Binding("escape",           "clear_filter",      "clear filter"),
+            Binding("question_mark,f1", "help",              "help"),
+            Binding("q",                "quit",              "quit"),
         ]
 
         def __init__(self, app_ref: "ReviewApp") -> None:
@@ -2349,13 +2355,15 @@ MERGE SCREEN
 
         def compose(self) -> ComposeResult:
             yield Banner("shedman config --review")
-            self.table = DataTable(cursor_type="row", zebra_stripes=False)
-            self.table.add_columns("#", "path", "kind", "hunks", "size", "base")
-            yield self.table
+            self.tree: Tree = Tree("conflicts", id="conflict-tree")
+            self.tree.show_root = False
+            self.tree.guide_depth = 2
+            yield self.tree
             yield Footer()
 
         def on_mount(self) -> None:
-            self.refresh_table()
+            self.refresh_tree()
+            self.tree.focus()
 
         def _visible_conflicts(self) -> list[Conflict]:
             if not self._filter:
@@ -2363,19 +2371,38 @@ MERGE SCREEN
             q = self._filter.lower()
             return [c for c in self._app_ref.conflicts if q in c.relpath.lower()]
 
-        def refresh_table(self) -> None:
-            self.table.clear()
-            visible = self._visible_conflicts()
-            for i, c in enumerate(visible, 1):
-                kind = c.kind
-                hunks = "-"
-                if c.kind == "text":
-                    hunks = str(c.hunk_count) if c.hunk_count >= 0 else "?"
-                base = ("yes" if c.has_base else ("-" if c.kind != "text" else f"[{THEME.warning}]no[/]"))
-                self.table.add_row(str(i), c.relpath, kind, hunks,
-                                   _human_size(c.size), base)
+        def _leaf_label(self, c: Conflict, filename: str):
+            label = Text(filename)
+            if c.kind == "text":
+                if c.has_base:
+                    hunks = c.hunk_count if c.hunk_count >= 0 else "?"
+                    label.append(f"  [3-way • {hunks} hunks]", style=THEME.dim)
+                else:
+                    label.append("  [2-way • BASE missing]", style=THEME.warning)
+            else:
+                label.append(f"  [{c.kind}]", style=THEME.dim)
+            return label
+
+        def refresh_tree(self) -> None:
+            self.tree.clear()
+            dir_nodes: dict[str, TreeNode] = {"": self.tree.root}
+            for c in sorted(self._visible_conflicts(), key=lambda x: x.relpath):
+                parts = c.relpath.split("/")
+                parent = self.tree.root
+                current = ""
+                for part in parts[:-1]:
+                    current = f"{current}/{part}" if current else part
+                    if current not in dir_nodes:
+                        new_dir = parent.add(f"{part}/", data=None, expand=True)
+                        dir_nodes[current] = new_dir
+                    parent = dir_nodes[current]
+                parent.add_leaf(self._leaf_label(c, parts[-1]), data=c)
+            self._update_banner()
+
+        def _update_banner(self) -> None:
             banner = self.query_one("#banner", Banner)
             total = len(self._app_ref.conflicts)
+            visible = self._visible_conflicts()
             bin_n = sum(1 for c in self._app_ref.conflicts if c.kind == "binary")
             if self._filter:
                 banner.update(
@@ -2386,55 +2413,85 @@ MERGE SCREEN
             else:
                 banner.update(
                     f"shedman config --review  —  {total} conflict(s) "
-                    f"({bin_n} binary)   / filter   ? help   q quit")
+                    f"({bin_n} binary)   n/p file   / filter   ? help   q quit")
+
+        def _visible_leaves(self) -> list[TreeNode]:
+            # DFS from root, honouring expansion state: a collapsed dir's
+            # leaves are not visible, so n/p shouldn't visit them.
+            out: list[TreeNode] = []
+            def walk(node: TreeNode) -> None:
+                for child in node.children:
+                    if child.data is not None:
+                        out.append(child)
+                    elif child.is_expanded:
+                        walk(child)
+            walk(self.tree.root)
+            return out
 
         def action_quit(self) -> None:
             self.app.exit()
 
         def action_cursor_down(self) -> None:
-            self.table.action_cursor_down()
+            self.tree.action_cursor_down()
 
         def action_cursor_up(self) -> None:
-            self.table.action_cursor_up()
+            self.tree.action_cursor_up()
 
         def action_cursor_top(self) -> None:
-            if self.table.row_count:
-                self.table.move_cursor(row=0)
+            self.tree.move_cursor_to_line(0)
 
         def action_cursor_bottom(self) -> None:
-            if self.table.row_count:
-                self.table.move_cursor(row=self.table.row_count - 1)
+            # Last visible node = deepest right-most descendant of expanded chain.
+            node = self.tree.root
+            while node.children and (node is self.tree.root or node.is_expanded):
+                node = node.children[-1]
+            if node is not self.tree.root:
+                self.tree.move_cursor(node)
 
-        def on_data_table_row_selected(self, event) -> None:
-            # Fired when the user presses Enter (or double-clicks) on a row.
-            # DataTable owns the Enter key, so the screen-level Enter binding
-            # never fires; activation has to go through this handler.
-            visible = self._visible_conflicts()
-            idx = getattr(event, "cursor_row", None)
-            if idx is None or idx < 0 or idx >= len(visible):
-                return
-            self._app_ref.open_conflict(visible[idx])
+        def action_next_leaf(self) -> None:
+            self._move_to_leaf(+1)
 
-        def action_open(self) -> None:
-            if self.table.row_count == 0:
+        def action_prev_leaf(self) -> None:
+            self._move_to_leaf(-1)
+
+        def _move_to_leaf(self, direction: int) -> None:
+            leaves = self._visible_leaves()
+            if not leaves:
                 return
-            visible = self._visible_conflicts()
-            idx = self.table.cursor_row
-            if idx is None or idx < 0 or idx >= len(visible):
+            cur = self.tree.cursor_node
+            if cur is not None and cur in leaves:
+                idx = (leaves.index(cur) + direction) % len(leaves)
+            else:
+                idx = 0 if direction > 0 else len(leaves) - 1
+            self.tree.move_cursor(leaves[idx])
+
+        def action_activate(self) -> None:
+            node = self.tree.cursor_node
+            if node is None or node is self.tree.root:
                 return
-            self._app_ref.open_conflict(visible[idx])
+            if node.data is not None:
+                self._app_ref.open_conflict(node.data)
+            else:
+                node.toggle()
+
+        def on_tree_node_selected(self, event) -> None:
+            # Mouse click on a leaf — open it. Dirs use NodeExpanded/Collapsed
+            # which Textual handles internally; nothing to do here for those.
+            node = event.node
+            if node is None or node.data is None:
+                return
+            self._app_ref.open_conflict(node.data)
 
         def action_help(self) -> None:
             self.app.push_screen(HelpScreen())
 
         def action_accept_all_theirs(self) -> None:
             visible = self._visible_conflicts()
-            scope = ("every visible file"
-                     if self._filter else "every file")
+            scope = ("every visible file" if self._filter else "every file")
             def after(ans: Optional[bool]) -> None:
                 if ans:
                     self._app_ref.bulk_accept_theirs(visible)
-                    self.refresh_table()
+                    self.refresh_tree()
             self.app.push_screen(
                 ConfirmScreen("Accept THEIRS for all files",
                               f"Replace {scope} ({len(visible)}) with its\n"
@@ -2444,12 +2501,11 @@ MERGE SCREEN
 
         def action_keep_all_yours(self) -> None:
             visible = self._visible_conflicts()
-            scope = ("every visible .shedosnew"
-                     if self._filter else "every .shedosnew")
+            scope = ("every visible .shedosnew" if self._filter else "every .shedosnew")
             def after(ans: Optional[bool]) -> None:
                 if ans:
                     self._app_ref.bulk_keep_yours(visible)
-                    self.refresh_table()
+                    self.refresh_tree()
             self.app.push_screen(
                 ConfirmScreen("Keep YOURS for all files",
                               f"Delete {scope} ({len(visible)}) and leave\n"
@@ -2459,22 +2515,20 @@ MERGE SCREEN
 
         def action_refresh(self) -> None:
             self._app_ref.rescan()
-            self.refresh_table()
+            self.refresh_tree()
 
         def action_filter(self) -> None:
             def after(value: Optional[str]) -> None:
                 if value is None:
                     return
                 self._filter = value.strip()
-                self.refresh_table()
-                if self.table.row_count:
-                    self.table.move_cursor(row=0)
+                self.refresh_tree()
             self.app.push_screen(FilterPromptScreen(self._filter), after)
 
         def action_clear_filter(self) -> None:
             if self._filter:
                 self._filter = ""
-                self.refresh_table()
+                self.refresh_tree()
 
     # ---------- Merge screen ----------
     class MergeScreen(Screen):
@@ -2869,7 +2923,7 @@ MERGE SCREEN
             self._resolved: set[str] = set()
 
         def on_mount(self) -> None:
-            self.push_screen(FileListScreen(self))
+            self.push_screen(FileTreeScreen(self))
             if self.start_file:
                 for c in self.conflicts:
                     if c.relpath == self.start_file:
@@ -2970,8 +3024,8 @@ MERGE SCREEN
             self._resolved.add(relpath)
             self.conflicts = [c for c in self.conflicts if c.relpath not in self._resolved]
             top = self.screen_stack[-1] if self.screen_stack else None
-            if isinstance(top, FileListScreen):
-                top.refresh_table()
+            if isinstance(top, FileTreeScreen):
+                top.refresh_tree()
             if not self.conflicts:
                 self.exit()
 
