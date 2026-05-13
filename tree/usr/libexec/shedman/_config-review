@@ -1623,12 +1623,8 @@ def _run_stdin_decisions(conflicts: list[Conflict], *, force_2way: bool,
                 side = Side(tok)
             except ValueError:
                 continue
-            # Skip hunks the classifier already decided (yours-only,
-            # theirs-only, identical-edit). User tokens only target hunks
-            # that still need a real decision; a missing token on a hunk
-            # that should have been auto-decided trips UnresolvedHunk at
-            # save time, which fails the test — exactly the regression
-            # signal we want.
+            # Skip hunks the classifier auto-decided; user tokens apply to
+            # the remaining ones.
             while (hunk_idx < len(state.hunks)
                    and state.hunks[hunk_idx].decision is not None):
                 hunk_idx += 1
