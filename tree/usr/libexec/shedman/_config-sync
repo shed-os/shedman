@@ -127,19 +127,24 @@ _read_sha() {
 }
 
 _write_sha() {
-    # $1 = manifest file path, $2 = sha
-    install -Dm600 /dev/null "$1"
-    printf '%s' "$2" > "$1"
+    # $1 = manifest file path, $2 = sha. Tmp+rename so a crash leaves the
+    # manifest fully old or fully new.
+    local tmp="$1.tmp.$$"
+    install -Dm600 /dev/null "$tmp"
+    printf '%s' "$2" > "$tmp"
+    mv -f "$tmp" "$1"
 }
 
 _write_content() {
     # Snapshot a BASE content file. $1 = relpath (key), $2 = source to copy.
-    # shedos-review-configs needs BASE content; not just the hash; to show a
-    # real 3-way diff. We mirror the manifest layout under CONTENT_ROOT so the
-    # review tool can locate BASE via the same relpath key.
+    # shedos-review-configs needs BASE content (not just the hash) to show a
+    # real 3-way diff. Tmp+rename so a crash leaves BASE fully old or fully
+    # new.
     local dest="$CONTENT_ROOT/$1"
-    install -Dm600 /dev/null "$dest"
-    cp --preserve=mode -- "$2" "$dest"
+    local tmp="$dest.tmp.$$"
+    install -Dm600 /dev/null "$tmp"
+    cp --preserve=mode -- "$2" "$tmp"
+    mv -f "$tmp" "$dest"
 }
 
 _find_excluded_stale() {
@@ -238,8 +243,10 @@ if (( REBUILD_MANIFEST )); then
         IFS=$'\t' read -r _ _ relpath src _ last <<<"$entry"
         src_sha=$(_sha "$src")
         [[ -n $src_sha ]] || continue
-        _write_sha "$last" "$src_sha"
+        # BASE before manifest: a crash between leaves the next sync able
+        # to recover from the still-old manifest.
         _write_content "$relpath" "$src"
+        _write_sha "$last" "$src_sha"
         ((n++))
     done
     echo "Rebuilt manifest: $n entries under $STATE_ROOT"
@@ -375,14 +382,14 @@ for entry in "${plan[@]}"; do
         seed)
             install -Dm644 /dev/null "$dst"
             cp --preserve=mode "$src" "$dst"
-            _write_sha "$last" "$(_sha "$src")"
             _write_content "$relpath" "$src"
+            _write_sha "$last" "$(_sha "$src")"
             ;;
         auto)
             cp -a "$dst" "$dst.shedosbak"
             cp --preserve=mode "$src" "$dst"
-            _write_sha "$last" "$(_sha "$src")"
             _write_content "$relpath" "$src"
+            _write_sha "$last" "$(_sha "$src")"
             ;;
         conflict)
             cp --preserve=mode "$src" "$dst.shedosnew"

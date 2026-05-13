@@ -553,23 +553,44 @@ def auto_resolve_identical(conflicts: list[Conflict]) -> tuple[list[Conflict], i
 
 
 def _update_manifest(relpath: str, src_path: Path) -> None:
+    # Each file written via tmp+rename so a crash leaves it fully old or
+    # fully new. BASE before manifest so a partial update is recoverable
+    # from the still-old manifest on the next sync.
     sha = sha256_file(src_path)
     if not sha:
         return
-    mp = manifest_path_for(relpath)
-    mp.parent.mkdir(parents=True, exist_ok=True)
-    mp.write_text(sha)
-    try:
-        mp.chmod(0o600)
-    except OSError:
-        pass
+
     bp = base_content_path_for(relpath)
+    mp = manifest_path_for(relpath)
     bp.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(src_path, bp)
+    mp.parent.mkdir(parents=True, exist_ok=True)
+    pid = os.getpid()
+
+    bp_tmp = bp.with_name(bp.name + TMP_SUFFIX + f".{pid}")
+    if bp_tmp.exists():
+        bp_tmp.unlink()
+    shutil.copy2(src_path, bp_tmp)
     try:
-        bp.chmod(0o600)
+        bp_tmp.chmod(0o600)
     except OSError:
         pass
+    fd = os.open(str(bp_tmp), os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    atomic_rename(bp_tmp, bp)
+
+    mp_tmp = mp.with_name(mp.name + TMP_SUFFIX + f".{pid}")
+    if mp_tmp.exists():
+        mp_tmp.unlink()
+    fd = os.open(str(mp_tmp), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        os.write(fd, sha.encode("utf-8"))
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    atomic_rename(mp_tmp, mp)
 
 
 # Hunk extraction (3-way + 2-way)
