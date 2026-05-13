@@ -1422,22 +1422,329 @@ def save_merged(state: MergeState, force: bool = False) -> None:
         pass
 
 
-# Meld GUI backend
+# VS Code merge editor backend
 
 
 _CONFLICT_MARKER_RE = re.compile(r"^(<{7} |={7}$|>{7} )", re.MULTILINE)
 
+_VSCODE_SETTINGS_TEMPLATE = Path(
+    "/usr/share/shedos-hyprland/vscode-merge-settings.json"
+)
 
-def _meld_binary() -> str:
-    """Resolve the meld executable. Test seam via SHEDOS_MELD_BIN."""
-    return os.environ.get("SHEDOS_MELD_BIN", "meld")
+# VS Code extension that focuses the Source Control panel on workspace
+# open. Shipped under /usr/share/shedos-system/vscode-merge-helper/
+# and synced into the user's ~/.vscode/extensions/ on each --gui run
+# so VS Code auto-loads it. The extension itself is a no-op for any
+# workspace lacking the .shedman/ marker — it only ever activates SCM
+# for our merge staging dirs.
+_VSCODE_HELPER_SRC = Path("/usr/share/shedos-system/vscode-merge-helper")
+_VSCODE_HELPER_VERSION = "1.3.0"
+
+
+def _ensure_vscode_extension(code_bin: str) -> None:
+    """Build a .vsix from the shipped extension files and install it
+    via `code --install-extension`.
+
+    VS Code only loads extensions registered in ~/.vscode/extensions/
+    extensions.json; simply copying a directory there is silently
+    ignored. `--install-extension <vsix>` is the official entry point
+    that both unpacks the files and updates the registry. We build the
+    vsix on the fly with Python's zipfile module (no external tools
+    needed) from the package.json + extension.js shipped under
+    /usr/share/shedos-system/vscode-merge-helper/.
+
+    Idempotent: every run rebuilds the vsix and reinstalls. VS Code
+    skips the install if it's already present at the same version.
+
+    Skipped entirely when SHEDOS_VSCODE_BIN is set (test harness with
+    fake-code) so tests don't mutate real user state.
+    """
+    if not _VSCODE_HELPER_SRC.is_dir():
+        return
+    if os.environ.get("SHEDOS_VSCODE_BIN"):
+        return
+
+    manifest = (
+        '<?xml version="1.0" encoding="utf-8"?>\n'
+        '<PackageManifest Version="2.0.0" '
+        'xmlns="http://schemas.microsoft.com/developer/vsx-schema/2011">\n'
+        '  <Metadata>\n'
+        f'    <Identity Language="en-US" Id="shedman-merge-helper" '
+        f'Version="{_VSCODE_HELPER_VERSION}" Publisher="shedos"/>\n'
+        '    <DisplayName>Shedman Merge Helper</DisplayName>\n'
+        '    <Description>Auto-focus Source Control panel for '
+        'shedman config --review workspaces.</Description>\n'
+        '  </Metadata>\n'
+        '  <Installation>\n'
+        '    <InstallationTarget Id="Microsoft.VisualStudio.Code"/>\n'
+        '  </Installation>\n'
+        '  <Dependencies/>\n'
+        '  <Assets>\n'
+        '    <Asset Type="Microsoft.VisualStudio.Code.Manifest" '
+        'Path="extension/package.json" Addressable="true"/>\n'
+        '  </Assets>\n'
+        '</PackageManifest>\n'
+    )
+    content_types = (
+        '<?xml version="1.0" encoding="utf-8"?>\n'
+        '<Types xmlns="http://schemas.openxmlformats.org/'
+        'package/2006/content-types">\n'
+        '  <Default Extension="json" ContentType="application/json"/>\n'
+        '  <Default Extension="js" '
+        'ContentType="application/javascript"/>\n'
+        '  <Default Extension="vsixmanifest" ContentType="text/xml"/>\n'
+        '</Types>\n'
+    )
+
+    import zipfile
+    vsix = Path(tempfile.gettempdir()) / "shedman-merge-helper.vsix"
+    try:
+        with zipfile.ZipFile(vsix, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("[Content_Types].xml", content_types)
+            zf.writestr("extension.vsixmanifest", manifest)
+            for src in _VSCODE_HELPER_SRC.iterdir():
+                if src.is_file():
+                    zf.write(src, f"extension/{src.name}")
+    except OSError as e:
+        _log(f"vsix build failed: {e}")
+        return
+
+    try:
+        subprocess.run(
+            [code_bin, "--install-extension", str(vsix), "--force"],
+            check=False, capture_output=True, timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError) as e:
+        _log(f"vscode helper install failed: {e}")
+    finally:
+        try:
+            vsix.unlink()
+        except OSError:
+            pass
+
+# Inline fallback used when the template file isn't installed (test envs,
+# minimal installs without shedos-hyprland). Disables workspace trust so
+# the user isn't prompted, hides the comparison staging from the file
+# tree, auto-saves the result pane so the user can't lose work by
+# closing a tab without explicitly saving, and Catppuccin-colours the
+# merge editor surfaces.
+_DEFAULT_VSCODE_SETTINGS = """{
+    "security.workspace.trust.enabled": false,
+    "security.workspace.trust.banner": "never",
+    "security.workspace.trust.startupPrompt": "never",
+    "security.workspace.trust.untrustedFiles": "open",
+    "files.autoSave": "afterDelay",
+    "files.autoSaveDelay": 500,
+    "files.exclude": {
+        ".git": true,
+        ".vscode": true,
+        ".shedman": true
+    },
+    "explorer.compactFolders": false,
+    "git.mergeEditor": true,
+    "git.openRepositoryInParentFolders": "never",
+    "git.autoRepositoryDetection": "openEditors",
+    "scm.alwaysShowProviders": true,
+    "scm.defaultViewMode": "tree",
+    "workbench.startupEditor": "none",
+    "workbench.colorCustomizations": {
+        "foreground": "#cdd6f4",
+        "focusBorder": "#cba6f7",
+        "contrastBorder": "#313244",
+        "selection.background": "#585b7050",
+        "descriptionForeground": "#a6adc8",
+        "errorForeground": "#f38ba8",
+        "icon.foreground": "#cdd6f4",
+        "window.activeBorder": "#313244",
+        "window.inactiveBorder": "#313244",
+        "titleBar.activeBackground": "#181825",
+        "titleBar.activeForeground": "#cdd6f4",
+        "titleBar.inactiveBackground": "#181825",
+        "titleBar.inactiveForeground": "#a6adc8",
+        "titleBar.border": "#313244",
+        "activityBar.background": "#181825",
+        "activityBar.foreground": "#cdd6f4",
+        "activityBar.inactiveForeground": "#6c7086",
+        "activityBar.border": "#313244",
+        "activityBar.activeBorder": "#cba6f7",
+        "activityBar.activeBackground": "#313244",
+        "activityBarBadge.background": "#cba6f7",
+        "activityBarBadge.foreground": "#1e1e2e",
+        "sideBar.background": "#181825",
+        "sideBar.foreground": "#cdd6f4",
+        "sideBar.border": "#313244",
+        "sideBarTitle.foreground": "#cba6f7",
+        "sideBarSectionHeader.background": "#181825",
+        "sideBarSectionHeader.foreground": "#cdd6f4",
+        "sideBarSectionHeader.border": "#313244",
+        "sideBarActivityBarTop.border": "#313244",
+        "statusBar.background": "#181825",
+        "statusBar.foreground": "#cdd6f4",
+        "statusBar.border": "#313244",
+        "statusBar.noFolderBackground": "#181825",
+        "statusBar.debuggingBackground": "#fab387",
+        "statusBar.debuggingForeground": "#1e1e2e",
+        "statusBarItem.hoverBackground": "#313244",
+        "statusBarItem.activeBackground": "#45475a",
+        "statusBarItem.prominentBackground": "#cba6f7",
+        "statusBarItem.prominentForeground": "#1e1e2e",
+        "editorGroupHeader.tabsBackground": "#181825",
+        "editorGroupHeader.tabsBorder": "#313244",
+        "editorGroupHeader.noTabsBackground": "#181825",
+        "editorGroup.border": "#313244",
+        "editorGroup.dropBackground": "#cba6f733",
+        "editorGroup.emptyBackground": "#1e1e2e",
+        "tab.activeBackground": "#1e1e2e",
+        "tab.inactiveBackground": "#181825",
+        "tab.activeForeground": "#cdd6f4",
+        "tab.inactiveForeground": "#a6adc8",
+        "tab.border": "#313244",
+        "tab.activeBorderTop": "#cba6f7",
+        "tab.activeBorder": "#1e1e2e",
+        "tab.hoverBackground": "#313244",
+        "tab.hoverForeground": "#cdd6f4",
+        "tab.unfocusedActiveBackground": "#1e1e2e",
+        "tab.unfocusedInactiveBackground": "#181825",
+        "panel.background": "#1e1e2e",
+        "panel.border": "#313244",
+        "panelTitle.activeBorder": "#cba6f7",
+        "panelTitle.activeForeground": "#cdd6f4",
+        "panelTitle.inactiveForeground": "#a6adc8",
+        "panelSection.border": "#313244",
+        "list.activeSelectionBackground": "#313244",
+        "list.activeSelectionForeground": "#cdd6f4",
+        "list.inactiveSelectionBackground": "#313244",
+        "list.inactiveSelectionForeground": "#cdd6f4",
+        "list.hoverBackground": "#1e1e2e",
+        "list.hoverForeground": "#cdd6f4",
+        "list.focusBackground": "#313244",
+        "list.focusForeground": "#cdd6f4",
+        "list.highlightForeground": "#cba6f7",
+        "list.dropBackground": "#cba6f733",
+        "tree.indentGuidesStroke": "#45475a",
+        "input.background": "#313244",
+        "input.foreground": "#cdd6f4",
+        "input.border": "#6c7086",
+        "input.placeholderForeground": "#6c7086",
+        "inputOption.activeBorder": "#cba6f7",
+        "inputOption.activeBackground": "#cba6f733",
+        "inputValidation.errorBackground": "#f38ba833",
+        "inputValidation.errorBorder": "#f38ba8",
+        "inputValidation.warningBackground": "#f9e2af33",
+        "inputValidation.warningBorder": "#f9e2af",
+        "inputValidation.infoBackground": "#89b4fa33",
+        "inputValidation.infoBorder": "#89b4fa",
+        "dropdown.background": "#313244",
+        "dropdown.foreground": "#cdd6f4",
+        "dropdown.border": "#6c7086",
+        "button.background": "#cba6f7",
+        "button.foreground": "#1e1e2e",
+        "button.hoverBackground": "#b4befe",
+        "button.secondaryBackground": "#313244",
+        "button.secondaryForeground": "#cdd6f4",
+        "button.secondaryHoverBackground": "#45475a",
+        "badge.background": "#cba6f7",
+        "badge.foreground": "#1e1e2e",
+        "breadcrumb.background": "#1e1e2e",
+        "breadcrumb.foreground": "#a6adc8",
+        "breadcrumb.focusForeground": "#cdd6f4",
+        "breadcrumb.activeSelectionForeground": "#cba6f7",
+        "menu.background": "#181825",
+        "menu.foreground": "#cdd6f4",
+        "menu.selectionBackground": "#313244",
+        "menu.selectionForeground": "#cdd6f4",
+        "menu.border": "#313244",
+        "menubar.selectionBackground": "#313244",
+        "menubar.selectionForeground": "#cdd6f4",
+        "notifications.background": "#181825",
+        "notifications.foreground": "#cdd6f4",
+        "notifications.border": "#313244",
+        "notificationCenter.border": "#313244",
+        "notificationCenterHeader.background": "#181825",
+        "notificationCenterHeader.foreground": "#cdd6f4",
+        "scrollbar.shadow": "#11111b",
+        "scrollbarSlider.background": "#6c708670",
+        "scrollbarSlider.hoverBackground": "#7f849c90",
+        "scrollbarSlider.activeBackground": "#9399b290",
+        "minimap.background": "#181825",
+        "minimap.selectionHighlight": "#cba6f7",
+        "minimapSlider.background": "#6c708630",
+        "minimapSlider.hoverBackground": "#7f849c50",
+        "minimapSlider.activeBackground": "#9399b270",
+        "editor.background": "#1e1e2e",
+        "editor.foreground": "#cdd6f4",
+        "editor.lineHighlightBackground": "#313244",
+        "editor.lineHighlightBorder": "#00000000",
+        "editor.selectionBackground": "#585b7050",
+        "editor.selectionHighlightBackground": "#585b7030",
+        "editor.findMatchBackground": "#f9e2af50",
+        "editor.findMatchHighlightBackground": "#f9e2af30",
+        "editor.wordHighlightBackground": "#585b7030",
+        "editor.wordHighlightStrongBackground": "#585b7050",
+        "editorLineNumber.foreground": "#6c7086",
+        "editorLineNumber.activeForeground": "#cdd6f4",
+        "editorCursor.foreground": "#f5e0dc",
+        "editorWhitespace.foreground": "#45475a",
+        "editorIndentGuide.background1": "#313244",
+        "editorIndentGuide.activeBackground1": "#45475a",
+        "editorGutter.background": "#1e1e2e",
+        "editorGutter.modifiedBackground": "#f9e2af",
+        "editorGutter.addedBackground": "#a6e3a1",
+        "editorGutter.deletedBackground": "#f38ba8",
+        "editorWidget.background": "#181825",
+        "editorWidget.foreground": "#cdd6f4",
+        "editorWidget.border": "#313244",
+        "editorHoverWidget.background": "#181825",
+        "editorHoverWidget.foreground": "#cdd6f4",
+        "editorHoverWidget.border": "#313244",
+        "editorCodeLens.foreground": "#a6adc8",
+        "editorBracketMatch.background": "#313244",
+        "editorBracketMatch.border": "#cba6f7",
+        "diffEditor.insertedTextBackground": "#a6e3a133",
+        "diffEditor.removedTextBackground": "#f38ba833",
+        "diffEditor.insertedLineBackground": "#a6e3a11a",
+        "diffEditor.removedLineBackground": "#f38ba81a",
+        "diffEditorGutter.insertedLineBackground": "#a6e3a133",
+        "diffEditorGutter.removedLineBackground": "#f38ba833",
+        "diffEditorOverview.insertedForeground": "#a6e3a1",
+        "diffEditorOverview.removedForeground": "#f38ba8",
+        "mergeEditor.change.background": "#a6e3a11a",
+        "mergeEditor.change.word.background": "#a6e3a133",
+        "mergeEditor.conflict.unhandled.background": "#f38ba81a",
+        "mergeEditor.conflict.unhandled.border": "#f38ba8",
+        "mergeEditor.conflict.handled.background": "#94e2d51a",
+        "mergeEditor.conflict.handled.border": "#94e2d5",
+        "mergeEditor.conflict.handledUnfocused.border": "#94e2d566",
+        "mergeEditor.conflict.input1.background": "#a6e3a11a",
+        "mergeEditor.conflict.input2.background": "#89b4fa1a"
+    }
+}
+"""
+
+
+def _vscode_binary() -> str:
+    """Resolve the VS Code / VSCodium executable on PATH, or "" if absent.
+
+    Both Arch's `code` (extra repo, OSS build) and `visual-studio-code-bin`
+    (AUR, Microsoft proprietary build) install /usr/bin/code, so a single
+    lookup covers both. VSCodium installs `codium` and is checked as a
+    courtesy fallback for users who prefer it. Override with
+    SHEDOS_VSCODE_BIN for tests.
+    """
+    override = os.environ.get("SHEDOS_VSCODE_BIN")
+    if override:
+        return override if shutil.which(override) or os.path.isabs(override) else ""
+    for name in ("code", "codium"):
+        if shutil.which(name):
+            return name
+    return ""
 
 
 def _prefer_gui() -> bool:
-    """Auto-detect: prefer Meld when a display and binary are both present."""
+    """Auto-detect: GUI iff display + VS Code + interactive TTY."""
     if not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
         return False
-    if shutil.which(_meld_binary()) is None:
+    if not _vscode_binary():
         return False
     if not (sys.stdin.isatty() and sys.stdout.isatty()):
         return False
@@ -1453,11 +1760,11 @@ def _has_conflict_markers(path: Path) -> bool:
 
 
 def save_merged_from_bytes(c: Conflict, content: bytes) -> None:
-    """Atomic save of new content for a Meld-resolved conflict.
+    """Atomic save of new content for a GUI-resolved conflict.
 
     Same on-disk choreography as save_merged() (tmp+fsync, .shedosbak
     of pre-merge YOURS, atomic rename, .shedosnew unlink, manifest
-    advance) but takes raw bytes from the Meld staging dir instead of
+    advance) but takes raw bytes from the GUI staging dir instead of
     assembling from hunk decisions.
     """
     yours = c.yours_path
@@ -1493,98 +1800,127 @@ def save_merged_from_bytes(c: Conflict, content: bytes) -> None:
         _update_manifest(c.relpath, c.src_path)
 
 
-def _stage_for_meld(conflicts: list[Conflict], three_way: bool,
-                    staging: Path) -> dict[str, bytes]:
-    """Lay out yours/base/theirs subtrees under staging. Returns a snapshot
-    of each staged yours/<relpath> for the post-Meld change detection."""
-    yours_root = staging / "yours"
-    theirs_root = staging / "theirs"
-    base_root = staging / "base" if three_way else None
+def _stage_for_vscode(conflicts: list[Conflict], force_2way: bool,
+                      staging: Path) -> dict[str, bytes]:
+    """Materialise the conflicts as a real git mid-merge state.
+
+    The staging dir is initialised as a git repo with three commits per
+    file (BASE on `main`, THEIRS on a branch, YOURS back on `main`),
+    then `git merge` is run so every conflict file lands in the working
+    tree with standard merge markers. VS Code's git integration detects
+    the mid-merge state automatically: each file gets a conflict badge
+    in the Explorer; clicking a file opens the merge editor (the
+    default behaviour of `git.mergeEditor: true`); the per-file
+    conflict scope keeps each merge editor's CodeLens labels isolated.
+
+    For 2-way conflicts (BASE missing) we synthesise BASE as an empty
+    file so the merge actually conflicts — a non-empty BASE equal to
+    YOURS would fast-forward without writing any markers.
+
+    Returns the post-merge snapshot of each file (still containing
+    markers) for the change detection done after VS Code closes.
+    """
+    def git(*args: str) -> None:
+        subprocess.run(
+            ["git", "-C", str(staging), *args],
+            check=True, capture_output=True,
+        )
+
+    # Standalone repo: no global config, no signing, predictable
+    # markers. -b main pins the initial branch name regardless of the
+    # user's init.defaultBranch.
+    git("init", "-q", "-b", "main")
+    git("config", "user.email", "shedman-review@localhost")
+    git("config", "user.name", "ShedMan Review")
+    git("config", "commit.gpgsign", "false")
+    git("config", "merge.conflictStyle", "merge")
+
+    def lay_out(picker) -> None:
+        """Write picker(c) into staging/c.relpath for every conflict."""
+        for c in conflicts:
+            dst = staging / c.relpath
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            src = picker(c)
+            if src is None:
+                dst.write_bytes(b"")
+            else:
+                shutil.copy2(src, dst)
+
+    # BASE commit on main.
+    def base_src(c: Conflict):
+        if c.has_base and not force_2way:
+            blob = CONTENT_ROOT / c.relpath
+            if blob.is_file():
+                return blob
+        return None  # synthesise empty
+    lay_out(base_src)
+    git("add", "--", *[c.relpath for c in conflicts])
+    git("commit", "-q", "-m", "base")
+
+    # THEIRS commit on a sibling branch.
+    git("checkout", "-q", "-b", "theirs")
+    lay_out(lambda c: c.theirs_path)
+    git("add", "--", *[c.relpath for c in conflicts])
+    git("commit", "-q", "-m", "theirs")
+
+    # YOURS commit back on main.
+    git("checkout", "-q", "main")
+    lay_out(lambda c: c.yours_path)
+    git("add", "--", *[c.relpath for c in conflicts])
+    git("commit", "-q", "-m", "yours")
+
+    # Merge theirs — every file conflicts. `git merge` returns non-zero
+    # on conflict, which is the success case here; check=False.
+    subprocess.run(
+        ["git", "-C", str(staging), "merge", "--no-ff", "-q",
+         "-m", "shedman review", "theirs"],
+        check=False, capture_output=True,
+    )
+
     pre: dict[str, bytes] = {}
     for c in conflicts:
-        (yours_root / c.relpath).parent.mkdir(parents=True, exist_ok=True)
-        (theirs_root / c.relpath).parent.mkdir(parents=True, exist_ok=True)
-        if three_way:
-            (base_root / c.relpath).parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(c.yours_path, yours_root / c.relpath)
-        shutil.copy2(c.theirs_path, theirs_root / c.relpath)
-        if three_way:
-            base_content = CONTENT_ROOT / c.relpath
-            # Caller guarantees has_base; defensively fall back to yours if
-            # the BASE blob disappeared between scan and stage.
-            src = base_content if base_content.is_file() else c.yours_path
-            shutil.copy2(src, base_root / c.relpath)
-        pre[c.relpath] = (yours_root / c.relpath).read_bytes()
+        try:
+            pre[c.relpath] = (staging / c.relpath).read_bytes()
+        except OSError:
+            pre[c.relpath] = b""
+
+    vscode_dir = staging / ".vscode"
+    vscode_dir.mkdir(parents=True, exist_ok=True)
+    settings_dst = vscode_dir / "settings.json"
+    if _VSCODE_SETTINGS_TEMPLATE.is_file():
+        shutil.copy2(_VSCODE_SETTINGS_TEMPLATE, settings_dst)
+    else:
+        settings_dst.write_text(_DEFAULT_VSCODE_SETTINGS)
+
+    # Marker dir + file the shedman-merge-helper VS Code extension
+    # checks for. Its presence tells the extension "this workspace
+    # is a shedman config-review session, focus the Source Control
+    # panel and open the first conflict". Hidden from Explorer via
+    # files.exclude in settings.json. The MARKER file inside makes
+    # the directory non-empty so VS Code's workspace scanner sees it
+    # (relevant if we ever swap activation to workspaceContains).
+    marker_dir = staging / ".shedman"
+    marker_dir.mkdir(exist_ok=True)
+    (marker_dir / "MARKER").write_text("shedman config --review staging\n")
     return pre
 
 
-def _meld_pass(conflicts: list[Conflict], three_way: bool) -> tuple[int, int, int]:
-    """Run one Meld invocation; copy back yours/ files the user edited.
+def _run_vscode(conflicts: list[Conflict], *, force_2way: bool) -> int:
+    """Open VS Code on a git mid-merge workspace and copy back on close.
 
-    Returns (saved, marker_skipped, unchanged).
-    """
-    if not conflicts:
-        return (0, 0, 0)
-
-    staging = Path(tempfile.mkdtemp(prefix="shedman-review-"))
-    try:
-        pre = _stage_for_meld(conflicts, three_way, staging)
-        yours_root = staging / "yours"
-        theirs_root = staging / "theirs"
-        if three_way:
-            argv = [_meld_binary(), str(yours_root),
-                    str(staging / "base"), str(theirs_root)]
-        else:
-            argv = [_meld_binary(), str(yours_root), str(theirs_root)]
-        print(f"  → {' '.join(argv)}", file=sys.stderr)
-        try:
-            subprocess.run(argv, check=False)
-        except OSError as e:
-            print(f"failed to launch meld: {e}", file=sys.stderr)
-            return (0, 0, 0)
-
-        saved = marker_skipped = unchanged = 0
-        for c in conflicts:
-            staged = yours_root / c.relpath
-            try:
-                cur = staged.read_bytes()
-            except OSError:
-                continue
-            if cur == pre[c.relpath]:
-                unchanged += 1
-                continue
-            if _has_conflict_markers(staged):
-                print(f"warning: {c.relpath} contains conflict markers; "
-                      f"leaving .shedosnew in place. Re-run after cleanup.",
-                      file=sys.stderr)
-                marker_skipped += 1
-                continue
-            try:
-                save_merged_from_bytes(c, cur)
-                saved += 1
-            except OSError as e:
-                print(f"save failed for {c.relpath}: {e}", file=sys.stderr)
-        return (saved, marker_skipped, unchanged)
-    finally:
-        shutil.rmtree(staging, ignore_errors=True)
-
-
-def _run_meld(conflicts: list[Conflict], *, force_2way: bool) -> int:
-    """Open Meld in folder-comparison mode for every text conflict.
-
-    Groups by has_base: 3-way (with BASE) and 2-way (BASE missing) run
-    as separate Meld invocations. Non-text conflicts (binary, symlink,
-    orphan, missing-yours) need the TUI's confirm flows; print a notice
-    and skip them.
+    The staging dir is set up as a real git repo with each conflict
+    materialised as a mid-merge state, so VS Code's native git
+    integration handles per-file conflict scoping (Explorer badges,
+    Source Control panel, click-to-merge-editor). The whole session is
+    a single `code --new-window --wait <staging>` invocation that
+    blocks until the user closes the window; we then walk the result
+    files and copy back anything resolved cleanly.
     """
     if not conflicts:
         print("Nothing to review. All configs are in sync.")
         return 0
 
-    text_3way = [c for c in conflicts
-                 if c.kind == "text" and c.has_base and not force_2way]
-    text_2way = [c for c in conflicts
-                 if c.kind == "text" and (not c.has_base or force_2way)]
+    text_conflicts = [c for c in conflicts if c.kind == "text"]
     non_text = [c for c in conflicts if c.kind != "text"]
 
     if non_text:
@@ -1596,45 +1932,161 @@ def _run_meld(conflicts: list[Conflict], *, force_2way: bool) -> int:
         if len(non_text) > 5:
             print(f"  ... and {len(non_text) - 5} more.", file=sys.stderr)
 
-    if not text_3way and not text_2way:
+    if not text_conflicts:
         return 0
 
-    if text_3way:
-        print(f"Opening Meld for {len(text_3way)} 3-way conflict(s)…",
+    code = _vscode_binary()
+    if not code:
+        print("shedman config --review: --gui requested but neither "
+              "`code` nor `codium` is on PATH. Falling back to TUI.",
               file=sys.stderr)
-    s1, m1, u1 = _meld_pass(text_3way, three_way=True)
+        return _run_textual(conflicts, start_file=None, walk_all=False,
+                            force_2way=force_2way)
 
-    if text_2way:
-        print(f"Opening Meld for {len(text_2way)} 2-way conflict(s) "
-              f"(BASE missing)…", file=sys.stderr)
-    s2, m2, u2 = _meld_pass(text_2way, three_way=False)
+    if not shutil.which("git"):
+        print("shedman config --review: --gui needs git to stage "
+              "conflicts. Falling back to TUI.", file=sys.stderr)
+        return _run_textual(conflicts, start_file=None, walk_all=False,
+                            force_2way=force_2way)
 
-    saved = s1 + s2
-    marker_skipped = m1 + m2
-    unchanged = u1 + u2
-
-    summary = []
-    if saved:
-        summary.append(f"{saved} saved")
-    if unchanged:
-        summary.append(f"{unchanged} unchanged (.shedosnew kept for re-run)")
-    if marker_skipped:
-        summary.append(f"{marker_skipped} skipped due to conflict markers")
-    if summary:
-        print("Meld review complete: " + ", ".join(summary) + ".",
-              file=sys.stderr)
-
-    # Refresh the waybar conflict count. Best-effort, mirrors save_merged.
+    staging = Path(tempfile.mkdtemp(prefix="shedman-review-"))
     try:
-        subprocess.run(
-            ["/usr/bin/shedman", "conflicts", "--refresh-waybar"],
-            check=False, timeout=2,
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
-    except (OSError, subprocess.SubprocessError):
-        pass
+        try:
+            pre = _stage_for_vscode(text_conflicts, force_2way, staging)
+        except subprocess.CalledProcessError as e:
+            cmd = " ".join(e.cmd[-3:]) if e.cmd else "git"
+            err = (e.stderr or b"").decode(errors="replace").strip()
+            print(f"failed to stage conflicts ({cmd}): {err}",
+                  file=sys.stderr)
+            return 1
 
-    return 0
+        # Install the shedman-merge-helper extension via
+        # `code --install-extension <vsix>` so VS Code auto-loads it
+        # on the upcoming window open. The extension focuses the SCM
+        # panel for workspaces that contain a .shedman/ marker (i.e.
+        # ours), and no-ops everywhere else.
+        _ensure_vscode_extension(code)
+
+        # Identify the first conflicted file (any with markers from
+        # git merge) — we'll pre-open its merge editor via a separate
+        # `code --reuse-window --merge` call after the workspace
+        # window is up. Subsequent files: user clicks them in the SCM
+        # panel (those clicks open the merge editor directly).
+        first_conflicted: Optional[Conflict] = None
+        for c in text_conflicts:
+            if _CONFLICT_MARKER_RE.search(
+                    pre[c.relpath].decode(errors="replace")):
+                first_conflicted = c
+                break
+
+        first_merge_argv: list[str] = []
+        if first_conflicted is not None:
+            sidecar_dir = staging / ".shedman" / "sources"
+            sidecar_dir.mkdir(parents=True, exist_ok=True)
+            relp = Path(first_conflicted.relpath)
+            suffix = relp.suffix
+            stem = relp.stem if suffix else relp.name
+            y = sidecar_dir / f"{stem}.YOURS{suffix}"
+            t = sidecar_dir / f"{stem}.THEIRS{suffix}"
+            b = sidecar_dir / f"{stem}.BASE{suffix}"
+            shutil.copy2(first_conflicted.yours_path, y)
+            shutil.copy2(first_conflicted.theirs_path, t)
+            if first_conflicted.has_base and not force_2way:
+                blob = CONTENT_ROOT / first_conflicted.relpath
+                shutil.copy2(
+                    blob if blob.is_file() else first_conflicted.yours_path, b)
+            else:
+                shutil.copy2(first_conflicted.yours_path, b)
+            first_merge_argv = [
+                code, "--reuse-window", "--merge",
+                str(y), str(t), str(b),
+                str(staging / first_conflicted.relpath),
+            ]
+
+        print(f"Opening VS Code with {len(text_conflicts)} conflict(s). "
+              f"Click each file in the Source Control panel to open it "
+              f"in the merge editor. Close the window when done.",
+              file=sys.stderr)
+
+        try:
+            proc = subprocess.Popen(
+                [code, "--new-window", "--wait", str(staging)],
+            )
+        except OSError as e:
+            print(f"failed to launch {code}: {e}", file=sys.stderr)
+            return 1
+
+        # Pre-open the first conflict in the merge editor after the
+        # workspace window has had a moment to initialise. This adds
+        # a single --merge tab so the user lands ON a merge editor
+        # straight away; the extension handles the SCM panel focus.
+        if first_merge_argv:
+            time.sleep(1.5)
+            try:
+                subprocess.run(first_merge_argv, check=False, timeout=5)
+            except (OSError, subprocess.SubprocessError):
+                pass
+
+        try:
+            proc.wait()
+        except KeyboardInterrupt:
+            proc.terminate()
+            proc.wait()
+
+        # Decide what happened to each file after VS Code closed.
+        # Markerless final content means git auto-merged cleanly OR the
+        # user resolved the conflict in the merge editor — both are
+        # committable. Markers still present means the user either (a)
+        # didn't open the file and left git's initial conflict state
+        # alone (cur == pre, keep .shedosnew for re-run), or (b) edited
+        # the file but didn't finish the resolution (warn + skip).
+        saved = marker_skipped = unchanged = 0
+        for c in text_conflicts:
+            result = staging / c.relpath
+            try:
+                cur = result.read_bytes()
+            except OSError:
+                continue
+            if not _has_conflict_markers(result):
+                try:
+                    save_merged_from_bytes(c, cur)
+                    saved += 1
+                except OSError as e:
+                    print(f"save failed for {c.relpath}: {e}",
+                          file=sys.stderr)
+                continue
+            if cur == pre[c.relpath]:
+                unchanged += 1
+                continue
+            print(f"warning: {c.relpath} contains conflict markers; "
+                  f"leaving .shedosnew in place. Re-run after cleanup.",
+                  file=sys.stderr)
+            marker_skipped += 1
+
+        summary = []
+        if saved:
+            summary.append(f"{saved} saved")
+        if unchanged:
+            summary.append(f"{unchanged} unchanged (.shedosnew kept for re-run)")
+        if marker_skipped:
+            summary.append(f"{marker_skipped} skipped due to conflict markers")
+        if summary:
+            print("VS Code review complete: " + ", ".join(summary) + ".",
+                  file=sys.stderr)
+
+        # Refresh the waybar conflict count. Best-effort, mirrors save_merged.
+        try:
+            subprocess.run(
+                ["/usr/bin/shedman", "conflicts", "--refresh-waybar"],
+                check=False, timeout=2,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+        except (OSError, subprocess.SubprocessError):
+            pass
+
+        return 0
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
 
 
 def sweep_leftover_tmps() -> int:
@@ -1988,7 +2440,9 @@ def main(argv: Optional[list[str]] = None) -> int:
                       file=sys.stderr)
                 return 1
 
-        # Decide backend: explicit flag wins, else auto-detect.
+        # Decide backend: explicit flag wins, else auto-detect. The
+        # missing-binary fallback to TUI happens inside _run_vscode so an
+        # explicit --gui still works without crashing.
         if args.tui:
             backend = "tui"
         elif args.gui:
@@ -1997,7 +2451,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             backend = "gui" if _prefer_gui() else "tui"
 
         if backend == "gui":
-            return _run_meld(conflicts, force_2way=args.two_way)
+            return _run_vscode(conflicts, force_2way=args.two_way)
 
         if not sys.stdin.isatty() or not sys.stdout.isatty():
             print("shedman config --review: interactive TUI requires a terminal. "

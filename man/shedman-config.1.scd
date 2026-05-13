@@ -34,23 +34,30 @@ conflicts.
 
 *-r*, *--review*
 	Open the merge UI for every _.shedosnew_ sidecar in $HOME. Two
-	backends are available: a Textual TUI and a Meld GUI. When a
-	display is available and *meld* is installed the GUI runs by
-	default; otherwise the TUI runs. Force a backend with *--gui*
-	or *--tui*.
+	backends are available: a Textual TUI and a VS Code GUI. When a
+	display is available and *code* (or *codium*) is on $PATH the
+	GUI runs by default; otherwise the TUI runs. Force a backend
+	with *--gui* or *--tui*. If *--gui* is requested but no VS Code
+	binary is found, the TUI runs with a notice on stderr.
 
 	TUI: per-hunk decisions y (yours), t (theirs), b (both YT), B
 	(both TY), x (skip), u (undo); whole-file shortcuts A (all
 	yours), T (all theirs); save with *s*. The entry screen groups
 	conflicts by directory as a tree; *n* / *p* jump between files.
 
-	GUI (Meld): conflicts are staged into yours/, base/ and theirs/
-	trees and opened as a folder comparison. 3-way and 2-way
-	(BASE-missing) groups open in separate Meld windows. After Meld
-	exits, modified yours/ files are copied back to $HOME; any file
-	containing conflict markers is skipped and its _.shedosnew_
-	kept for re-run. Non-text conflicts (binary, symlink, orphan,
-	missing-yours) are reported and require the TUI.
+	GUI (VS Code): conflicts are staged into a temporary workspace
+	with the result files at their natural relpath and the
+	comparison sources hidden under _.shedman/_. VS Code opens with
+	the Explorer panel visible and one merge-editor tab per
+	conflict. Workspace trust is disabled and Catppuccin Mocha
+	colours are applied to the merge editor via the workspace's
+	_.vscode/settings.json_. After every tab is closed, modified
+	result files are copied back to $HOME; any file containing
+	conflict markers is skipped and its _.shedosnew_ kept for
+	re-run. 2-way conflicts (BASE missing) are synthesised as
+	base=yours so the editor's four-input contract is satisfied.
+	Non-text conflicts (binary, symlink, orphan, missing-yours)
+	are reported and require the TUI.
 
 	Both backends write _<file>.shedosbak_ before replacing the
 	live file and advance the manifest atomically on save.
