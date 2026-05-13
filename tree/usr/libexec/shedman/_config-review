@@ -1883,7 +1883,8 @@ def _load_textual_ui() -> None:
         _log(f"textual import failed: {e}")
         return
 
-    # --- Theme (Catppuccin Mocha) -----------------------------------------
+    # PALETTE is keyed by hue; the syntax tokeniser maps Pygments token
+    # classes to these keys and the renderer resolves the hex from here.
     PALETTE = {
         "base": "#1e1e2e", "mantle": "#181825", "surface0": "#313244",
         "text": "#cdd6f4", "overlay0": "#6c7086",
@@ -1891,53 +1892,82 @@ def _load_textual_ui() -> None:
         "blue": "#89b4fa", "mauve": "#cba6f7",
     }
 
-    APP_CSS = """
-    Screen { background: #1e1e2e; color: #cdd6f4; }
-    Header { background: #181825; color: #89b4fa; }
-    Footer { background: #181825; color: #6c7086; }
+    @dataclass(frozen=True)
+    class Theme:
+        bg: str
+        panel: str
+        surface: str
+        text: str
+        dim: str
+        added: str
+        removed: str
+        warning: str
+        accent: str
+        both: str
 
-    #banner { dock: top; height: 1; background: #181825; color: #89b4fa; padding: 0 1; }
-    #banner.two-way { background: #f9e2af; color: #1e1e2e; }
+    CATPPUCCIN_MOCHA = Theme(
+        bg=PALETTE["base"],
+        panel=PALETTE["mantle"],
+        surface=PALETTE["surface0"],
+        text=PALETTE["text"],
+        dim=PALETTE["overlay0"],
+        added=PALETTE["green"],
+        removed=PALETTE["red"],
+        warning=PALETTE["yellow"],
+        accent=PALETTE["blue"],
+        both=PALETTE["mauve"],
+    )
 
-    #hunk-strip { dock: bottom; height: 1; background: #181825; color: #cdd6f4; padding: 0 1; }
-    #hint-bar  { dock: bottom; height: 1; background: #181825; color: #6c7086; padding: 0 1; }
+    # Active theme. Swap this assignment to drop in a new palette.
+    THEME = CATPPUCCIN_MOCHA
 
-    .pane { border: round #313244; padding: 0; width: 1fr; height: 1fr;
-            overflow-x: auto; overflow-y: auto; }
-    .pane.wrap { overflow-x: hidden; }
-    .pane.focus { border: round #89b4fa; }
-    .pane-title { background: #313244; color: #89b4fa; padding: 0 1; }
-    #merge-row { height: 1fr; }
-    .pane-yours  { border-title-color: #a6e3a1; border-title-align: left; }
-    .pane-base   { border-title-color: #f9e2af; border-title-align: left; }
-    .pane-theirs { border-title-color: #f38ba8; border-title-align: left; }
+    APP_CSS = f"""
+    Screen {{ background: {THEME.bg}; color: {THEME.text}; }}
+    Header {{ background: {THEME.panel}; color: {THEME.accent}; }}
+    Footer {{ background: {THEME.panel}; color: {THEME.dim}; }}
 
-    .add { color: #a6e3a1; }
-    .del { color: #f38ba8; }
-    .ctx { color: #cdd6f4; }
-    .ctx-dim { color: #6c7086; }
-    .cursor-line { background: #313244; }
-    .decided-yours { color: #a6e3a1; }
-    .decided-theirs { color: #f38ba8; }
-    .decided-both { color: #cba6f7; }
+    #banner {{ dock: top; height: 1; background: {THEME.panel}; color: {THEME.accent}; padding: 0 1; }}
+    #banner.two-way {{ background: {THEME.warning}; color: {THEME.bg}; }}
 
-    DataTable { background: #1e1e2e; }
-    DataTable > .datatable--header { background: #181825; color: #89b4fa; }
-    DataTable > .datatable--cursor { background: #313244; color: #cdd6f4; }
+    #hunk-strip {{ dock: bottom; height: 1; background: {THEME.panel}; color: {THEME.text}; padding: 0 1; }}
+    #hint-bar  {{ dock: bottom; height: 1; background: {THEME.panel}; color: {THEME.dim}; padding: 0 1; }}
 
-    ModalScreen { align: center middle; }
-    .dialog { border: thick #89b4fa; background: #181825; width: 60; height: auto;
-              padding: 1 2; }
-    .dialog-title { color: #89b4fa; text-style: bold; }
-    .dialog-hint { color: #6c7086; }
+    .pane {{ border: round {THEME.surface}; padding: 0; width: 1fr; height: 1fr;
+            overflow-x: auto; overflow-y: auto; }}
+    .pane.wrap {{ overflow-x: hidden; }}
+    .pane.focus {{ border: round {THEME.accent}; }}
+    .pane-title {{ background: {THEME.surface}; color: {THEME.accent}; padding: 0 1; }}
+    #merge-row {{ height: 1fr; }}
+    .pane-yours  {{ border-title-color: {THEME.added};   border-title-align: left; }}
+    .pane-base   {{ border-title-color: {THEME.warning}; border-title-align: left; }}
+    .pane-theirs {{ border-title-color: {THEME.removed}; border-title-align: left; }}
 
-    #raw-diff-scroll {
-        border: thick #89b4fa;
-        background: #181825;
+    .add {{ color: {THEME.added}; }}
+    .del {{ color: {THEME.removed}; }}
+    .ctx {{ color: {THEME.text}; }}
+    .ctx-dim {{ color: {THEME.dim}; }}
+    .cursor-line {{ background: {THEME.surface}; }}
+    .decided-yours  {{ color: {THEME.added}; }}
+    .decided-theirs {{ color: {THEME.removed}; }}
+    .decided-both   {{ color: {THEME.both}; }}
+
+    DataTable {{ background: {THEME.bg}; }}
+    DataTable > .datatable--header {{ background: {THEME.panel}; color: {THEME.accent}; }}
+    DataTable > .datatable--cursor {{ background: {THEME.surface}; color: {THEME.text}; }}
+
+    ModalScreen {{ align: center middle; }}
+    .dialog {{ border: thick {THEME.accent}; background: {THEME.panel}; width: 60; height: auto;
+              padding: 1 2; }}
+    .dialog-title {{ color: {THEME.accent}; text-style: bold; }}
+    .dialog-hint {{ color: {THEME.dim}; }}
+
+    #raw-diff-scroll {{
+        border: thick {THEME.accent};
+        background: {THEME.panel};
         width: 95%;
         height: 90%;
         padding: 1 2;
-    }
+    }}
     """
 
     class Banner(Static):
@@ -1959,13 +1989,13 @@ def _load_textual_ui() -> None:
                 elif h.decision is None:
                     chars.append("○")
                 elif h.decision in (Side.BOTH_YT, Side.BOTH_TY):
-                    chars.append("[#cba6f7]●[/]")
+                    chars.append(f"[{THEME.both}]●[/]")
                 elif h.decision == Side.YOURS:
-                    chars.append("[#a6e3a1]●[/]")
+                    chars.append(f"[{THEME.added}]●[/]")
                 elif h.decision == Side.THEIRS:
-                    chars.append("[#f38ba8]●[/]")
+                    chars.append(f"[{THEME.removed}]●[/]")
                 else:
-                    chars.append("[#6c7086]●[/]")
+                    chars.append(f"[{THEME.dim}]●[/]")
             dots = " ".join(chars)
             legend = "  (● resolved  ◉ current  ○ pending)"
             # Cap total width to terminal columns using east-asian-aware math
@@ -2044,25 +2074,24 @@ def _load_textual_ui() -> None:
 
     def _render_cell(cell: Cell, is_hunk: bool, is_current: bool) -> Text:
         line = Text()
-        bg = PALETTE["surface0"] if is_current else None
+        bg = THEME.surface if is_current else None
 
         # Pick foreground + marker by tag.
         if cell.tag == "add":
-            fg, marker = PALETTE["green"],  " + "
+            fg, marker = THEME.added,   " + "
         elif cell.tag == "del":
-            fg, marker = PALETTE["red"],    " - "
+            fg, marker = THEME.removed, " - "
         elif cell.tag == "und":
-            fg, marker = PALETTE["yellow"], " ? "
+            fg, marker = THEME.warning, " ? "
         elif cell.tag == "ctx":
-            fg, marker = PALETTE["overlay0"], "   "
+            fg, marker = THEME.dim,     "   "
         else:  # "equal"
-            fg, marker = (PALETTE["text"] if is_hunk else PALETTE["overlay0"]), "   "
+            fg, marker = (THEME.text if is_hunk else THEME.dim), "   "
 
         style = f"{fg} on {bg}" if bg else fg
 
         if cell.text is None:
-            dim_fg = PALETTE["overlay0"]
-            dim_style = f"{dim_fg} on {bg}" if bg else dim_fg
+            dim_style = f"{THEME.dim} on {bg}" if bg else THEME.dim
             line.append(" " * GUTTER_WIDTH, style=dim_style)
             line.append(" ~ ", style=dim_style)
             line.append("\n", style=dim_style)
@@ -2210,23 +2239,23 @@ MERGE SCREEN
             if not diff:
                 body.append(
                     "(no textual difference between YOURS and THEIRS)\n",
-                    style=PALETTE["overlay0"],
+                    style=THEME.dim,
                 )
             for line in diff:
                 if line.startswith("+++") or line.startswith("---"):
-                    style = f"bold {PALETTE['blue']}"
+                    style = f"bold {THEME.accent}"
                 elif line.startswith("@@"):
-                    style = f"bold {PALETTE['mauve']}"
+                    style = f"bold {THEME.both}"
                 elif line.startswith("+"):
-                    style = PALETTE["green"]
+                    style = THEME.added
                 elif line.startswith("-"):
-                    style = PALETTE["red"]
+                    style = THEME.removed
                 else:
-                    style = PALETTE["text"]
+                    style = THEME.text
                 body.append(line + "\n", style=style)
             body.append(
                 "\n[esc/q/d to close]\n",
-                style=PALETTE["overlay0"],
+                style=THEME.dim,
             )
             scroller = VerticalScroll(
                 Static(body, expand=True),
@@ -2250,8 +2279,8 @@ MERGE SCREEN
         ]
 
         def compose(self) -> ComposeResult:
-            markup = (f"[b #89b4fa]{self._title}[/]\n\n{self._body}\n\n"
-                      f"[#6c7086]({'Y/n' if self._default_yes else 'y/N'})[/]")
+            markup = (f"[b {THEME.accent}]{self._title}[/]\n\n{self._body}\n\n"
+                      f"[{THEME.dim}]({'Y/n' if self._default_yes else 'y/N'})[/]")
             yield Static(Text.from_markup(markup), classes="dialog")
 
         def action_answer_yes(self) -> None: self.dismiss(True)
@@ -2273,8 +2302,8 @@ MERGE SCREEN
 
         def compose(self) -> ComposeResult:
             title = Text.from_markup(
-                "[b #89b4fa]Filter conflicts[/]\n"
-                "[#6c7086](substring match on relpath; empty to clear; "
+                f"[b {THEME.accent}]Filter conflicts[/]\n"
+                f"[{THEME.dim}](substring match on relpath; empty to clear; "
                 "Esc to cancel)[/]\n"
             )
             yield Static(title, classes="dialog")
@@ -2342,7 +2371,7 @@ MERGE SCREEN
                 hunks = "-"
                 if c.kind == "text":
                     hunks = str(c.hunk_count) if c.hunk_count >= 0 else "?"
-                base = ("yes" if c.has_base else ("-" if c.kind != "text" else "[#f9e2af]no[/]"))
+                base = ("yes" if c.has_base else ("-" if c.kind != "text" else f"[{THEME.warning}]no[/]"))
                 self.table.add_row(str(i), c.relpath, kind, hunks,
                                    _human_size(c.size), base)
             banner = self.query_one("#banner", Banner)
@@ -2352,7 +2381,7 @@ MERGE SCREEN
                 banner.update(
                     f"shedman config --review  —  {len(visible)}/{total} "
                     f"conflict(s) ({bin_n} binary)   "
-                    f"filter=[b #f9e2af]{self._filter}[/]   "
+                    f"filter=[b {THEME.warning}]{self._filter}[/]   "
                     f"/ edit  esc clear   ? help   q quit")
             else:
                 banner.update(
