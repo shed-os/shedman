@@ -15,6 +15,15 @@
 #   EXPECT_AUTO_RESOLVED=1   the conflict resolves before the interactive
 #                            flow (auto_resolve_identical). Skips the
 #                            .shedosbak presence check; no save flow ran.
+#   EXPECT_SKIPPED=1         the conflict is non-text (binary, oversized,
+#                            orphan, etc.) and is left for the user to
+#                            handle manually. Inverts the .shedosnew
+#                            removal check (must REMAIN), skips the
+#                            .shedosbak / manifest / BASE-content checks.
+#                            Any env var prefixed `SHEDOS_FIXTURE_` is
+#                            re-exported (without the prefix) into the
+#                            tool run, so the fixture can drive things
+#                            like SHEDOS_LARGE_FILE_LINES.
 #
 # The harness builds a disposable $HOME + state tree, lays the files in the
 # paths the real tool expects, runs shedos-review-configs with
@@ -64,7 +73,7 @@ _run_one() {
     }
 
     # shellcheck disable=SC1091
-    local PKG="" RELPATH="" EXPECT_AUTO_RESOLVED=""
+    local PKG="" RELPATH="" EXPECT_AUTO_RESOLVED="" EXPECT_SKIPPED=""
     source "$fdir/fixture.sh"
     if [[ -z $PKG || -z $RELPATH ]]; then
         echo "FAIL $name: fixture.sh must set PKG and RELPATH"
@@ -98,12 +107,22 @@ _run_one() {
         install -Dm600 "$fdir/base" "$state/shedos/last-seen-content/$RELPATH"
     fi
 
+    # Forward any SHEDOS_FIXTURE_* env vars as SHEDOS_* into the tool run
+    # so fixtures can drive things like SHEDOS_LARGE_FILE_LINES.
+    local extra_env=()
+    local v
+    while IFS= read -r v; do
+        [[ -z $v ]] && continue
+        extra_env+=("SHEDOS_${v#SHEDOS_FIXTURE_}=${!v}")
+    done < <(compgen -A variable SHEDOS_FIXTURE_ 2>/dev/null || true)
+
     # Run the tool.
     local out
     if ! out=$(
         HOME=$home \
         XDG_STATE_HOME=$state \
         SHEDOS_DEFAULTS_ROOT=$defaults \
+        env "${extra_env[@]}" \
         "$tool" --stdin-decisions < "$fdir/decisions" 2>&1
     ); then
         echo "FAIL $name: tool exited non-zero"
@@ -119,6 +138,21 @@ _run_one() {
         diff -u "$fdir/expected" "$home/$RELPATH" | sed 's/^/    /' | head -40
         failures+=("$name")
         ((fail++))
+        return
+    fi
+
+    if [[ ${EXPECT_SKIPPED:-0} == "1" ]]; then
+        # Non-text conflict (oversized, binary, etc.): .shedosnew must
+        # REMAIN for the user to handle manually. No bak/manifest/BASE
+        # checks — the merge flow never ran for this file.
+        if [[ ! -e $home/$RELPATH.shedosnew ]]; then
+            echo "FAIL $name: .shedosnew expected to remain but is gone"
+            failures+=("$name")
+            ((fail++))
+            return
+        fi
+        echo "PASS $name"
+        ((pass++))
         return
     fi
 
