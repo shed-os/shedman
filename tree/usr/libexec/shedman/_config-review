@@ -619,6 +619,9 @@ def extract_hunks_3way(base: list[str], yours: list[str],
             h.decision = Side.YOURS
         elif kind == "theirs-only":
             h.decision = Side.THEIRS
+        elif kind == "both-changed" and h.yours_lines == h.theirs_lines:
+            # Identical edit on both sides; either pick yields the same output.
+            h.decision = Side.YOURS
         hunks.append(h)
     return hunks
 
