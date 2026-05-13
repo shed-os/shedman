@@ -11,6 +11,11 @@
 #   decisions       token stream for --stdin-decisions (one per line)
 #   expected        expected merged bytes AFTER 's' token is consumed
 #
+# fixture.sh may also set:
+#   EXPECT_AUTO_RESOLVED=1   the conflict resolves before the interactive
+#                            flow (auto_resolve_identical). Skips the
+#                            .shedosbak presence check; no save flow ran.
+#
 # The harness builds a disposable $HOME + state tree, lays the files in the
 # paths the real tool expects, runs shedos-review-configs with
 # --stdin-decisions, and compares the resulting live file byte-for-byte with
@@ -59,7 +64,7 @@ _run_one() {
     }
 
     # shellcheck disable=SC1091
-    local PKG="" RELPATH=""
+    local PKG="" RELPATH="" EXPECT_AUTO_RESOLVED=""
     source "$fdir/fixture.sh"
     if [[ -z $PKG || -z $RELPATH ]]; then
         echo "FAIL $name: fixture.sh must set PKG and RELPATH"
@@ -125,13 +130,16 @@ _run_one() {
         return
     fi
 
-    # .shedosbak must hold the pre-merge YOURS.
-    if [[ ! -f $home/$RELPATH.shedosbak ]] || \
-       ! cmp -s "$home/$RELPATH.shedosbak" "$fdir/yours"; then
-        echo "FAIL $name: .shedosbak missing or not equal to pre-merge YOURS"
-        failures+=("$name")
-        ((fail++))
-        return
+    # .shedosbak must hold the pre-merge YOURS. Skipped for auto-resolved
+    # fixtures because no save flow ran.
+    if [[ ${EXPECT_AUTO_RESOLVED:-0} != "1" ]]; then
+        if [[ ! -f $home/$RELPATH.shedosbak ]] || \
+           ! cmp -s "$home/$RELPATH.shedosbak" "$fdir/yours"; then
+            echo "FAIL $name: .shedosbak missing or not equal to pre-merge YOURS"
+            failures+=("$name")
+            ((fail++))
+            return
+        fi
     fi
 
     # Manifest must have been advanced: sha matches sha(src), BASE content
