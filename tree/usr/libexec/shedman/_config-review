@@ -1584,6 +1584,9 @@ def _run_stdin_decisions(conflicts: list[Conflict], *, force_2way: bool,
                 # Ambiguous (THEIRS single-hunk vs take-all-THEIRS); in stdin
                 # harness we treat 'T' as per-hunk take-theirs and 'TT' as
                 # take-all-theirs to avoid the clash.
+                while (hunk_idx < len(state.hunks)
+                       and state.hunks[hunk_idx].decision is not None):
+                    hunk_idx += 1
                 if hunk_idx < len(state.hunks):
                     state.hunks[hunk_idx].decision = Side.THEIRS
                     hunk_idx += 1
@@ -1596,6 +1599,15 @@ def _run_stdin_decisions(conflicts: list[Conflict], *, force_2way: bool,
                 side = Side(tok)
             except ValueError:
                 continue
+            # Skip hunks the classifier already decided (yours-only,
+            # theirs-only, identical-edit). User tokens only target hunks
+            # that still need a real decision; a missing token on a hunk
+            # that should have been auto-decided trips UnresolvedHunk at
+            # save time, which fails the test — exactly the regression
+            # signal we want.
+            while (hunk_idx < len(state.hunks)
+                   and state.hunks[hunk_idx].decision is not None):
+                hunk_idx += 1
             if hunk_idx < len(state.hunks):
                 state.hunks[hunk_idx].decision = side
                 hunk_idx += 1
