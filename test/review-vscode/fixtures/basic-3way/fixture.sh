@@ -1,0 +1,5 @@
+PKG=hypr
+RELPATH=.config/hypr/hyprland.conf
+
+EXPECT_SAVED=1
+EXPECT_WAIT_INVOCATIONS=1
