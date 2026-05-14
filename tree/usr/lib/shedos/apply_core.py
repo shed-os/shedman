@@ -2801,7 +2801,7 @@ def plan_kernel_cmdline(cfg: ValidatedConfig) -> list[Change]:
     # currently-declared (or adopted) tokens are present. That way each
     # entry keeps its own install-time tokens (e.g. the fallback's
     # bare-essentials root=/rootflags=/rw) while sharing the declared
-    # additions like fbcon=nodefer,map:99.
+    # additions like fbcon=nodefer.
     #
     # We use re.sub with a callable rather than str.replace because a
     # fallback whose tokens are a strict prefix of the primary's
