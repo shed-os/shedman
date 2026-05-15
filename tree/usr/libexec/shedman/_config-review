@@ -3210,6 +3210,75 @@ MERGE SCREEN
                 self._filter = ""
                 self.refresh_tree()
 
+    # ---------- Decision modal ----------
+    class DecisionModal(ModalScreen[Optional[Side]]):
+        """Decision overlay for the current hunk.
+
+        Shows the four resolution outcomes side by side with mini-previews
+        of the actual content each would produce. Returns the chosen Side
+        via dismiss(), or None on Esc.
+        """
+
+        BINDINGS = [
+            Binding("y,Y",    "decide_yours",    "yours"),
+            Binding("t,T",    "decide_theirs",   "theirs"),
+            Binding("b",      "decide_both_yt",  "both Y→T"),
+            Binding("B",      "decide_both_ty",  "both T→Y"),
+            Binding("escape", "cancel",          "cancel"),
+        ]
+
+        PREVIEW_LINES = 6
+
+        def __init__(self, hunk: Hunk, state: MergeState) -> None:
+            super().__init__()
+            self.hunk = hunk
+            self.state = state
+
+        def _preview_lines(self, lines: list[str]) -> list[str]:
+            # Clip a hunk-side's lines to PREVIEW_LINES, adding a footer
+            # row when there's more content below.
+            if len(lines) <= self.PREVIEW_LINES:
+                return [l.rstrip("\n") for l in lines]
+            kept = [l.rstrip("\n") for l in lines[: self.PREVIEW_LINES]]
+            kept.append(f"  … (+{len(lines) - self.PREVIEW_LINES} more lines)")
+            return kept
+
+        def _both_preview(self, first: list[str], second: list[str]) -> list[str]:
+            return self._preview_lines(first + second)
+
+        def compose(self) -> ComposeResult:
+            h = self.hunk
+            state = self.state
+            title = (f"Resolve hunk {h.index+1} of {len(state.hunks)} · "
+                     f"{state.relpath}:{h.yours_start+1}")
+            yours_preview  = self._preview_lines(h.yours_lines)
+            theirs_preview = self._preview_lines(h.theirs_lines)
+            both_yt        = self._both_preview(h.yours_lines, h.theirs_lines)
+            both_ty        = self._both_preview(h.theirs_lines, h.yours_lines)
+
+            def block(key: str, label: str, preview: list[str]) -> str:
+                indented = "\n".join("      " + l for l in preview)
+                return f"\n  [b]{key}[/b]  {label}\n{indented}\n"
+
+            body = (
+                block("[Y]",  "Keep YOURS",                       yours_preview)
+                + block("[T]",  "Take THEIRS  ← upstream",          theirs_preview)
+                + block("[B]",  "Keep BOTH (yours first)",          both_yt)
+                + block("[⇧B]", "Keep BOTH (theirs first)",         both_ty)
+                + "\n          Y · T · B · Shift+B   ·   Esc to cancel\n"
+            )
+            yield Vertical(
+                Static(title, id="modal-title"),
+                Static(body, id="modal-body"),
+                id="decision-modal",
+            )
+
+        def action_decide_yours(self) -> None:    self.dismiss(Side.YOURS)
+        def action_decide_theirs(self) -> None:   self.dismiss(Side.THEIRS)
+        def action_decide_both_yt(self) -> None:  self.dismiss(Side.BOTH_YT)
+        def action_decide_both_ty(self) -> None:  self.dismiss(Side.BOTH_TY)
+        def action_cancel(self) -> None:          self.dismiss(None)
+
     # ---------- Merge screen ----------
     class MergeScreen(Screen):
         # Navigation split:
