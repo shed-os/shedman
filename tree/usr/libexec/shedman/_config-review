@@ -2142,7 +2142,7 @@ def delete_draft(relpath: str) -> None:
 
 # Module-level reference to the currently-active merge so a signal handler
 # (SIGTERM / SIGHUP) can flush the in-progress decisions to a draft before
-# the process is killed. Populated from MergeScreen.on_mount and cleared in
+# the process is killed. Populated from ReviewScreen.on_mount and cleared in
 # on_unmount. A list is used so subordinate scopes can mutate it without
 # the `global` keyword.
 _active_merge_ref: list = []
@@ -2165,9 +2165,8 @@ def install_signal_handlers() -> None:
     """Install SIGTERM + SIGHUP handlers that flush a draft on forced exit.
 
     SIGINT (Ctrl-C) is owned by Textual — its priority binding routes to
-    ``action_quit``, which in turn triggers ``MergeScreen.action_cancel``
-    on the active screen and already saves a draft. This function covers
-    only the non-interactive kills.
+    ``action_quit``, which saves a draft via ReviewScreen before exit.
+    This function covers only the non-interactive kills.
     """
     for sig_name in ("SIGTERM", "SIGHUP"):
         sig = getattr(signal, sig_name, None)
@@ -2979,9 +2978,9 @@ def _load_textual_ui() -> None:
 
         ``can_focus = False`` is critical: ``VerticalScroll`` is focusable
         by default, and when a pane has focus it intercepts arrow/scroll
-        keys and our decision keys (y/t/b/B/x) before the MergeScreen
-        bindings get a chance to fire. Keeping focus on the screen lets
-        every key route through screen-level BINDINGS.
+        keys and our decision keys (y/t/b/B/x) before the MergePanel
+        bindings get a chance to fire. Keeping focus on the widget lets
+        every key route through BINDINGS.
         """
 
         can_focus = False
@@ -3151,11 +3150,9 @@ MERGE SCREEN
     class FileTreePanel(Vertical):
         """Left-docked side panel hosting the conflict file tree.
 
-        Same widget surface as FileTreeScreen — same Tree widget,
-        same status icons, same key bindings — but lives inside a
-        screen instead of being a top-level screen. On Enter, posts
-        a FilePicked(conflict) message that the parent screen
-        handles by swapping app.merge_state.
+        Hosts the Tree widget, status icons, and key bindings. On Enter,
+        posts a FilePicked(conflict) message that ReviewScreen handles
+        by loading the conflict into MergePanel.
         """
 
         can_focus = True
@@ -3345,8 +3342,7 @@ MERGE SCREEN
         """Right-region widget: top Y|T row + bottom RESULT preview.
 
         Pressing v toggles the Y|T row's visibility (#merge-top.hidden);
-        when hidden the RESULT pane fills the merge area (the old
-        SinglePaneScreen experience).
+        when hidden the RESULT pane fills the merge area as a single-pane view.
         """
 
         can_focus = True
@@ -3734,211 +3730,6 @@ MERGE SCREEN
             if rc != 0:
                 _log(f"editor exited {rc}")
 
-    # ---------- File tree screen ----------
-    class FileTreeScreen(Screen):
-        # Tree widget owns Enter/arrow keys before screen-level bindings
-        # fire, so vim-style nav is routed through the tree's own actions.
-        # `n`/`p` walk between leaves (skipping directories) — the per-file
-        # navigation users actually want when batching through conflicts.
-        BINDINGS = [
-            Binding("j,down",           "cursor_down",       "↓"),
-            Binding("k,up",             "cursor_up",         "↑"),
-            Binding("n",                "next_leaf",         "next file"),
-            Binding("p",                "prev_leaf",         "prev file"),
-            Binding("g",                "cursor_top",        "top"),
-            Binding("G",                "cursor_bottom",     "bot"),
-            Binding("l,right,enter",    "activate",          "open"),
-            Binding("a",                "accept_all_theirs", "take-theirs-all"),
-            Binding("K",                "keep_all_yours",    "keep-yours-all"),
-            Binding("r",                "refresh",           "refresh"),
-            Binding("slash",            "filter",            "filter"),
-            Binding("escape",           "clear_filter",      "clear filter"),
-            Binding("question_mark,f1", "help",              "help"),
-            Binding("q",                "quit",              "quit"),
-        ]
-
-        def __init__(self, app_ref: "ReviewApp") -> None:
-            super().__init__()
-            self._app_ref = app_ref
-            self._filter = ""
-
-        def compose(self) -> ComposeResult:
-            yield Banner("shedman config --review")
-            self._tree: Tree = Tree("conflicts", id="conflict-tree")
-            self._tree.show_root = False
-            self._tree.guide_depth = 2
-            yield self._tree
-            yield Footer()
-
-        def on_mount(self) -> None:
-            self.refresh_tree()
-            self._tree.focus()
-
-        def _visible_conflicts(self) -> list[Conflict]:
-            if not self._filter:
-                return list(self._app_ref.conflicts)
-            q = self._filter.lower()
-            return [c for c in self._app_ref.conflicts if q in c.relpath.lower()]
-
-        def _leaf_label(self, c: Conflict, filename: str):
-            label = Text(filename)
-            if c.kind == "text":
-                if c.has_base:
-                    hunks = c.hunk_count if c.hunk_count >= 0 else "?"
-                    label.append(f"  [3-way • {hunks} hunks]", style=THEME.dim)
-                else:
-                    label.append("  [2-way • BASE missing]", style=THEME.warning)
-            else:
-                label.append(f"  [{c.kind}]", style=THEME.dim)
-            return label
-
-        def refresh_tree(self) -> None:
-            self._tree.clear()
-            dir_nodes: dict[str, TreeNode] = {"": self._tree.root}
-            for c in sorted(self._visible_conflicts(), key=lambda x: x.relpath):
-                parts = c.relpath.split("/")
-                parent = self._tree.root
-                current = ""
-                for part in parts[:-1]:
-                    current = f"{current}/{part}" if current else part
-                    if current not in dir_nodes:
-                        new_dir = parent.add(f"{part}/", data=None, expand=True)
-                        dir_nodes[current] = new_dir
-                    parent = dir_nodes[current]
-                parent.add_leaf(self._leaf_label(c, parts[-1]), data=c)
-            self._update_banner()
-
-        def _update_banner(self) -> None:
-            banner = self.query_one("#banner", Banner)
-            total = len(self._app_ref.conflicts)
-            visible = self._visible_conflicts()
-            bin_n = sum(1 for c in self._app_ref.conflicts if c.kind == "binary")
-            if self._filter:
-                banner.update(
-                    f"shedman config --review  —  {len(visible)}/{total} "
-                    f"conflict(s) ({bin_n} binary)   "
-                    f"filter=[b {THEME.warning}]{self._filter}[/]   "
-                    f"/ edit  esc clear   ? help   q quit")
-            else:
-                banner.update(
-                    f"shedman config --review  —  {total} conflict(s) "
-                    f"({bin_n} binary)   n/p file   / filter   ? help   q quit")
-
-        def _visible_leaves(self) -> list[TreeNode]:
-            # DFS from root, honouring expansion state: a collapsed dir's
-            # leaves are not visible, so n/p shouldn't visit them.
-            out: list[TreeNode] = []
-            def walk(node: TreeNode) -> None:
-                for child in node.children:
-                    if child.data is not None:
-                        out.append(child)
-                    elif child.is_expanded:
-                        walk(child)
-            walk(self._tree.root)
-            return out
-
-        def action_quit(self) -> None:
-            self.app.exit()
-
-        def action_cursor_down(self) -> None:
-            self._tree.action_cursor_down()
-
-        def action_cursor_up(self) -> None:
-            self._tree.action_cursor_up()
-
-        def action_cursor_top(self) -> None:
-            self._tree.move_cursor_to_line(0)
-
-        def action_cursor_bottom(self) -> None:
-            # Last visible node = deepest right-most descendant of expanded chain.
-            node = self._tree.root
-            while node.children and (node is self._tree.root or node.is_expanded):
-                node = node.children[-1]
-            if node is not self._tree.root:
-                self._tree.move_cursor(node)
-
-        def action_next_leaf(self) -> None:
-            self._move_to_leaf(+1)
-
-        def action_prev_leaf(self) -> None:
-            self._move_to_leaf(-1)
-
-        def _move_to_leaf(self, direction: int) -> None:
-            leaves = self._visible_leaves()
-            if not leaves:
-                return
-            cur = self._tree.cursor_node
-            if cur is not None and cur in leaves:
-                idx = (leaves.index(cur) + direction) % len(leaves)
-            else:
-                idx = 0 if direction > 0 else len(leaves) - 1
-            self._tree.move_cursor(leaves[idx])
-
-        def action_activate(self) -> None:
-            node = self._tree.cursor_node
-            if node is None or node is self._tree.root:
-                return
-            if node.data is not None:
-                self._app_ref.open_conflict(node.data)
-            else:
-                node.toggle()
-
-        def on_tree_node_selected(self, event) -> None:
-            # Mouse click on a leaf — open it. Dirs use NodeExpanded/Collapsed
-            # which Textual handles internally; nothing to do here for those.
-            node = event.node
-            if node is None or node.data is None:
-                return
-            self._app_ref.open_conflict(node.data)
-
-        def action_help(self) -> None:
-            self.app.push_screen(HelpScreen())
-
-        def action_accept_all_theirs(self) -> None:
-            visible = self._visible_conflicts()
-            scope = ("every visible file" if self._filter else "every file")
-            def after(ans: Optional[bool]) -> None:
-                if ans:
-                    self._app_ref.bulk_accept_theirs(visible)
-                    self.refresh_tree()
-            self.app.push_screen(
-                ConfirmScreen("Accept THEIRS for all files",
-                              f"Replace {scope} ({len(visible)}) with its\n"
-                              f"upstream version. A .shedosbak is written for each."),
-                after,
-            )
-
-        def action_keep_all_yours(self) -> None:
-            visible = self._visible_conflicts()
-            scope = ("every visible .shedosnew" if self._filter else "every .shedosnew")
-            def after(ans: Optional[bool]) -> None:
-                if ans:
-                    self._app_ref.bulk_keep_yours(visible)
-                    self.refresh_tree()
-            self.app.push_screen(
-                ConfirmScreen("Keep YOURS for all files",
-                              f"Delete {scope} ({len(visible)}) and leave\n"
-                              f"your live copies as-is."),
-                after,
-            )
-
-        def action_refresh(self) -> None:
-            self._app_ref.rescan()
-            self.refresh_tree()
-
-        def action_filter(self) -> None:
-            def after(value: Optional[str]) -> None:
-                if value is None:
-                    return
-                self._filter = value.strip()
-                self.refresh_tree()
-            self.app.push_screen(FilterPromptScreen(self._filter), after)
-
-        def action_clear_filter(self) -> None:
-            if self._filter:
-                self._filter = ""
-                self.refresh_tree()
-
     # ---------- Decision modal ----------
     class DecisionModal(ModalScreen[Optional[Side]]):
         """Decision overlay for the current hunk.
@@ -4008,686 +3799,13 @@ MERGE SCREEN
         def action_decide_both_ty(self) -> None:  self.dismiss(Side.BOTH_TY)
         def action_cancel(self) -> None:          self.dismiss(None)
 
-    # ---------- Merge screen ----------
-    class MergeScreen(Screen):
-        # Navigation split:
-        #   j/k/↑/↓/PgUp/PgDn/g/G  → scroll all panes in lockstep
-        #   n/p                    → move "current hunk" and re-center
-        #   y/t/b/B/x              → decision on current hunk (advances)
-        # Footer displays every binding with show=True in insertion order.
-        # We surface the scroll keys (even the obvious arrow aliases) so the
-        # user can verify the TUI actually handles them. The previous
-        # hidden-arrow design made it look like scroll was broken.
-        BINDINGS = [
-            # Footer-visible essentials.
-            Binding("enter,space", "open_decision_modal", "resolve"),
-            Binding("y",            "take_yours",       "YOURS"),
-            Binding("t",            "take_theirs",      "THEIRS"),
-            Binding("b",            "take_both_yt",     "both Y→T"),
-            Binding("B",            "take_both_ty",     "both T→Y"),
-            Binding("n",            "next_hunk",        "next hunk"),
-            Binding("p",            "prev_hunk",        "prev hunk"),
-            Binding("v",            "toggle_view",      "single-pane view"),
-            Binding("s",            "save",             "save"),
-            Binding("q",            "cancel",           "cancel"),
-            Binding("question_mark,f1", "help",         "help"),
-
-            # Bound but hidden from footer — surfaced in the help modal.
-            Binding("j,down",          "scroll_down",      "↓ line",        show=False),
-            Binding("k,up",            "scroll_up",        "↑ line",        show=False),
-            Binding("h,left",          "pan_left",         "← pan",         show=False),
-            Binding("l,right",         "pan_right",        "→ pan",         show=False),
-            Binding("z",               "toggle_wrap",      "wrap",          show=False),
-            Binding("pagedown,ctrl+d", "scroll_page_down", "PgDn",          show=False),
-            Binding("pageup,ctrl+u",   "scroll_page_up",   "PgUp",          show=False),
-            Binding("g",               "scroll_home",      "top",           show=False),
-            Binding("G",               "scroll_end",       "bot",           show=False),
-            Binding("u",               "undo",             "undo",          show=False),
-            Binding("shift+a",         "all_yours",        "all-Y",         show=False),
-            Binding("shift+t",         "all_theirs",       "all-T",         show=False),
-            Binding("d",               "raw_diff",         "raw-diff",      show=False),
-            Binding("e",              "edit_yours",       "edit",          show=False),
-            Binding("shift+e",         "edit_merged",      "edit merged",   show=False),
-        ]
-
-        @property
-        def state(self) -> MergeState:
-            return self._app_ref.merge_state
-
-        @property
-        def current(self) -> int:
-            return self._app_ref.current_hunk
-
-        @current.setter
-        def current(self, value: int) -> None:
-            self._app_ref.current_hunk = value
-
-        def __init__(self, app_ref: "ReviewApp", state: MergeState) -> None:
-            super().__init__()
-            self._app_ref = app_ref
-            # Publish state onto the app so DecisionModal + SinglePaneScreen
-            # (introduced in later tasks) can read the same MergeState
-            # instance. self.state and self.current below are property
-            # shims that proxy to the app.
-            app_ref.merge_state = state
-            app_ref.current_hunk = 0
-            # Soft-wrap off by default: minified JSON / long one-liners look
-            # awful when reflowed. `z` toggles to Rich's wrap-at-pane-width
-            # mode when the user prefers vertical expansion over pan.
-            self._wrap = False
-            self._flash_timer = None  # cancelled + replaced on every decision
-            self.rows: list[AlignedRow] = build_aligned_rows(state)
-            # row index → index within state.hunks (for n/p + auto-scroll).
-            self._row_of_hunk: dict[int, int] = {}
-            for idx, r in enumerate(self.rows):
-                if r.hunk_index is not None and r.hunk_index not in self._row_of_hunk:
-                    self._row_of_hunk[r.hunk_index] = idx
-
-        def compose(self) -> ComposeResult:
-            yield Banner("")
-            self.flash = Static("", id="flash")
-            yield self.flash
-            self.pane_yours  = DiffPane("YOURS (live)",        kind="YOURS")
-            self.pane_base   = DiffPane("RESULT (preview)",    kind="BASE")
-            self.pane_theirs = DiffPane("THEIRS (upstream)",   kind="THEIRS")
-            yield Horizontal(self.pane_yours, self.pane_base,
-                             self.pane_theirs, id="merge-row")
-            self.strip = HunkStrip()
-            yield self.strip
-            # Footer auto-renders every `show=True` binding; it's our source
-            # of truth for "what keys do what", so the user never has to
-            # memorize or hit `?` just to find ctrl-d/pgup/g/G.
-            yield Footer()
-
-        def on_mount(self) -> None:
-            banner = self.query_one("#banner", Banner)
-            mode = "2-way (base unavailable)" if self.state.is_2way else "3-way"
-            banner.set_mode(self.state.is_2way)
-            banner.update(f"{self.state.relpath}   {mode}   "
-                          f"hunk {self.current+1}/{len(self.state.hunks)}   "
-                          f"pkg={self.state.pkg}   ? help   s save")
-            self._render_all()
-            # Publish this screen so SIGTERM/SIGHUP handlers can snapshot
-            # the live (state, current_hunk) pair to a draft if the process
-            # is killed. Storing the screen (not a tuple) so the handler
-            # reads the current hunk at the moment of the signal, not at
-            # on_mount time.
-            _active_merge_ref[:] = [self]
-            # Scroll to the first hunk on entry so the user lands on something
-            # actionable, not the top of a 500-line file.
-            self.call_after_refresh(self._focus_current_hunk)
-
-        def on_unmount(self) -> None:
-            _active_merge_ref[:] = []
-
-        def _panes(self) -> list["DiffPane"]:
-            return [self.pane_yours, self.pane_base, self.pane_theirs]
-
-        def _render_all(self) -> None:
-            cur = self.current if 0 <= self.current < len(self.state.hunks) else None
-            self.pane_yours.set_content(
-                render_pane_text(self.rows, "YOURS", cur, wrap=self._wrap))
-            self.pane_theirs.set_content(
-                render_pane_text(self.rows, "THEIRS", cur, wrap=self._wrap))
-            # Middle pane re-renders against the current decision map so
-            # y/t/b/B/u/A/T all produce a visible result-preview update.
-            decisions = {h.index: h.decision for h in self.state.hunks}
-            self.pane_base.set_content(
-                render_pane_text(self.rows, "BASE", cur,
-                                 decisions=decisions, wrap=self._wrap))
-            self.strip.update_from(self.state, self.current)
-            banner = self.query_one("#banner", Banner)
-            wrap_tag = "wrap" if self._wrap else "pan"
-            banner.update(
-                f"{self.state.relpath}   "
-                f"{'2-way' if self.state.is_2way else '3-way'}   "
-                f"hunk {self.current+1}/{len(self.state.hunks)}   "
-                f"pkg={self.state.pkg}   [{wrap_tag}]   ? help   s save")
-
-        # --- Scroll synchronization: all three panes move together. -------
-        def _sync_scroll(self, y: int) -> None:
-            for p in self._panes():
-                p.scroll_to(y=y, animate=False)
-
-        def _scroll_by(self, delta: int) -> None:
-            pane = self.pane_yours
-            new_y = max(0, pane.scroll_y + delta)
-            self._sync_scroll(new_y)
-
-        def _center_on_row(self, row_idx: int) -> None:
-            # Place the target row near the top of the viewport (with a little
-            # lead-in so the user sees context above it).
-            pane = self.pane_yours
-            vh = pane.size.height or 10
-            target = max(0, row_idx - max(2, vh // 4))
-            self._sync_scroll(target)
-
-        def action_scroll_down(self) -> None:       self._scroll_by(1)
-        def action_scroll_up(self) -> None:         self._scroll_by(-1)
-        def action_scroll_page_down(self) -> None:
-            self._scroll_by(max(1, (self.pane_yours.size.height or 10) - 2))
-        def action_scroll_page_up(self) -> None:
-            self._scroll_by(-max(1, (self.pane_yours.size.height or 10) - 2))
-        def action_scroll_home(self) -> None:       self._sync_scroll(0)
-        def action_scroll_end(self) -> None:        self._sync_scroll(len(self.rows))
-
-        # --- Horizontal pan (no-op when wrap is on; content never overflows) --
-        PAN_STEP = 8
-
-        def _sync_pan(self, x: int) -> None:
-            for p in self._panes():
-                p.scroll_to(x=x, y=p.scroll_y, animate=False)
-
-        def action_pan_left(self) -> None:
-            if self._wrap:
-                return
-            new_x = max(0, (self.pane_yours.scroll_x or 0) - self.PAN_STEP)
-            self._sync_pan(new_x)
-
-        def action_pan_right(self) -> None:
-            if self._wrap:
-                return
-            new_x = (self.pane_yours.scroll_x or 0) + self.PAN_STEP
-            self._sync_pan(new_x)
-
-        def action_toggle_wrap(self) -> None:
-            self._wrap = not self._wrap
-            for p in self._panes():
-                p.set_class(self._wrap, "wrap")
-            if self._wrap:
-                # Turning wrap on: horizontal scroll offset becomes meaningless,
-                # reset so the user doesn't see a phantom scroll state when
-                # they toggle back.
-                self._sync_pan(0)
-            self._render_all()
-
-        def _focus_current_hunk(self) -> None:
-            if 0 <= self.current < len(self.state.hunks):
-                row = self._row_of_hunk.get(self.current)
-                if row is not None:
-                    self._center_on_row(row)
-
-        def _decision_and_advance(self, side: Side) -> None:
-            if not self.state.hunks:
-                return
-            h = self.state.hunks[self.current]
-            self.state.undo_stack.append((h.index, h.decision))
-            if len(self.state.undo_stack) > UNDO_DEPTH:
-                self.state.undo_stack.pop(0)
-            h.decision = side
-            save_draft(self.state, self.current)
-            if self.current < len(self.state.hunks) - 1:
-                self.current += 1
-            self._render_all()
-            self._focus_current_hunk()
-            self._flash_decision(h, side)
-
-        def _flash_decision(self, h: Hunk, side: Side) -> None:
-            resolved = sum(1 for hh in self.state.hunks if hh.decision is not None)
-            total = len(self.state.hunks)
-            label = {
-                Side.YOURS:   "YOURS",
-                Side.THEIRS:  "THEIRS",
-                Side.BOTH_YT: "BOTH (Y→T)",
-                Side.BOTH_TY: "BOTH (T→Y)",
-            }.get(side, side.name)
-            self.flash.update(
-                f"[{THEME.added}]✓ took {label} on #{h.index+1}[/] "
-                f"— {resolved}/{total} resolved · autosaved")
-            # Replace, don't stack; rapid Y-Y-Y-Y bursts leave one live timer.
-            if self._flash_timer is not None:
-                try:
-                    self._flash_timer.stop()
-                except Exception:
-                    pass
-            self._flash_timer = self.set_timer(2.0, self._clear_flash)
-
-        def _clear_flash(self) -> None:
-            self.flash.update("")
-            self._flash_timer = None
-
-        def action_next_hunk(self) -> None:
-            if self.current < len(self.state.hunks) - 1:
-                self.current += 1
-                self._render_all()
-                self._focus_current_hunk()
-
-        def action_prev_hunk(self) -> None:
-            if self.current > 0:
-                self.current -= 1
-                self._render_all()
-                self._focus_current_hunk()
-
-        def action_open_decision_modal(self) -> None:
-            if not self.state.hunks:
-                return
-            h = self.state.hunks[self.current]
-            def cb(side: Optional[Side]) -> None:
-                if side is not None:
-                    self._decision_and_advance(side)
-            self.app.push_screen(DecisionModal(h, self.state), cb)
-
-        def action_toggle_view(self) -> None:
-            # Hand off to SinglePaneScreen. State persists on ReviewApp so
-            # decisions in flight remain visible after the swap.
-            self.app.switch_screen(SinglePaneScreen(self._app_ref))
-
-        def action_take_yours(self) -> None: self._decision_and_advance(Side.YOURS)
-        def action_take_theirs(self) -> None: self._decision_and_advance(Side.THEIRS)
-        def action_take_both_yt(self) -> None: self._decision_and_advance(Side.BOTH_YT)
-        def action_take_both_ty(self) -> None: self._decision_and_advance(Side.BOTH_TY)
-
-        def action_undo(self) -> None:
-            if not self.state.undo_stack:
-                self.app.bell()
-                return
-            idx, prev = self.state.undo_stack.pop()
-            for h in self.state.hunks:
-                if h.index == idx:
-                    h.decision = prev
-                    break
-            self._render_all()
-
-        def action_all_yours(self) -> None:
-            for h in self.state.hunks:
-                h.decision = Side.YOURS
-            self._render_all()
-
-        def action_all_theirs(self) -> None:
-            for h in self.state.hunks:
-                h.decision = Side.THEIRS
-            self._render_all()
-
-        def action_save(self) -> None:
-            unresolved = self.state.unresolved_count()
-            if unresolved:
-                def after(ans: Optional[bool]) -> None:
-                    if ans:
-                        self._pick_defaults_and_save()
-                self.app.push_screen(
-                    ConfirmScreen(
-                        f"{unresolved} hunk(s) unresolved",
-                        "Apply the auto-classified default for each unresolved hunk\n"
-                        "and save? (unclassified hunks will keep YOURS)",
-                    ),
-                    after,
-                )
-                return
-            self._do_save()
-
-        def _pick_defaults_and_save(self) -> None:
-            for h in self.state.hunks:
-                if h.decision is not None:
-                    continue
-                if h.kind == "yours-only":
-                    h.decision = Side.YOURS
-                elif h.kind == "theirs-only":
-                    h.decision = Side.THEIRS
-                else:
-                    h.decision = Side.YOURS  # conservative
-            self._do_save()
-
-        def _do_save(self) -> None:
-            try:
-                save_merged(self.state)
-            except ConcurrentModification as e:
-                self.app.push_screen(
-                    ConfirmScreen(f"{e.which} changed on disk",
-                                  "Force overwrite with the current merge? "
-                                  "(choose No to cancel and reload the file by hand)"),
-                    lambda ans: self._force_save() if ans else None,
-                )
-                return
-            except UnresolvedHunk:
-                self.app.bell()
-                return
-            except OSError as e:
-                self._show_io_error(e)
-                return
-            self._app_ref.mark_resolved(self.state.relpath)
-            self.app.pop_screen()
-
-        def _force_save(self) -> None:
-            try:
-                save_merged(self.state, force=True)
-            except UnresolvedHunk:
-                return
-            except OSError as e:
-                self._show_io_error(e)
-                return
-            self._app_ref.mark_resolved(self.state.relpath)
-            self.app.pop_screen()
-
-        def _show_io_error(self, e: OSError) -> None:
-            # Surface filesystem-level failures (read-only $HOME, ENOSPC,
-            # permission denied, etc.) as a modal instead of letting the
-            # exception bubble up and take the TUI down.
-            if e.errno == errno.EROFS:
-                title = "$HOME is read-only"
-                body = ("The filesystem holding your home directory is mounted\n"
-                        "read-only. Remount read-write before saving:\n"
-                        "  sudo mount -o remount,rw /home\n"
-                        "Your draft has been preserved; pick up where you left off.")
-            elif e.errno == errno.ENOSPC:
-                title = "No space left on device"
-                body = ("Free up space in $HOME and try again. Your draft is saved.")
-            elif e.errno == errno.EACCES:
-                title = "Permission denied"
-                body = (f"{e.filename or self.state.relpath}\n"
-                        "Check ownership and mode on the file and its parent directory.")
-            else:
-                title = f"I/O error ({e.errno})"
-                body = str(e)
-            _log(f"save I/O error for {self.state.relpath}: {e}")
-            save_draft(self.state, self.current)
-            self.app.push_screen(ConfirmScreen(title, body, default_yes=True))
-
-        def action_raw_diff(self) -> None:
-            self.app.push_screen(RawDiffScreen(
-                self.state.relpath,
-                self.state.yours_lines,
-                self.state.theirs_lines,
-            ))
-
-        def action_edit_yours(self) -> None:
-            self._edit_and_reload(self.state.yours_path)
-
-        def action_edit_merged(self) -> None:
-            # Write current merged-so-far to a tempfile, let $EDITOR edit,
-            # then treat it as the new YOURS baseline for further merging.
-            try:
-                lines = assemble(self.state)
-            except UnresolvedHunk:
-                # Assemble with YOURS defaults for the preview.
-                defaults = [(h.index, h.decision) for h in self.state.hunks]
-                for h in self.state.hunks:
-                    if h.decision is None:
-                        h.decision = Side.YOURS
-                lines = assemble(self.state)
-                for idx, prev in defaults:
-                    for h in self.state.hunks:
-                        if h.index == idx:
-                            h.decision = prev
-                            break
-            tmp = tempfile.NamedTemporaryFile(
-                mode="w", suffix=Path(self.state.relpath).suffix or ".txt",
-                delete=False, encoding=self.state.encoding,
-            )
-            tmp.write(self.state.newline.join(lines))
-            if self.state.trailing_newline:
-                tmp.write(self.state.newline)
-            tmp.close()
-            self._edit_and_reload(Path(tmp.name))
-
-        def _edit_and_reload(self, path: Path) -> None:
-            editor = os.environ.get("VISUAL") or os.environ.get("EDITOR") or "nano"
-            try:
-                with self.app.suspend():
-                    rc = subprocess.call([editor, str(path)])
-            except Exception as e:
-                self.app.bell()
-                _log(f"editor handoff failed: {e}")
-                return
-            if rc != 0:
-                _log(f"editor exited {rc}")
-
-        def action_cancel(self) -> None:
-            save_draft(self.state, self.current)
-            self.app.pop_screen()
-
-        def action_help(self) -> None:
-            self.app.push_screen(HelpScreen())
-
-    # ---------- Single-pane view ----------
-    class SinglePaneScreen(Screen):
-        """Single-pane view over the same MergeState as MergeScreen.
-
-        Bindings mirror MergeScreen's; the only screen-specific binding
-        is `v` which swaps back to the 3-pane view. Decisions are applied
-        via the same _decision_and_advance funnel.
-        """
-
-        BINDINGS = [
-            Binding("enter,space", "open_decision_modal", "resolve"),
-            Binding("y",            "take_yours",       "YOURS"),
-            Binding("t",            "take_theirs",      "THEIRS"),
-            Binding("b",            "take_both_yt",     "both Y→T"),
-            Binding("B",            "take_both_ty",     "both T→Y"),
-            Binding("n",            "next_hunk",        "next hunk"),
-            Binding("p",            "prev_hunk",        "prev hunk"),
-            Binding("v",            "toggle_view",      "3-pane view"),
-            Binding("s",            "save",             "save"),
-            Binding("q",            "cancel",           "cancel"),
-            Binding("question_mark,f1", "help",         "help"),
-
-            Binding("j,down",          "scroll_down",      "↓ line",   show=False),
-            Binding("k,up",            "scroll_up",        "↑ line",   show=False),
-            Binding("pagedown,ctrl+d", "scroll_page_down", "PgDn",     show=False),
-            Binding("pageup,ctrl+u",   "scroll_page_up",   "PgUp",     show=False),
-            Binding("g",               "scroll_home",      "top",      show=False),
-            Binding("G",               "scroll_end",       "bot",      show=False),
-            Binding("u",               "undo",             "undo",     show=False),
-            Binding("shift+a",         "all_yours",        "all-Y",    show=False),
-            Binding("shift+t",         "all_theirs",       "all-T",    show=False),
-            Binding("d",               "raw_diff",         "raw-diff", show=False),
-        ]
-
-        def __init__(self, app_ref: "ReviewApp") -> None:
-            super().__init__()
-            self._app_ref = app_ref
-            # MergeState already exists on the app (populated by the
-            # MergeScreen that mounted before us).
-            self.rows: list[AlignedRow] = build_aligned_rows(app_ref.merge_state)
-            self._wrap = False
-            self._flash_timer = None  # mirrors MergeScreen's flash semantics
-
-        @property
-        def state(self) -> MergeState:
-            return self._app_ref.merge_state
-
-        @property
-        def current(self) -> int:
-            return self._app_ref.current_hunk
-
-        @current.setter
-        def current(self, value: int) -> None:
-            self._app_ref.current_hunk = value
-
-        def compose(self) -> ComposeResult:
-            yield Banner("")
-            self.flash = Static("", id="flash")
-            yield self.flash
-            self.pane = DiffPane("RESULT (single-pane)", kind="BASE")
-            yield self.pane
-            self.strip = HunkStrip()
-            yield self.strip
-            yield Footer()
-
-        def on_mount(self) -> None:
-            self._render_all()
-            self.call_after_refresh(self._focus_current_hunk)
-            _active_merge_ref[:] = [self]
-
-        def on_unmount(self) -> None:
-            if _active_merge_ref and _active_merge_ref[0] is self:
-                _active_merge_ref[:] = []
-
-        def _render_all(self) -> None:
-            self.pane.set_content(
-                render_single_pane_text(self.rows, self.state, self.current,
-                                        wrap=self._wrap))
-            self.strip.update_from(self.state, self.current)
-            banner = self.query_one("#banner", Banner)
-            mode = ("single-pane (2-way)" if self.state.is_2way
-                    else "single-pane (3-way)")
-            resolved = sum(1 for h in self.state.hunks if h.decision is not None)
-            total = len(self.state.hunks)
-            banner.update(
-                f"{self.state.relpath}   {mode}   "
-                f"hunk {self.current+1}/{total}   "
-                f"pkg={self.state.pkg}   {resolved}/{total} resolved   "
-                f"v 3-pane   s save   ?")
-
-        def _focus_current_hunk(self) -> None:
-            # Walk groups, tallying lines, to find where the current hunk
-            # starts in the single-pane layout (line counts differ from
-            # 3-pane because of the border lines + YOURS/THEIRS labels).
-            if not (0 <= self.current < len(self.state.hunks)):
-                return
-            line_no = 0
-            for key, group in _group_rows_by_hunk(self.rows):
-                if key == self.current:
-                    break
-                if key is None:
-                    line_no += len(group)
-                else:
-                    h = self.state.hunks[key]
-                    if h.decision is None:
-                        # header + YOURS label + yours lines + THEIRS label
-                        # + theirs lines + footer
-                        line_no += (2
-                                    + sum(1 for r in group if r.yours.text is not None) + 1
-                                    + sum(1 for r in group if r.theirs.text is not None) + 1)
-                    else:
-                        # Resolved hunks render as plain inline content
-                        # (no border, no header).
-                        line_no += sum(
-                            1 for r in group
-                            if _effective_middle_cell(
-                                r, {key: h.decision}).text is not None)
-            vh = self.pane.size.height or 10
-            target = max(0, line_no - max(2, vh // 4))
-            self.pane.scroll_to(y=target, animate=False)
-
-        # _decision_and_advance + flash helpers mirror MergeScreen's; the
-        # status flash and re-render live on this screen so the user sees
-        # feedback in whichever view they're currently in.
-        def _decision_and_advance(self, side: Side) -> None:
-            if not self.state.hunks:
-                return
-            h = self.state.hunks[self.current]
-            self.state.undo_stack.append((h.index, h.decision))
-            if len(self.state.undo_stack) > UNDO_DEPTH:
-                self.state.undo_stack.pop(0)
-            h.decision = side
-            save_draft(self.state, self.current)
-            if self.current < len(self.state.hunks) - 1:
-                self.current += 1
-            self._render_all()
-            self._focus_current_hunk()
-            self._flash_decision(h, side)
-
-        # Reuse MergeScreen's flash helpers — same semantics, same widget id.
-        _flash_decision = MergeScreen._flash_decision
-        _clear_flash    = MergeScreen._clear_flash
-
-        def action_take_yours(self) -> None:    self._decision_and_advance(Side.YOURS)
-        def action_take_theirs(self) -> None:   self._decision_and_advance(Side.THEIRS)
-        def action_take_both_yt(self) -> None:  self._decision_and_advance(Side.BOTH_YT)
-        def action_take_both_ty(self) -> None:  self._decision_and_advance(Side.BOTH_TY)
-
-        def action_next_hunk(self) -> None:
-            if self.current < len(self.state.hunks) - 1:
-                self.current += 1
-                self._render_all()
-                self._focus_current_hunk()
-
-        def action_prev_hunk(self) -> None:
-            if self.current > 0:
-                self.current -= 1
-                self._render_all()
-                self._focus_current_hunk()
-
-        def action_open_decision_modal(self) -> None:
-            if not self.state.hunks:
-                return
-            h = self.state.hunks[self.current]
-            def cb(side: Optional[Side]) -> None:
-                if side is not None:
-                    self._decision_and_advance(side)
-            self.app.push_screen(DecisionModal(h, self.state), cb)
-
-        def action_toggle_view(self) -> None:
-            # Swap back to MergeScreen. State persists on the app, so all
-            # decisions in flight remain visible.
-            self.app.switch_screen(MergeScreen(self._app_ref, self.state))
-
-        def action_scroll_down(self) -> None:
-            self.pane.scroll_to(y=self.pane.scroll_y + 1, animate=False)
-
-        def action_scroll_up(self) -> None:
-            self.pane.scroll_to(y=max(0, self.pane.scroll_y - 1), animate=False)
-
-        def action_scroll_page_down(self) -> None:
-            vh = self.pane.size.height or 10
-            self.pane.scroll_to(y=self.pane.scroll_y + max(1, vh - 2),
-                                animate=False)
-
-        def action_scroll_page_up(self) -> None:
-            vh = self.pane.size.height or 10
-            self.pane.scroll_to(y=max(0, self.pane.scroll_y - max(1, vh - 2)),
-                                animate=False)
-
-        def action_scroll_home(self) -> None:
-            self.pane.scroll_to(y=0, animate=False)
-
-        def action_scroll_end(self) -> None:
-            # Crude end target; render_single_pane_text emits ~4 lines per
-            # block, so this is "scroll far enough to clip at the bottom".
-            self.pane.scroll_to(y=len(self.rows) * 4, animate=False)
-
-        # Save flow: identical to MergeScreen's. Reuse the methods
-        # verbatim so save behaves the same regardless of which view
-        # the user pressed 's' from — including the unresolved-hunks
-        # confirm modal and the post-save return to the file tree.
-        action_save              = MergeScreen.action_save
-        _pick_defaults_and_save  = MergeScreen._pick_defaults_and_save
-        _do_save                 = MergeScreen._do_save
-        _force_save              = MergeScreen._force_save
-        _show_io_error           = MergeScreen._show_io_error
-
-        def action_cancel(self) -> None:
-            self.app.pop_screen()
-
-        def action_undo(self) -> None:
-            if not self.state.undo_stack:
-                self.app.bell()
-                return
-            idx, prev = self.state.undo_stack.pop()
-            for h in self.state.hunks:
-                if h.index == idx:
-                    h.decision = prev
-                    break
-            self._render_all()
-
-        def action_all_yours(self) -> None:
-            for h in self.state.hunks:
-                h.decision = Side.YOURS
-            self._render_all()
-
-        def action_all_theirs(self) -> None:
-            for h in self.state.hunks:
-                h.decision = Side.THEIRS
-            self._render_all()
-
-        def action_raw_diff(self) -> None:
-            # Mirror MergeScreen's raw-diff behaviour if it exposes a
-            # callable on the app (defensive: not every build has it).
-            opener = getattr(self._app_ref, "_open_raw_diff", None)
-            if opener is not None:
-                opener(self.state)
-
-        def action_help(self) -> None:
-            self.app.push_screen(HelpScreen())
-
     # ---------- Review screen ----------
     class ReviewScreen(Screen):
         """Top-level screen that hosts the file tree + merge panel.
 
-        Replaces the FileTreeScreen → MergeScreen → SinglePaneScreen
-        stack with a single screen + two widgets. State (merge_state,
-        current_hunk) lives on ReviewApp; this screen reads through
-        @property proxies so existing helpers keep working.
+        FileTreePanel and MergePanel live side by side inside a single
+        screen. State (merge_state, current_hunk) lives on ReviewApp;
+        this screen reads through @property proxies.
         """
 
         BINDINGS = [
@@ -4730,7 +3848,7 @@ MERGE SCREEN
 
         def on_mount(self) -> None:
             _active_merge_ref[:] = [self]
-            first = self._next_unresolved()
+            first = self._initial_conflict()
             if first is not None:
                 self._load_conflict(first)
             else:
@@ -4743,6 +3861,15 @@ MERGE SCREEN
 
         # ---- File loading + auto-advance ----
 
+        def _initial_conflict(self) -> Optional["Conflict"]:
+            # Honor --start-file if given, falling back to the first
+            # unresolved text conflict (which also covers --walk-all).
+            if self._app_ref.start_file:
+                for c in self._app_ref.conflicts:
+                    if c.relpath == self._app_ref.start_file and c.kind == "text":
+                        return c
+            return self._next_unresolved()
+
         def _next_unresolved(self) -> Optional["Conflict"]:
             for c in self._app_ref.conflicts:
                 if c.kind != "text":
@@ -4754,10 +3881,13 @@ MERGE SCREEN
 
         def _load_conflict(self, c: "Conflict") -> None:
             state = load_merge_state(c, force_2way=self._app_ref.force_2way)
+            self._load_state(state)
+            self.tree.mark_current(c.relpath)
+
+        def _load_state(self, state: MergeState) -> None:
             self._app_ref.merge_state  = state
             self._app_ref.current_hunk = 0
             self.merge.refresh_state()
-            self.tree.mark_current(c.relpath)
             self.strip.update_from(state, 0)
             self._update_banner(state)
 
@@ -4777,7 +3907,11 @@ MERGE SCREEN
         # ---- Message handlers ----
 
         def on_file_picked(self, msg: FilePicked) -> None:
-            self._load_conflict(msg.conflict)
+            c = msg.conflict
+            if c.kind != "text":
+                self._app_ref.open_conflict(c)
+                return
+            self._load_conflict(c)
 
         def on_save_done(self, msg: SaveDone) -> None:
             self._app_ref.mark_resolved(msg.relpath)
@@ -4836,21 +3970,14 @@ MERGE SCREEN
             self.walk_all = walk_all
             self.force_2way = force_2way
             self._resolved: set[str] = set()
-            # State shared between MergeScreen, DecisionModal, and SinglePaneScreen.
-            # Whichever screen is mounted reads/writes through these; the app holds
+            # Merge state shared with ReviewScreen, MergePanel, and DecisionModal.
+            # ReviewScreen proxies current_hunk via properties; the app holds
             # the single source of truth.
             self.merge_state: Optional[MergeState] = None
             self.current_hunk: int = 0
 
         def on_mount(self) -> None:
-            self.push_screen(FileTreeScreen(self))
-            if self.start_file:
-                for c in self.conflicts:
-                    if c.relpath == self.start_file:
-                        self.open_conflict(c)
-                        break
-            elif self.walk_all and self.conflicts:
-                self.open_conflict(self.conflicts[0])
+            self.push_screen(ReviewScreen(self))
 
         def open_conflict(self, c: Conflict) -> None:
             if c.kind == "binary":
@@ -4895,14 +4022,18 @@ MERGE SCREEN
                 def after(ans: Optional[bool]) -> None:
                     if ans:
                         apply_draft(state, draft)
-                    self.push_screen(MergeScreen(self, state))
+                    review = self.screen
+                    if isinstance(review, ReviewScreen):
+                        review._load_state(state)
                 self.push_screen(ConfirmScreen(
                     "Resume draft?",
                     f"A draft from {draft.get('saved_at', '?')} was found.\n"
                     "Yes → resume   No → fresh start"
                 ), after)
                 return
-            self.push_screen(MergeScreen(self, state))
+            review = self.screen
+            if isinstance(review, ReviewScreen):
+                review._load_state(state)
 
         def _binary_resolve(self, c: Conflict, take_theirs: Optional[bool]) -> None:
             if take_theirs is None:
@@ -4943,11 +4074,10 @@ MERGE SCREEN
         def mark_resolved(self, relpath: str) -> None:
             self._resolved.add(relpath)
             self.conflicts = [c for c in self.conflicts if c.relpath not in self._resolved]
-            top = self.screen_stack[-1] if self.screen_stack else None
-            if isinstance(top, FileTreeScreen):
-                top.refresh_tree()
-            if not self.conflicts:
-                self.exit()
+            for s in self.screen_stack:
+                if isinstance(s, ReviewScreen):
+                    s.tree.refresh_tree()
+                    break
 
         def is_resolved(self, relpath: str) -> bool:
             return relpath in self._resolved
