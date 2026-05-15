@@ -2642,6 +2642,16 @@ def _load_textual_ui() -> None:
         height: 90%;
         padding: 1 2;
     }}
+
+    #review-row     {{ layout: horizontal; height: 1fr; }}
+    FileTreePanel   {{ width: 28; }}
+    FileTreePanel.hidden {{ display: none; }}
+    MergePanel      {{ width: 1fr; layout: vertical; }}
+    #merge-top      {{ layout: horizontal; height: 2fr; }}
+    #merge-top.hidden {{ display: none; }}
+    #merge-empty-state {{ width: 1fr; height: 1fr; padding: 1 2;
+                          content-align: center middle; color: {THEME.dim}; }}
+    #merge-empty-state.hidden {{ display: none; }}
     """
 
     # ---------- Messages ----------
@@ -4670,6 +4680,148 @@ MERGE SCREEN
         def action_help(self) -> None:
             self.app.push_screen(HelpScreen())
 
+    # ---------- Review screen ----------
+    class ReviewScreen(Screen):
+        """Top-level screen that hosts the file tree + merge panel.
+
+        Replaces the FileTreeScreen → MergeScreen → SinglePaneScreen
+        stack with a single screen + two widgets. State (merge_state,
+        current_hunk) lives on ReviewApp; this screen reads through
+        @property proxies so existing helpers keep working.
+        """
+
+        BINDINGS = [
+            Binding("ctrl+b",        "toggle_tree",   "toggle tree"),
+            Binding("question_mark,f1", "help",       "help"),
+            Binding("q",             "quit",          "quit"),
+            # Tab/Shift+Tab handled by Textual's defaults.
+        ]
+
+        def __init__(self, app_ref: "ReviewApp") -> None:
+            super().__init__()
+            self._app_ref = app_ref
+            self._flash_timer = None
+            self._tree_visible = True
+
+        @property
+        def state(self) -> MergeState:
+            return self._app_ref.merge_state
+
+        @property
+        def current(self) -> int:
+            return self._app_ref.current_hunk
+
+        @current.setter
+        def current(self, value: int) -> None:
+            self._app_ref.current_hunk = value
+
+        def compose(self) -> ComposeResult:
+            yield Banner("")
+            self.flash = Static("", id="flash")
+            yield self.flash
+
+            self.tree  = FileTreePanel(self._app_ref)
+            self.merge = MergePanel(self._app_ref)
+            yield Horizontal(self.tree, self.merge, id="review-row")
+
+            self.strip = HunkStrip()
+            yield self.strip
+            yield Footer()
+
+        def on_mount(self) -> None:
+            _active_merge_ref[:] = [self]
+            first = self._next_unresolved()
+            if first is not None:
+                self._load_conflict(first)
+            else:
+                self.merge.show_all_resolved()
+                self._update_banner_for_empty()
+
+        def on_unmount(self) -> None:
+            if _active_merge_ref and _active_merge_ref[0] is self:
+                _active_merge_ref[:] = []
+
+        # ---- File loading + auto-advance ----
+
+        def _next_unresolved(self) -> Optional["Conflict"]:
+            for c in self._app_ref.conflicts:
+                if c.kind != "text":
+                    continue
+                if self._app_ref.is_resolved(c.relpath):
+                    continue
+                return c
+            return None
+
+        def _load_conflict(self, c: "Conflict") -> None:
+            state = load_merge_state(c, force_2way=self._app_ref.force_2way)
+            self._app_ref.merge_state  = state
+            self._app_ref.current_hunk = 0
+            self.merge.refresh_state()
+            self.tree.mark_current(c.relpath)
+            self.strip.update_from(state, 0)
+            self._update_banner(state)
+
+        def _update_banner(self, state: MergeState) -> None:
+            banner = self.query_one("#banner", Banner)
+            mode = "2-way (base unavailable)" if state.is_2way else "3-way"
+            resolved = sum(1 for h in state.hunks if h.decision is not None)
+            total = len(state.hunks)
+            banner.update(
+                f"{state.relpath}   {mode}   hunk {self.current+1}/{total}"
+                f"   pkg={state.pkg}   {resolved}/{total} resolved")
+
+        def _update_banner_for_empty(self) -> None:
+            banner = self.query_one("#banner", Banner)
+            banner.update("All conflicts resolved — press q to quit")
+
+        # ---- Message handlers ----
+
+        def on_file_picked(self, msg: FilePicked) -> None:
+            self._load_conflict(msg.conflict)
+
+        def on_save_done(self, msg: SaveDone) -> None:
+            self._app_ref.mark_resolved(msg.relpath)
+            self.tree.refresh_tree()
+            next_c = self._next_unresolved()
+            if next_c is not None:
+                self._load_conflict(next_c)
+                self.flash.update(
+                    f"[{THEME.added}]✓ saved {msg.relpath}[/]  →  "
+                    f"opening {next_c.relpath}")
+                if self._flash_timer is not None:
+                    try: self._flash_timer.stop()
+                    except Exception: pass
+                self._flash_timer = self.set_timer(2.0, self._clear_flash)
+            else:
+                self.merge.show_all_resolved()
+                self._update_banner_for_empty()
+
+        def on_flash_message(self, msg: FlashMessage) -> None:
+            self.flash.update(msg.text)
+            if self._flash_timer is not None:
+                try: self._flash_timer.stop()
+                except Exception: pass
+            self._flash_timer = self.set_timer(2.0, self._clear_flash)
+
+        def _clear_flash(self) -> None:
+            self.flash.update("")
+            self._flash_timer = None
+
+        # ---- Actions ----
+
+        def action_toggle_tree(self) -> None:
+            self._tree_visible = not self._tree_visible
+            if self._tree_visible:
+                self.tree.remove_class("hidden")
+            else:
+                self.tree.add_class("hidden")
+
+        def action_help(self) -> None:
+            self.app.push_screen(HelpScreen())
+
+        def action_quit(self) -> None:
+            self.app.exit()
+
     # ---------- App wrapper ----------
     class ReviewApp(App):
         CSS = APP_CSS
@@ -4796,6 +4948,12 @@ MERGE SCREEN
                 top.refresh_tree()
             if not self.conflicts:
                 self.exit()
+
+        def is_resolved(self, relpath: str) -> bool:
+            return relpath in self._resolved
+
+        def session_resolved_count(self) -> int:
+            return len(self._resolved)
 
         def rescan(self) -> None:
             self.conflicts, _ = scan_conflicts()
