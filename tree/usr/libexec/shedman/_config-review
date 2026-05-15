@@ -2828,6 +2828,98 @@ def _load_textual_ui() -> None:
             out.append_text(_render_cell(cell, row.is_hunk, is_current))
         return out
 
+    def _group_rows_by_hunk(rows: list[AlignedRow]
+                           ) -> list[tuple[Optional[int], list[AlignedRow]]]:
+        """Walk rows in order, grouping consecutive rows that share a
+        non-None hunk_index. Returns a list of (hunk_index_or_None,
+        rows_in_group). Used by the single-pane renderer to emit each
+        hunk as one block."""
+        groups: list[tuple[Optional[int], list[AlignedRow]]] = []
+        current_key: Optional[int] = "sentinel"  # type: ignore[assignment]
+        current_group: list[AlignedRow] = []
+        for row in rows:
+            key = row.hunk_index
+            if key != current_key:
+                if current_group:
+                    groups.append((current_key, current_group))  # type: ignore[arg-type]
+                current_key = key
+                current_group = [row]
+            else:
+                current_group.append(row)
+        if current_group:
+            groups.append((current_key, current_group))  # type: ignore[arg-type]
+        return groups
+
+    def render_single_pane_text(rows: list[AlignedRow],
+                                state: MergeState,
+                                current_hunk: Optional[int],
+                                wrap: bool = False) -> Text:
+        """Render the merged-result view as a single scrolling pane.
+
+        - Non-hunk rows render as final content (base in 3-way, yours in
+          2-way), gutter-numbered.
+        - Unresolved hunks render as a double-border block with YOURS
+          and THEIRS stacked, decoration [Y] [T] [B] [⇧B] in the header.
+        - Resolved hunks render as a single-border block with the
+          decided content only and ✓ <SIDE> in the header.
+        - The current hunk (resolved or not) gets a brighter border colour.
+        """
+        out = Text(no_wrap=not wrap, overflow="ignore" if not wrap else "fold")
+        decisions = {h.index: h.decision for h in state.hunks}
+        border_normal = THEME.dim
+        border_bright = THEME.accent
+
+        for key, group in _group_rows_by_hunk(rows):
+            if key is None:
+                # Non-hunk rows: emit each row as a normal final-content line.
+                for row in group:
+                    cell = (row.base if (not state.is_2way
+                                         and row.base.text is not None)
+                            else row.yours)
+                    out.append_text(_render_cell(cell, is_hunk=False,
+                                                 is_current=False))
+                continue
+
+            h = state.hunks[key]
+            is_current = (key == current_hunk)
+            border_color = border_bright if is_current else border_normal
+
+            if h.decision is None:
+                # Unresolved block.
+                header = (f"╔═ Hunk {key+1} · pending "
+                          f"·············· [Y] [T] [B] [⇧B] ═══════════╗")
+                footer = "╚" + "═" * (len(header) - 2) + "╝"
+                out.append(header + "\n", style=border_color)
+                out.append("║ [b]YOURS[/b]\n", style=border_color)
+                for row in group:
+                    if row.yours.text is not None:
+                        out.append_text(_render_cell(row.yours, is_hunk=True,
+                                                     is_current=False))
+                out.append("║ [b]THEIRS[/b]\n", style=border_color)
+                for row in group:
+                    if row.theirs.text is not None:
+                        out.append_text(_render_cell(row.theirs, is_hunk=True,
+                                                     is_current=False))
+                out.append(footer + "\n", style=border_color)
+            else:
+                # Resolved block — show only the chosen content.
+                label = {
+                    Side.YOURS:   "YOURS",
+                    Side.THEIRS:  "THEIRS",
+                    Side.BOTH_YT: "BOTH (Y→T)",
+                    Side.BOTH_TY: "BOTH (T→Y)",
+                }.get(h.decision, str(h.decision))
+                header = f"╓─ Hunk {key+1} · ✓ {label} " + "─" * 20 + "╖"
+                footer = "╙" + "─" * (len(header) - 2) + "╜"
+                out.append(header + "\n", style=border_color)
+                for row in group:
+                    cell = _effective_middle_cell(row, decisions)
+                    if cell.text is not None:
+                        out.append_text(_render_cell(cell, is_hunk=True,
+                                                     is_current=False))
+                out.append(footer + "\n", style=border_color)
+        return out
+
     class DiffPane(VerticalScroll):
         """One side of the merge view: YOURS, BASE, or THEIRS.
 
