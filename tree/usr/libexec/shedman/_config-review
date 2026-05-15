@@ -2719,7 +2719,7 @@ def _load_textual_ui() -> None:
                                ) -> Cell:
         """Compute what the middle (RESULT) pane should show for this row.
 
-        - Context rows (no hunk): base cell unchanged.
+        - Context rows (no hunk): base cell unchanged (or yours in 2-way mode).
         - Undecided hunk: base content with tag="und" so user sees yellow "?".
         - YOURS: mirror yours cell.
         - THEIRS: mirror theirs cell.
@@ -2728,15 +2728,22 @@ def _load_textual_ui() -> None:
 
         The fallback matters on rows where only one side has an insert — we
         don't want to drop it to padding when the user has said "take both".
+
+        In 2-way mode there is no BASE; we walk YOURS-space, so `row.base`
+        cells are padding. Fall back to `row.yours` so the preview pane
+        has content outside hunks too.
         """
+        # 2-way: row.base is padding (no text, no lineno). Treat row.yours
+        # as the surrounding context instead.
+        fallback = row.base if (row.base.text is not None
+                                or row.base.lineno is not None) else row.yours
         if row.hunk_index is None:
-            return row.base
+            return fallback
         decision = decisions.get(row.hunk_index)
         if decision is None:
-            if row.base.text is None:
-                # Pure insert row with nothing to show from base; leave blank.
+            if fallback.text is None:
                 return Cell(None, None, tag="equal")
-            return Cell(lineno=row.base.lineno, text=row.base.text, tag="und")
+            return Cell(lineno=fallback.lineno, text=fallback.text, tag="und")
         if decision == Side.YOURS:
             return row.yours
         if decision == Side.THEIRS:
@@ -2745,7 +2752,7 @@ def _load_textual_ui() -> None:
             return row.yours if row.yours.text is not None else row.theirs
         if decision == Side.BOTH_TY:
             return row.theirs if row.theirs.text is not None else row.yours
-        return row.base
+        return fallback
 
     def _render_cell(cell: Cell, is_hunk: bool, is_current: bool) -> Text:
         line = Text()
@@ -3259,17 +3266,11 @@ MERGE SCREEN
 
         def compose(self) -> ComposeResult:
             yield Banner("")
-            if self.state.is_2way:
-                self.pane_yours  = DiffPane("YOURS (live)",      kind="YOURS")
-                self.pane_theirs = DiffPane("THEIRS (upstream)", kind="THEIRS")
-                self.pane_base: Optional[DiffPane] = None
-                yield Horizontal(self.pane_yours, self.pane_theirs, id="merge-row")
-            else:
-                self.pane_yours  = DiffPane("YOURS (live)",        kind="YOURS")
-                self.pane_base   = DiffPane("RESULT (preview)",    kind="BASE")
-                self.pane_theirs = DiffPane("THEIRS (upstream)",   kind="THEIRS")
-                yield Horizontal(self.pane_yours, self.pane_base,
-                                 self.pane_theirs, id="merge-row")
+            self.pane_yours  = DiffPane("YOURS (live)",        kind="YOURS")
+            self.pane_base   = DiffPane("RESULT (preview)",    kind="BASE")
+            self.pane_theirs = DiffPane("THEIRS (upstream)",   kind="THEIRS")
+            yield Horizontal(self.pane_yours, self.pane_base,
+                             self.pane_theirs, id="merge-row")
             self.strip = HunkStrip()
             yield self.strip
             # Footer auto-renders every `show=True` binding; it's our source
@@ -3299,8 +3300,7 @@ MERGE SCREEN
             _active_merge_ref[:] = []
 
         def _panes(self) -> list["DiffPane"]:
-            return [p for p in (self.pane_yours, self.pane_base, self.pane_theirs)
-                    if p is not None]
+            return [self.pane_yours, self.pane_base, self.pane_theirs]
 
         def _render_all(self) -> None:
             cur = self.current if 0 <= self.current < len(self.state.hunks) else None
@@ -3308,13 +3308,12 @@ MERGE SCREEN
                 render_pane_text(self.rows, "YOURS", cur, wrap=self._wrap))
             self.pane_theirs.set_content(
                 render_pane_text(self.rows, "THEIRS", cur, wrap=self._wrap))
-            if self.pane_base is not None:
-                # Middle pane re-renders against the current decision map so
-                # y/t/b/B/x/u/A/T all produce a visible result-preview update.
-                decisions = {h.index: h.decision for h in self.state.hunks}
-                self.pane_base.set_content(
-                    render_pane_text(self.rows, "BASE", cur,
-                                     decisions=decisions, wrap=self._wrap))
+            # Middle pane re-renders against the current decision map so
+            # y/t/b/B/u/A/T all produce a visible result-preview update.
+            decisions = {h.index: h.decision for h in self.state.hunks}
+            self.pane_base.set_content(
+                render_pane_text(self.rows, "BASE", cur,
+                                 decisions=decisions, wrap=self._wrap))
             self.strip.update_from(self.state, self.current)
             banner = self.query_one("#banner", Banner)
             wrap_tag = "wrap" if self._wrap else "pan"
