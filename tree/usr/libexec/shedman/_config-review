@@ -2540,6 +2540,7 @@ def _load_textual_ui() -> None:
     try:
         from textual.app import App, ComposeResult
         from textual.binding import Binding
+        from textual.message import Message
         from textual.containers import Horizontal, Vertical, VerticalScroll
         from textual.screen import ModalScreen, Screen
         from textual.widget import Widget
@@ -2642,6 +2643,48 @@ def _load_textual_ui() -> None:
         padding: 1 2;
     }}
     """
+
+    # ---------- Messages ----------
+    class FilePicked(Message):
+        """FileTreePanel → ReviewScreen: user picked a file in the tree.
+
+        Carries the Conflict object so the screen can call
+        load_merge_state() and swap app.merge_state.
+        """
+        def __init__(self, conflict: "Conflict") -> None:
+            super().__init__()
+            self.conflict = conflict
+
+    class SaveDone(Message):
+        """MergePanel → ReviewScreen: save_merged() succeeded.
+
+        ReviewScreen marks the file resolved, then either loads the
+        next unresolved file (auto-advance) or shows the empty state.
+        """
+        def __init__(self, relpath: str) -> None:
+            super().__init__()
+            self.relpath = relpath
+
+    class DecisionMade(Message):
+        """DecisionModal → MergePanel: a Side was picked (or None on Esc).
+
+        The modal posts this on dismiss; MergePanel handles it by
+        calling _decision_and_advance(side) when side is not None.
+        """
+        def __init__(self, side: Optional[Side]) -> None:
+            super().__init__()
+            self.side = side
+
+    class FlashMessage(Message):
+        """MergePanel → ReviewScreen: update the flash widget.
+
+        The flash widget lives on ReviewScreen (so both panels could
+        write to it). MergePanel posts the text; ReviewScreen.update
+        renders it and arms the 2s auto-clear timer.
+        """
+        def __init__(self, text: str) -> None:
+            super().__init__()
+            self.text = text
 
     class Banner(Static):
         def __init__(self, text: str = "") -> None:
