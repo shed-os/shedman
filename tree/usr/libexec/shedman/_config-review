@@ -3803,6 +3803,249 @@ MERGE SCREEN
         def action_help(self) -> None:
             self.app.push_screen(HelpScreen())
 
+    # ---------- Single-pane view ----------
+    class SinglePaneScreen(Screen):
+        """Single-pane view over the same MergeState as MergeScreen.
+
+        Bindings mirror MergeScreen's; the only screen-specific binding
+        is `v` which swaps back to the 3-pane view. Decisions are applied
+        via the same _decision_and_advance funnel.
+        """
+
+        BINDINGS = [
+            Binding("enter,space", "open_decision_modal", "resolve"),
+            Binding("y",            "take_yours",       "YOURS"),
+            Binding("t",            "take_theirs",      "THEIRS"),
+            Binding("b",            "take_both_yt",     "both Y→T"),
+            Binding("B",            "take_both_ty",     "both T→Y"),
+            Binding("n",            "next_hunk",        "next hunk"),
+            Binding("p",            "prev_hunk",        "prev hunk"),
+            Binding("v",            "toggle_view",      "3-pane view"),
+            Binding("s",            "save",             "save"),
+            Binding("q",            "cancel",           "cancel"),
+            Binding("question_mark,f1", "help",         "help"),
+
+            Binding("j,down",          "scroll_down",      "↓ line",   show=False),
+            Binding("k,up",            "scroll_up",        "↑ line",   show=False),
+            Binding("pagedown,ctrl+d", "scroll_page_down", "PgDn",     show=False),
+            Binding("pageup,ctrl+u",   "scroll_page_up",   "PgUp",     show=False),
+            Binding("g",               "scroll_home",      "top",      show=False),
+            Binding("G",               "scroll_end",       "bot",      show=False),
+            Binding("u",               "undo",             "undo",     show=False),
+            Binding("shift+a",         "all_yours",        "all-Y",    show=False),
+            Binding("shift+t",         "all_theirs",       "all-T",    show=False),
+            Binding("d",               "raw_diff",         "raw-diff", show=False),
+        ]
+
+        def __init__(self, app_ref: "ReviewApp") -> None:
+            super().__init__()
+            self._app_ref = app_ref
+            # MergeState already exists on the app (populated by the
+            # MergeScreen that mounted before us).
+            self.rows: list[AlignedRow] = build_aligned_rows(app_ref.merge_state)
+            self._wrap = False
+            self._flash_timer = None  # mirrors MergeScreen's flash semantics
+
+        @property
+        def state(self) -> MergeState:
+            return self._app_ref.merge_state
+
+        @property
+        def current(self) -> int:
+            return self._app_ref.current_hunk
+
+        @current.setter
+        def current(self, value: int) -> None:
+            self._app_ref.current_hunk = value
+
+        def compose(self) -> ComposeResult:
+            yield Banner("")
+            self.flash = Static("", id="flash")
+            yield self.flash
+            self.pane = DiffPane("RESULT (single-pane)", kind="BASE")
+            yield self.pane
+            self.strip = HunkStrip()
+            yield self.strip
+            yield Footer()
+
+        def on_mount(self) -> None:
+            self._render_all()
+            self.call_after_refresh(self._focus_current_hunk)
+            _active_merge_ref[:] = [self]
+
+        def on_unmount(self) -> None:
+            if _active_merge_ref and _active_merge_ref[0] is self:
+                _active_merge_ref[:] = []
+
+        def _render_all(self) -> None:
+            self.pane.set_content(
+                render_single_pane_text(self.rows, self.state, self.current,
+                                        wrap=self._wrap))
+            self.strip.update_from(self.state, self.current)
+            banner = self.query_one("#banner", Banner)
+            mode = ("single-pane (2-way)" if self.state.is_2way
+                    else "single-pane (3-way)")
+            resolved = sum(1 for h in self.state.hunks if h.decision is not None)
+            total = len(self.state.hunks)
+            banner.update(
+                f"{self.state.relpath}   {mode}   "
+                f"hunk {self.current+1}/{total}   "
+                f"pkg={self.state.pkg}   {resolved}/{total} resolved   "
+                f"v 3-pane   s save   ?")
+
+        def _focus_current_hunk(self) -> None:
+            # Walk groups, tallying lines, to find where the current hunk
+            # starts in the single-pane layout (line counts differ from
+            # 3-pane because of the border lines + YOURS/THEIRS labels).
+            if not (0 <= self.current < len(self.state.hunks)):
+                return
+            line_no = 0
+            for key, group in _group_rows_by_hunk(self.rows):
+                if key == self.current:
+                    break
+                if key is None:
+                    line_no += len(group)
+                else:
+                    h = self.state.hunks[key]
+                    if h.decision is None:
+                        # header + YOURS label + yours lines + THEIRS label
+                        # + theirs lines + footer
+                        line_no += (2
+                                    + sum(1 for r in group if r.yours.text is not None) + 1
+                                    + sum(1 for r in group if r.theirs.text is not None) + 1)
+                    else:
+                        # header + decided lines + footer
+                        line_no += 2 + sum(
+                            1 for r in group
+                            if _effective_middle_cell(
+                                r, {key: h.decision}).text is not None)
+            vh = self.pane.size.height or 10
+            target = max(0, line_no - max(2, vh // 4))
+            self.pane.scroll_to(y=target, animate=False)
+
+        # _decision_and_advance + flash helpers mirror MergeScreen's; the
+        # status flash and re-render live on this screen so the user sees
+        # feedback in whichever view they're currently in.
+        def _decision_and_advance(self, side: Side) -> None:
+            if not self.state.hunks:
+                return
+            h = self.state.hunks[self.current]
+            self.state.undo_stack.append((h.index, h.decision))
+            if len(self.state.undo_stack) > UNDO_DEPTH:
+                self.state.undo_stack.pop(0)
+            h.decision = side
+            save_draft(self.state, self.current)
+            if self.current < len(self.state.hunks) - 1:
+                self.current += 1
+            self._render_all()
+            self._focus_current_hunk()
+            self._flash_decision(h, side)
+
+        # Reuse MergeScreen's flash helpers — same semantics, same widget id.
+        _flash_decision = MergeScreen._flash_decision
+        _clear_flash    = MergeScreen._clear_flash
+
+        def action_take_yours(self) -> None:    self._decision_and_advance(Side.YOURS)
+        def action_take_theirs(self) -> None:   self._decision_and_advance(Side.THEIRS)
+        def action_take_both_yt(self) -> None:  self._decision_and_advance(Side.BOTH_YT)
+        def action_take_both_ty(self) -> None:  self._decision_and_advance(Side.BOTH_TY)
+
+        def action_next_hunk(self) -> None:
+            if self.current < len(self.state.hunks) - 1:
+                self.current += 1
+                self._render_all()
+                self._focus_current_hunk()
+
+        def action_prev_hunk(self) -> None:
+            if self.current > 0:
+                self.current -= 1
+                self._render_all()
+                self._focus_current_hunk()
+
+        async def action_open_decision_modal(self) -> None:
+            if not self.state.hunks:
+                return
+            h = self.state.hunks[self.current]
+            try:
+                side = await self.app.push_screen_wait(DecisionModal(h, self.state))
+                if side is not None:
+                    self._decision_and_advance(side)
+            except AttributeError:
+                def cb(side: Optional[Side]) -> None:
+                    if side is not None:
+                        self._decision_and_advance(side)
+                self.app.push_screen(DecisionModal(h, self.state), cb)
+
+        def action_toggle_view(self) -> None:
+            # Swap back to MergeScreen. State persists on the app, so all
+            # decisions in flight remain visible.
+            self.app.switch_screen(MergeScreen(self._app_ref, self.state))
+
+        def action_scroll_down(self) -> None:
+            self.pane.scroll_to(y=self.pane.scroll_y + 1, animate=False)
+
+        def action_scroll_up(self) -> None:
+            self.pane.scroll_to(y=max(0, self.pane.scroll_y - 1), animate=False)
+
+        def action_scroll_page_down(self) -> None:
+            vh = self.pane.size.height or 10
+            self.pane.scroll_to(y=self.pane.scroll_y + max(1, vh - 2),
+                                animate=False)
+
+        def action_scroll_page_up(self) -> None:
+            vh = self.pane.size.height or 10
+            self.pane.scroll_to(y=max(0, self.pane.scroll_y - max(1, vh - 2)),
+                                animate=False)
+
+        def action_scroll_home(self) -> None:
+            self.pane.scroll_to(y=0, animate=False)
+
+        def action_scroll_end(self) -> None:
+            # Crude end target; render_single_pane_text emits ~4 lines per
+            # block, so this is "scroll far enough to clip at the bottom".
+            self.pane.scroll_to(y=len(self.rows) * 4, animate=False)
+
+        def action_save(self) -> None:
+            # Save is owned by MergeScreen's flow (ConfirmScreen if
+            # unresolved hunks, then save_merged). Swap there; the user
+            # presses 's' again from MergeScreen if they explicitly want
+            # to commit the save.
+            self.app.switch_screen(MergeScreen(self._app_ref, self.state))
+
+        def action_cancel(self) -> None:
+            self.app.pop_screen()
+
+        def action_undo(self) -> None:
+            if not self.state.undo_stack:
+                self.app.bell()
+                return
+            idx, prev = self.state.undo_stack.pop()
+            for h in self.state.hunks:
+                if h.index == idx:
+                    h.decision = prev
+                    break
+            self._render_all()
+
+        def action_all_yours(self) -> None:
+            for h in self.state.hunks:
+                h.decision = Side.YOURS
+            self._render_all()
+
+        def action_all_theirs(self) -> None:
+            for h in self.state.hunks:
+                h.decision = Side.THEIRS
+            self._render_all()
+
+        def action_raw_diff(self) -> None:
+            # Mirror MergeScreen's raw-diff behaviour if it exposes a
+            # callable on the app (defensive: not every build has it).
+            opener = getattr(self._app_ref, "_open_raw_diff", None)
+            if opener is not None:
+                opener(self.state)
+
+        def action_help(self) -> None:
+            self.app.push_screen(HelpScreen())
+
     # ---------- App wrapper ----------
     class ReviewApp(App):
         CSS = APP_CSS
