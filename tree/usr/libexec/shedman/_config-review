@@ -3390,6 +3390,7 @@ MERGE SCREEN
             Binding("B",            "take_both_ty",     "both T→Y"),
             Binding("n",            "next_hunk",        "next hunk"),
             Binding("p",            "prev_hunk",        "prev hunk"),
+            Binding("v",            "toggle_view",      "single-pane view"),
             Binding("s",            "save",             "save"),
             Binding("q",            "cancel",           "cancel"),
             Binding("question_mark,f1", "help",         "help"),
@@ -3636,6 +3637,11 @@ MERGE SCREEN
                     if side is not None:
                         self._decision_and_advance(side)
                 self.app.push_screen(DecisionModal(h, self.state), cb)
+
+        def action_toggle_view(self) -> None:
+            # Hand off to SinglePaneScreen. State persists on ReviewApp so
+            # decisions in flight remain visible after the swap.
+            self.app.switch_screen(SinglePaneScreen(self._app_ref))
 
         def action_take_yours(self) -> None: self._decision_and_advance(Side.YOURS)
         def action_take_theirs(self) -> None: self._decision_and_advance(Side.THEIRS)
