@@ -116,7 +116,6 @@ class Side(str, enum.Enum):
     THEIRS = "T"
     BOTH_YT = "BYT"
     BOTH_TY = "BTY"
-    SKIP = "X"
 
 
 @dataclass
@@ -970,8 +969,6 @@ def _apply_decision(out: list[str], h: Hunk) -> None:
         out.extend(h.yours_lines); out.extend(h.theirs_lines)
     elif dec == Side.BOTH_TY:
         out.extend(h.theirs_lines); out.extend(h.yours_lines)
-    elif dec == Side.SKIP:
-        out.extend(h.yours_lines)
     else:
         raise UnresolvedHunk(h)
 
@@ -2456,8 +2453,8 @@ def _run_stdin_decisions(conflicts: list[Conflict], *, force_2way: bool,
                          start_file: Optional[str]) -> int:
     """Test harness: read tokens from stdin, apply them, save.
 
-    Tokens (one per line): Y T BYT BTY X  → per-hunk decisions
-                           A T            → whole-file shortcuts
+    Tokens (one per line): Y T BYT BTY  → per-hunk decisions
+                           A T          → whole-file shortcuts
                            s              → save current file
                            n              → next file
                            q              → quit
@@ -2668,8 +2665,6 @@ def _load_textual_ui() -> None:
                     chars.append(f"[{THEME.added}]●[/]")
                 elif h.decision == Side.THEIRS:
                     chars.append(f"[{THEME.removed}]●[/]")
-                else:
-                    chars.append(f"[{THEME.dim}]●[/]")
             dots = " ".join(chars)
             legend = "  (● resolved  ◉ current  ○ pending)"
             # Cap total width to terminal columns using east-asian-aware math
@@ -2720,7 +2715,7 @@ def _load_textual_ui() -> None:
 
         - Context rows (no hunk): base cell unchanged.
         - Undecided hunk: base content with tag="und" so user sees yellow "?".
-        - YOURS / SKIP: mirror yours cell.
+        - YOURS: mirror yours cell.
         - THEIRS: mirror theirs cell.
         - BOTH_YT: prefer yours; fall back to theirs when yours is padding.
         - BOTH_TY: prefer theirs; fall back to yours when theirs is padding.
@@ -2736,7 +2731,7 @@ def _load_textual_ui() -> None:
                 # Pure insert row with nothing to show from base; leave blank.
                 return Cell(None, None, tag="equal")
             return Cell(lineno=row.base.lineno, text=row.base.text, tag="und")
-        if decision in (Side.YOURS, Side.SKIP):
+        if decision == Side.YOURS:
             return row.yours
         if decision == Side.THEIRS:
             return row.theirs
@@ -3229,7 +3224,6 @@ MERGE SCREEN
             Binding("t",            "take_theirs",      "THEIRS"),
             Binding("b",            "take_both_yt",     "both Y→T"),
             Binding("B",            "take_both_ty",     "both T→Y"),
-            Binding("x",            "skip_hunk",        "skip"),
             Binding("u",            "undo",             "undo"),
             Binding("shift+a",      "all_yours",        "all-Y"),
             Binding("shift+t",      "all_theirs",       "all-T"),
@@ -3417,7 +3411,6 @@ MERGE SCREEN
         def action_take_theirs(self) -> None: self._decision_and_advance(Side.THEIRS)
         def action_take_both_yt(self) -> None: self._decision_and_advance(Side.BOTH_YT)
         def action_take_both_ty(self) -> None: self._decision_and_advance(Side.BOTH_TY)
-        def action_skip_hunk(self) -> None: self._decision_and_advance(Side.SKIP)
 
         def action_undo(self) -> None:
             if not self.state.undo_stack:
