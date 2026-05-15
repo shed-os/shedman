@@ -3137,6 +3137,199 @@ MERGE SCREEN
         def on_input_submitted(self, event) -> None:
             self.dismiss(event.value)
 
+    # ---------- File tree panel ----------
+    class FileTreePanel(Vertical):
+        """Left-docked side panel hosting the conflict file tree.
+
+        Same widget surface as FileTreeScreen — same Tree widget,
+        same status icons, same key bindings — but lives inside a
+        screen instead of being a top-level screen. On Enter, posts
+        a FilePicked(conflict) message that the parent screen
+        handles by swapping app.merge_state.
+        """
+
+        can_focus = True
+        BINDINGS = [
+            Binding("j,down",           "cursor_down",       "↓"),
+            Binding("k,up",             "cursor_up",         "↑"),
+            Binding("n",                "next_leaf",         "next file"),
+            Binding("p",                "prev_leaf",         "prev file"),
+            Binding("g",                "cursor_top",        "top"),
+            Binding("G",                "cursor_bottom",     "bot"),
+            Binding("l,right,enter",    "activate",          "open"),
+            Binding("a",                "accept_all_theirs", "take-theirs-all"),
+            Binding("K",                "keep_all_yours",    "keep-yours-all"),
+            Binding("r",                "refresh",           "refresh"),
+            Binding("slash",            "filter",            "filter"),
+            Binding("escape",           "clear_filter",      "clear filter"),
+        ]
+
+        def __init__(self, app_ref: "ReviewApp") -> None:
+            super().__init__(id="file-tree-panel")
+            self._app_ref = app_ref
+            self._filter = ""
+
+        def compose(self) -> ComposeResult:
+            self.tree = Tree("conflicts", id="conflict-tree")
+            self.tree.show_root = False
+            yield self.tree
+
+        def on_mount(self) -> None:
+            self.refresh_tree()
+
+        def _visible_conflicts(self) -> list[Conflict]:
+            if not self._filter:
+                return list(self._app_ref.conflicts)
+            q = self._filter.lower()
+            return [c for c in self._app_ref.conflicts if q in c.relpath.lower()]
+
+        def _leaf_label(self, c: Conflict, filename: str):
+            label = Text(filename)
+            if c.kind == "text":
+                if c.has_base:
+                    hunks = c.hunk_count if c.hunk_count >= 0 else "?"
+                    label.append(f"  [3-way • {hunks} hunks]", style=THEME.dim)
+                else:
+                    label.append("  [2-way • BASE missing]", style=THEME.warning)
+            else:
+                label.append(f"  [{c.kind}]", style=THEME.dim)
+            return label
+
+        def refresh_tree(self) -> None:
+            self.tree.clear()
+            dir_nodes: dict[str, TreeNode] = {"": self.tree.root}
+            for c in sorted(self._visible_conflicts(), key=lambda x: x.relpath):
+                parts = c.relpath.split("/")
+                parent = self.tree.root
+                current = ""
+                for part in parts[:-1]:
+                    current = f"{current}/{part}" if current else part
+                    if current not in dir_nodes:
+                        new_dir = parent.add(f"{part}/", data=None, expand=True)
+                        dir_nodes[current] = new_dir
+                    parent = dir_nodes[current]
+                parent.add_leaf(self._leaf_label(c, parts[-1]), data=c)
+
+        def mark_current(self, relpath: str) -> None:
+            """Update the ▶ glyph next to the currently-open file."""
+            for node in self._all_leaves():
+                lbl = node.label.plain if hasattr(node.label, "plain") else str(node.label)
+                clean = lbl.lstrip("▶ ").lstrip()
+                if getattr(node.data, "relpath", None) == relpath:
+                    node.label = f"▶ {clean}"
+                else:
+                    node.label = clean
+
+        def _all_leaves(self):
+            stack = list(self.tree.root.children)
+            while stack:
+                n = stack.pop()
+                if n.children:
+                    stack.extend(n.children)
+                else:
+                    yield n
+
+        def _visible_leaves(self) -> list[TreeNode]:
+            # DFS from root, honouring expansion state: a collapsed dir's
+            # leaves are not visible, so n/p shouldn't visit them.
+            out: list[TreeNode] = []
+            def walk(node: TreeNode) -> None:
+                for child in node.children:
+                    if child.data is not None:
+                        out.append(child)
+                    elif child.is_expanded:
+                        walk(child)
+            walk(self.tree.root)
+            return out
+
+        def _move_to_leaf(self, direction: int) -> None:
+            leaves = self._visible_leaves()
+            if not leaves:
+                return
+            cur = self.tree.cursor_node
+            if cur is not None and cur in leaves:
+                idx = (leaves.index(cur) + direction) % len(leaves)
+            else:
+                idx = 0 if direction > 0 else len(leaves) - 1
+            self.tree.move_cursor(leaves[idx])
+
+        # ----- Actions -----
+
+        def action_cursor_down(self) -> None:
+            self.tree.action_cursor_down()
+
+        def action_cursor_up(self) -> None:
+            self.tree.action_cursor_up()
+
+        def action_cursor_top(self) -> None:
+            self.tree.move_cursor_to_line(0)
+
+        def action_cursor_bottom(self) -> None:
+            # Last visible node = deepest right-most descendant of expanded chain.
+            node = self.tree.root
+            while node.children and (node is self.tree.root or node.is_expanded):
+                node = node.children[-1]
+            if node is not self.tree.root:
+                self.tree.move_cursor(node)
+
+        def action_next_leaf(self) -> None:
+            self._move_to_leaf(+1)
+
+        def action_prev_leaf(self) -> None:
+            self._move_to_leaf(-1)
+
+        def action_activate(self) -> None:
+            node = self.tree.cursor_node
+            if node is None or node is self.tree.root:
+                return
+            if node.data is not None:
+                self.post_message(FilePicked(node.data))
+            else:
+                node.toggle()
+
+        def action_accept_all_theirs(self) -> None:
+            visible = self._visible_conflicts()
+            scope = ("every visible file" if self._filter else "every file")
+            def after(ans: Optional[bool]) -> None:
+                if ans:
+                    self._app_ref.bulk_accept_theirs(visible)
+                    self.refresh_tree()
+            self.app.push_screen(
+                ConfirmScreen("Accept THEIRS for all files",
+                              f"Replace {scope} ({len(visible)}) with its\n"
+                              f"upstream version. A .shedosbak is written for each."),
+                after,
+            )
+
+        def action_keep_all_yours(self) -> None:
+            visible = self._visible_conflicts()
+            scope = ("every visible .shedosnew" if self._filter else "every .shedosnew")
+            def after(ans: Optional[bool]) -> None:
+                if ans:
+                    self._app_ref.bulk_keep_yours(visible)
+                    self.refresh_tree()
+            self.app.push_screen(
+                ConfirmScreen("Keep YOURS for all files",
+                              f"Delete {scope} ({len(visible)}) and leave\n"
+                              f"your live copies as-is."),
+                after,
+            )
+
+        def action_refresh(self) -> None:
+            self.refresh_tree()
+
+        def action_filter(self) -> None:
+            def after(value: Optional[str]) -> None:
+                if value is None:
+                    return
+                self._filter = value.strip()
+                self.refresh_tree()
+            self.app.push_screen(FilterPromptScreen(self._filter), after)
+
+        def action_clear_filter(self) -> None:
+            self._filter = ""
+            self.refresh_tree()
+
     # ---------- File tree screen ----------
     class FileTreeScreen(Screen):
         # Tree widget owns Enter/arrow keys before screen-level bindings
