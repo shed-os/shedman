@@ -2293,8 +2293,31 @@ def cmd_dry_run(conflicts: list[Conflict], force_2way: bool = False) -> int:
 # Textual app (lazy-imported)
 
 
+def _relaunch_in_floating_window_if_needed() -> None:
+    # Re-exec under kitty with class=shedos-review so Hyprland's
+    # window rule fires and the TUI opens as a centered floating
+    # window. No-op outside Wayland, inside tmux, when kitty is
+    # missing, or when we've already re-execed (marker env var).
+    if os.environ.get("SHEDOS_REVIEW_TUI_HOSTED") == "1":
+        return
+    if os.environ.get("TMUX"):
+        return
+    if not os.environ.get("WAYLAND_DISPLAY"):
+        return
+    if not sys.stdin.isatty():
+        return
+    kitty = shutil.which("kitty")
+    if not kitty:
+        return
+    env = {**os.environ, "SHEDOS_REVIEW_TUI_HOSTED": "1"}
+    cmd = [kitty, "--class", "shedos-review", "-e",
+           sys.executable, os.path.abspath(sys.argv[0]), *sys.argv[1:]]
+    os.execvpe(kitty, cmd, env)
+
+
 def _run_textual(conflicts: list[Conflict], *, start_file: Optional[str] = None,
                  walk_all: bool = False, force_2way: bool = False) -> int:
+    _relaunch_in_floating_window_if_needed()
     try:
         from .review_configs_ui import run_app  # type: ignore
     except Exception:
