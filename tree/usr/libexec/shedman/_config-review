@@ -3250,11 +3250,27 @@ MERGE SCREEN
             Binding("shift+e",         "edit_merged",      "edit merged",   show=False),
         ]
 
+        @property
+        def state(self) -> MergeState:
+            return self._app_ref.merge_state
+
+        @property
+        def current(self) -> int:
+            return self._app_ref.current_hunk
+
+        @current.setter
+        def current(self, value: int) -> None:
+            self._app_ref.current_hunk = value
+
         def __init__(self, app_ref: "ReviewApp", state: MergeState) -> None:
             super().__init__()
             self._app_ref = app_ref
-            self.state = state
-            self.current = 0
+            # Publish state onto the app so DecisionModal + SinglePaneScreen
+            # (introduced in later tasks) can read the same MergeState
+            # instance. self.state and self.current below are property
+            # shims that proxy to the app.
+            app_ref.merge_state = state
+            app_ref.current_hunk = 0
             # Soft-wrap off by default: minified JSON / long one-liners look
             # awful when reflowed. `z` toggles to Rich's wrap-at-pane-width
             # mode when the user prefers vertical expansion over pan.
@@ -3594,6 +3610,11 @@ MERGE SCREEN
             self.walk_all = walk_all
             self.force_2way = force_2way
             self._resolved: set[str] = set()
+            # State shared between MergeScreen, DecisionModal, and SinglePaneScreen.
+            # Whichever screen is mounted reads/writes through these; the app holds
+            # the single source of truth.
+            self.merge_state: Optional[MergeState] = None
+            self.current_hunk: int = 0
 
         def on_mount(self) -> None:
             self.push_screen(FileTreeScreen(self))
