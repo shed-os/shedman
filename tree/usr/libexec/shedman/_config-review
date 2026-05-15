@@ -3996,12 +3996,15 @@ MERGE SCREEN
             # block, so this is "scroll far enough to clip at the bottom".
             self.pane.scroll_to(y=len(self.rows) * 4, animate=False)
 
-        def action_save(self) -> None:
-            # Save is owned by MergeScreen's flow (ConfirmScreen if
-            # unresolved hunks, then save_merged). Swap there; the user
-            # presses 's' again from MergeScreen if they explicitly want
-            # to commit the save.
-            self.app.switch_screen(MergeScreen(self._app_ref, self.state))
+        # Save flow: identical to MergeScreen's. Reuse the methods
+        # verbatim so save behaves the same regardless of which view
+        # the user pressed 's' from — including the unresolved-hunks
+        # confirm modal and the post-save return to the file tree.
+        action_save              = MergeScreen.action_save
+        _pick_defaults_and_save  = MergeScreen._pick_defaults_and_save
+        _do_save                 = MergeScreen._do_save
+        _force_save              = MergeScreen._force_save
+        _show_io_error           = MergeScreen._show_io_error
 
         def action_cancel(self) -> None:
             self.app.pop_screen()
