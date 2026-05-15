@@ -3275,6 +3275,7 @@ MERGE SCREEN
             # awful when reflowed. `z` toggles to Rich's wrap-at-pane-width
             # mode when the user prefers vertical expansion over pan.
             self._wrap = False
+            self._flash_timer = None  # cancelled + replaced on every decision
             self.rows: list[AlignedRow] = build_aligned_rows(state)
             # row index → index within state.hunks (for n/p + auto-scroll).
             self._row_of_hunk: dict[int, int] = {}
@@ -3284,6 +3285,8 @@ MERGE SCREEN
 
         def compose(self) -> ComposeResult:
             yield Banner("")
+            self.flash = Static("", id="flash")
+            yield self.flash
             self.pane_yours  = DiffPane("YOURS (live)",        kind="YOURS")
             self.pane_base   = DiffPane("RESULT (preview)",    kind="BASE")
             self.pane_theirs = DiffPane("THEIRS (upstream)",   kind="THEIRS")
@@ -3417,6 +3420,31 @@ MERGE SCREEN
                 self.current += 1
             self._render_all()
             self._focus_current_hunk()
+            self._flash_decision(h, side)
+
+        def _flash_decision(self, h: Hunk, side: Side) -> None:
+            resolved = sum(1 for hh in self.state.hunks if hh.decision is not None)
+            total = len(self.state.hunks)
+            label = {
+                Side.YOURS:   "YOURS",
+                Side.THEIRS:  "THEIRS",
+                Side.BOTH_YT: "BOTH (Y→T)",
+                Side.BOTH_TY: "BOTH (T→Y)",
+            }.get(side, side.name)
+            self.flash.update(
+                f"[{THEME.added}]✓ took {label} on #{h.index+1}[/] "
+                f"— {resolved}/{total} resolved · autosaved")
+            # Replace, don't stack; rapid Y-Y-Y-Y bursts leave one live timer.
+            if self._flash_timer is not None:
+                try:
+                    self._flash_timer.stop()
+                except Exception:
+                    pass
+            self._flash_timer = self.set_timer(2.0, self._clear_flash)
+
+        def _clear_flash(self) -> None:
+            self.flash.update("")
+            self._flash_timer = None
 
         def action_next_hunk(self) -> None:
             if self.current < len(self.state.hunks) - 1:
