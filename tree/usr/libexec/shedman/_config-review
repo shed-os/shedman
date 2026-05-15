@@ -1740,17 +1740,6 @@ def _vscode_binary() -> str:
     return ""
 
 
-def _prefer_gui() -> bool:
-    """Auto-detect: GUI iff display + VS Code + interactive TTY."""
-    if not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
-        return False
-    if not _vscode_binary():
-        return False
-    if not (sys.stdin.isatty() and sys.stdout.isatty()):
-        return False
-    return True
-
-
 def _has_conflict_markers(path: Path) -> bool:
     try:
         text = path.read_text(errors="replace")
@@ -2352,11 +2341,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     backend = p.add_mutually_exclusive_group()
     backend.add_argument("--gui", action="store_true",
                          help="Open conflicts in the VS Code merge editor. "
-                              "Default when a display is available and "
-                              "`code` (or `codium`) is on PATH.")
+                              "Requires `code` (or `codium`) on PATH.")
     backend.add_argument("--tui", action="store_true",
-                         help="Force the Textual TUI even if a GUI is "
-                              "available.")
+                         help="Use the Textual TUI (default).")
     # Hidden test hook: read decisions from stdin instead of running the TUI.
     p.add_argument("--stdin-decisions", action="store_true",
                    help=argparse.SUPPRESS)
@@ -2441,15 +2428,13 @@ def main(argv: Optional[list[str]] = None) -> int:
                       file=sys.stderr)
                 return 1
 
-        # Decide backend: explicit flag wins, else auto-detect. The
-        # missing-binary fallback to TUI happens inside _run_vscode so an
-        # explicit --gui still works without crashing.
-        if args.tui:
-            backend = "tui"
-        elif args.gui:
+        # TUI is the default; --gui is opt-in. The missing-binary
+        # fallback to TUI still happens inside _run_vscode so an
+        # explicit --gui on a system without `code` doesn't crash.
+        if args.gui:
             backend = "gui"
         else:
-            backend = "gui" if _prefer_gui() else "tui"
+            backend = "tui"
 
         if backend == "gui":
             return _run_vscode(conflicts, force_2way=args.two_way)
