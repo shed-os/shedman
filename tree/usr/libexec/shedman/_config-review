@@ -2885,7 +2885,6 @@ MERGE SCREEN
   n p       next / prev hunk (re-centers)
   y         take YOURS   |   t   take THEIRS
   b         take BOTH (Y→T)  |  B  take BOTH (T→Y)
-  x         skip (keeps YOURS at save)
   u         undo last per-hunk decision
   A         take-all YOURS  |  T  take-all THEIRS
   s         save (atomic write, leaves .shedosbak)
@@ -3222,30 +3221,33 @@ MERGE SCREEN
         # user can verify the TUI actually handles them. The previous
         # hidden-arrow design made it look like scroll was broken.
         BINDINGS = [
-            Binding("j,down",       "scroll_down",      "↓ line"),
-            Binding("k,up",         "scroll_up",        "↑ line"),
-            Binding("h,left",       "pan_left",         "← pan"),
-            Binding("l,right",      "pan_right",        "→ pan"),
-            Binding("z",            "toggle_wrap",      "wrap"),
-            Binding("pagedown,ctrl+d", "scroll_page_down", "PgDn"),
-            Binding("pageup,ctrl+u",   "scroll_page_up",   "PgUp"),
-            Binding("g",            "scroll_home",      "top"),
-            Binding("G",            "scroll_end",       "bot"),
-            Binding("n",            "next_hunk",        "next hunk"),
-            Binding("p",            "prev_hunk",        "prev hunk"),
+            # Footer-visible essentials.
             Binding("y",            "take_yours",       "YOURS"),
             Binding("t",            "take_theirs",      "THEIRS"),
             Binding("b",            "take_both_yt",     "both Y→T"),
             Binding("B",            "take_both_ty",     "both T→Y"),
-            Binding("u",            "undo",             "undo"),
-            Binding("shift+a",      "all_yours",        "all-Y"),
-            Binding("shift+t",      "all_theirs",       "all-T"),
+            Binding("n",            "next_hunk",        "next hunk"),
+            Binding("p",            "prev_hunk",        "prev hunk"),
             Binding("s",            "save",             "save"),
-            Binding("d",            "raw_diff",         "raw-diff"),
-            Binding("e",            "edit_yours",       "edit"),
-            Binding("shift+e",      "edit_merged",      "edit merged"),
             Binding("q",            "cancel",           "cancel"),
             Binding("question_mark,f1", "help",         "help"),
+
+            # Bound but hidden from footer — surfaced in the help modal.
+            Binding("j,down",          "scroll_down",      "↓ line",        show=False),
+            Binding("k,up",            "scroll_up",        "↑ line",        show=False),
+            Binding("h,left",          "pan_left",         "← pan",         show=False),
+            Binding("l,right",         "pan_right",        "→ pan",         show=False),
+            Binding("z",               "toggle_wrap",      "wrap",          show=False),
+            Binding("pagedown,ctrl+d", "scroll_page_down", "PgDn",          show=False),
+            Binding("pageup,ctrl+u",   "scroll_page_up",   "PgUp",          show=False),
+            Binding("g",               "scroll_home",      "top",           show=False),
+            Binding("G",               "scroll_end",       "bot",           show=False),
+            Binding("u",               "undo",             "undo",          show=False),
+            Binding("shift+a",         "all_yours",        "all-Y",         show=False),
+            Binding("shift+t",         "all_theirs",       "all-T",         show=False),
+            Binding("d",               "raw_diff",         "raw-diff",      show=False),
+            Binding("e",              "edit_yours",       "edit",          show=False),
+            Binding("shift+e",         "edit_merged",      "edit merged",   show=False),
         ]
 
         def __init__(self, app_ref: "ReviewApp", state: MergeState) -> None:
