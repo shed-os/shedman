@@ -2643,9 +2643,12 @@ def _load_textual_ui() -> None:
     }}
 
     #review-row     {{ layout: horizontal; height: 1fr; }}
-    FileTreePanel   {{ width: 28; }}
+    FileTreePanel   {{ width: 28; border: round {THEME.surface}; padding: 0; background: {THEME.bg}; color: {THEME.text}; }}
+    FileTreePanel:focus-within {{ border: round {THEME.accent}; }}
     FileTreePanel.hidden {{ display: none; }}
-    MergePanel      {{ width: 1fr; layout: vertical; }}
+    #conflict-tree {{ background: {THEME.bg}; color: {THEME.text}; }}
+    MergePanel      {{ width: 1fr; layout: vertical; border: round {THEME.surface}; }}
+    MergePanel:focus {{ border: round {THEME.accent}; }}
     #merge-top      {{ layout: horizontal; height: 2fr; }}
     #merge-top.hidden {{ display: none; }}
     #merge-empty-state {{ width: 1fr; height: 1fr; padding: 1 2;
@@ -3177,9 +3180,9 @@ MERGE SCREEN
             self._filter = ""
 
         def compose(self) -> ComposeResult:
-            self.tree = Tree("conflicts", id="conflict-tree")
-            self.tree.show_root = False
-            yield self.tree
+            self._tree = Tree("conflicts", id="conflict-tree")
+            self._tree.show_root = False
+            yield self._tree
 
         def on_mount(self) -> None:
             self.refresh_tree()
@@ -3203,11 +3206,11 @@ MERGE SCREEN
             return label
 
         def refresh_tree(self) -> None:
-            self.tree.clear()
-            dir_nodes: dict[str, TreeNode] = {"": self.tree.root}
+            self._tree.clear()
+            dir_nodes: dict[str, TreeNode] = {"": self._tree.root}
             for c in sorted(self._visible_conflicts(), key=lambda x: x.relpath):
                 parts = c.relpath.split("/")
-                parent = self.tree.root
+                parent = self._tree.root
                 current = ""
                 for part in parts[:-1]:
                     current = f"{current}/{part}" if current else part
@@ -3228,7 +3231,7 @@ MERGE SCREEN
                     node.label = clean
 
         def _all_leaves(self):
-            stack = list(self.tree.root.children)
+            stack = list(self._tree.root.children)
             while stack:
                 n = stack.pop()
                 if n.children:
@@ -3246,38 +3249,38 @@ MERGE SCREEN
                         out.append(child)
                     elif child.is_expanded:
                         walk(child)
-            walk(self.tree.root)
+            walk(self._tree.root)
             return out
 
         def _move_to_leaf(self, direction: int) -> None:
             leaves = self._visible_leaves()
             if not leaves:
                 return
-            cur = self.tree.cursor_node
+            cur = self._tree.cursor_node
             if cur is not None and cur in leaves:
                 idx = (leaves.index(cur) + direction) % len(leaves)
             else:
                 idx = 0 if direction > 0 else len(leaves) - 1
-            self.tree.move_cursor(leaves[idx])
+            self._tree.move_cursor(leaves[idx])
 
         # ----- Actions -----
 
         def action_cursor_down(self) -> None:
-            self.tree.action_cursor_down()
+            self._tree.action_cursor_down()
 
         def action_cursor_up(self) -> None:
-            self.tree.action_cursor_up()
+            self._tree.action_cursor_up()
 
         def action_cursor_top(self) -> None:
-            self.tree.move_cursor_to_line(0)
+            self._tree.move_cursor_to_line(0)
 
         def action_cursor_bottom(self) -> None:
             # Last visible node = deepest right-most descendant of expanded chain.
-            node = self.tree.root
-            while node.children and (node is self.tree.root or node.is_expanded):
+            node = self._tree.root
+            while node.children and (node is self._tree.root or node.is_expanded):
                 node = node.children[-1]
-            if node is not self.tree.root:
-                self.tree.move_cursor(node)
+            if node is not self._tree.root:
+                self._tree.move_cursor(node)
 
         def action_next_leaf(self) -> None:
             self._move_to_leaf(+1)
@@ -3286,8 +3289,8 @@ MERGE SCREEN
             self._move_to_leaf(-1)
 
         def action_activate(self) -> None:
-            node = self.tree.cursor_node
-            if node is None or node is self.tree.root:
+            node = self._tree.cursor_node
+            if node is None or node is self._tree.root:
                 return
             if node.data is not None:
                 self.post_message(FilePicked(node.data))
@@ -3336,6 +3339,14 @@ MERGE SCREEN
         def action_clear_filter(self) -> None:
             self._filter = ""
             self.refresh_tree()
+
+        def on_tree_node_selected(self, event) -> None:
+            # Tree widget owns Enter and click — both fire NodeSelected.
+            # Route a leaf selection to ReviewScreen via FilePicked.
+            node = event.node
+            if node is None or node.data is None:
+                return
+            self.post_message(FilePicked(node.data))
 
     # ---------- Merge panel ----------
     class MergePanel(Vertical):
@@ -3809,10 +3820,11 @@ MERGE SCREEN
         """
 
         BINDINGS = [
-            Binding("ctrl+b",        "toggle_tree",   "toggle tree"),
-            Binding("question_mark,f1", "help",       "help"),
-            Binding("q",             "quit",          "quit"),
-            # Tab/Shift+Tab handled by Textual's defaults.
+            Binding("tab",           "focus_next",     "switch tree ↔ merge"),
+            Binding("shift+tab",     "focus_previous", "switch tree ↔ merge", show=False),
+            Binding("ctrl+b",        "toggle_tree",    "toggle tree"),
+            Binding("question_mark,f1", "help",        "help"),
+            Binding("q",             "quit",           "quit"),
         ]
 
         def __init__(self, app_ref: "ReviewApp") -> None:
@@ -3838,9 +3850,9 @@ MERGE SCREEN
             self.flash = Static("", id="flash")
             yield self.flash
 
-            self.tree  = FileTreePanel(self._app_ref)
+            self.file_tree  = FileTreePanel(self._app_ref)
             self.merge = MergePanel(self._app_ref)
-            yield Horizontal(self.tree, self.merge, id="review-row")
+            yield Horizontal(self.file_tree, self.merge, id="review-row")
 
             self.strip = HunkStrip()
             yield self.strip
@@ -3854,6 +3866,9 @@ MERGE SCREEN
             else:
                 self.merge.show_all_resolved()
                 self._update_banner_for_empty()
+            # Land the cursor on the merge area so y/t/b/B work without
+            # the user first having to Tab over from the file tree.
+            self.call_after_refresh(self.merge.focus)
 
         def on_unmount(self) -> None:
             if _active_merge_ref and _active_merge_ref[0] is self:
@@ -3882,7 +3897,7 @@ MERGE SCREEN
         def _load_conflict(self, c: "Conflict") -> None:
             state = load_merge_state(c, force_2way=self._app_ref.force_2way)
             self._load_state(state)
-            self.tree.mark_current(c.relpath)
+            self.file_tree.mark_current(c.relpath)
 
         def _load_state(self, state: MergeState) -> None:
             self._app_ref.merge_state  = state
@@ -3915,7 +3930,7 @@ MERGE SCREEN
 
         def on_save_done(self, msg: SaveDone) -> None:
             self._app_ref.mark_resolved(msg.relpath)
-            self.tree.refresh_tree()
+            self.file_tree.refresh_tree()
             next_c = self._next_unresolved()
             if next_c is not None:
                 self._load_conflict(next_c)
@@ -3943,12 +3958,18 @@ MERGE SCREEN
 
         # ---- Actions ----
 
+        def action_focus_next(self) -> None:
+            self.focus_next()
+
+        def action_focus_previous(self) -> None:
+            self.focus_previous()
+
         def action_toggle_tree(self) -> None:
             self._tree_visible = not self._tree_visible
             if self._tree_visible:
-                self.tree.remove_class("hidden")
+                self.file_tree.remove_class("hidden")
             else:
-                self.tree.add_class("hidden")
+                self.file_tree.add_class("hidden")
 
         def action_help(self) -> None:
             self.app.push_screen(HelpScreen())
@@ -4076,7 +4097,7 @@ MERGE SCREEN
             self.conflicts = [c for c in self.conflicts if c.relpath not in self._resolved]
             for s in self.screen_stack:
                 if isinstance(s, ReviewScreen):
-                    s.tree.refresh_tree()
+                    s.file_tree.refresh_tree()
                     break
 
         def is_resolved(self, relpath: str) -> bool:
