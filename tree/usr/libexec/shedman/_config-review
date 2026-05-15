@@ -3621,22 +3621,14 @@ MERGE SCREEN
                 self._render_all()
                 self._focus_current_hunk()
 
-        async def action_open_decision_modal(self) -> None:
+        def action_open_decision_modal(self) -> None:
             if not self.state.hunks:
                 return
             h = self.state.hunks[self.current]
-            # push_screen_wait is the textual >= 0.40 idiom; older
-            # Textuals raise AttributeError and we fall back to the
-            # callback form.
-            try:
-                side = await self.app.push_screen_wait(DecisionModal(h, self.state))
+            def cb(side: Optional[Side]) -> None:
                 if side is not None:
                     self._decision_and_advance(side)
-            except AttributeError:
-                def cb(side: Optional[Side]) -> None:
-                    if side is not None:
-                        self._decision_and_advance(side)
-                self.app.push_screen(DecisionModal(h, self.state), cb)
+            self.app.push_screen(DecisionModal(h, self.state), cb)
 
         def action_toggle_view(self) -> None:
             # Hand off to SinglePaneScreen. State persists on ReviewApp so
@@ -3968,19 +3960,14 @@ MERGE SCREEN
                 self._render_all()
                 self._focus_current_hunk()
 
-        async def action_open_decision_modal(self) -> None:
+        def action_open_decision_modal(self) -> None:
             if not self.state.hunks:
                 return
             h = self.state.hunks[self.current]
-            try:
-                side = await self.app.push_screen_wait(DecisionModal(h, self.state))
+            def cb(side: Optional[Side]) -> None:
                 if side is not None:
                     self._decision_and_advance(side)
-            except AttributeError:
-                def cb(side: Optional[Side]) -> None:
-                    if side is not None:
-                        self._decision_and_advance(side)
-                self.app.push_screen(DecisionModal(h, self.state), cb)
+            self.app.push_screen(DecisionModal(h, self.state), cb)
 
         def action_toggle_view(self) -> None:
             # Swap back to MergeScreen. State persists on the app, so all
