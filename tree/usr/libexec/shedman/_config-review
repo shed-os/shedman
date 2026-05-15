@@ -2655,16 +2655,24 @@ def _load_textual_ui() -> None:
         def update_from(self, state: MergeState, current: int) -> None:
             chars = []
             for i, h in enumerate(state.hunks):
-                if i == current:
-                    chars.append("[b]◉[/b]")
-                elif h.decision is None:
-                    chars.append("○")
+                # Pick the base glyph from the decision (or pending).
+                if h.decision is None:
+                    glyph = "○"
                 elif h.decision in (Side.BOTH_YT, Side.BOTH_TY):
-                    chars.append(f"[{THEME.both}]●[/]")
+                    glyph = f"[{THEME.both}]●[/]"
                 elif h.decision == Side.YOURS:
-                    chars.append(f"[{THEME.added}]●[/]")
+                    glyph = f"[{THEME.added}]●[/]"
                 elif h.decision == Side.THEIRS:
-                    chars.append(f"[{THEME.removed}]●[/]")
+                    glyph = f"[{THEME.removed}]●[/]"
+                else:
+                    glyph = "○"  # defensive; shouldn't happen post-SKIP-removal
+
+                # If this is also the current hunk, overlay reverse-bold so the
+                # user sees both states at once (last-hunk-looks-unsaved fix).
+                if i == current:
+                    glyph = f"[b reverse]{glyph}[/]"
+
+                chars.append(glyph)
             dots = " ".join(chars)
             legend = "  (● resolved  ◉ current  ○ pending)"
             # Cap total width to terminal columns using east-asian-aware math
@@ -2676,8 +2684,6 @@ def _load_textual_ui() -> None:
             padding = 2
             dots_budget = max(10, term_cols - display_width(legend) - padding)
             if display_width(dots) > dots_budget:
-                # Keep the current hunk visible: slice the dot list around it
-                # and truncate the edges of the result.
                 dots = truncate_to_width(dots, dots_budget)
             self.update(dots + legend)
 
