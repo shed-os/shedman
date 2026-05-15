@@ -278,15 +278,21 @@ fi
 if (( pac_n > 0 )); then
     echo
     _hr
-    echo "Running pacman -Syu --noconfirm --ask=4…"
+    pac_flags=()
+    if (( YES )); then
+        # Unattended: --ask=4 auto-answers the conflict-remove prompt
+        # so the run doesn't abort on conflicts=()/replaces=() metadata.
+        pac_flags+=(--noconfirm --ask=4)
+        echo "Running pacman -Syu --noconfirm --ask=4…"
+    else
+        # Interactive: let pacman ask everything. --noconfirm hides
+        # file-conflict and replacement prompts from the user, which
+        # is the wrong default when something needs human judgment.
+        echo "Running pacman -Syu…"
+    fi
     _hr
-    # --ask=4 makes conflicts=() work under --noconfirm; without it,
-    # pacman defaults the conflict-remove prompt to NO and aborts.
-    sudo pacman -Syu --noconfirm --ask=4 || {
+    sudo pacman -Syu "${pac_flags[@]}" || {
         echo "pacman exited non-zero; aborting before config sync." >&2
-        # Still create the post-snapshot so the pre/post pair is complete —
-        # snapper's cleanup will collapse empty pairs on its next run. Leaving
-        # an unpaired pre-snapshot around makes rollback listings confusing.
         _snap_post "$pre_snap"
         exit 1
     }
