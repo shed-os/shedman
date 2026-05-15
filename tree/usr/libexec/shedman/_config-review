@@ -2600,6 +2600,8 @@ def _load_textual_ui() -> None:
     #banner {{ dock: top; height: 1; background: {THEME.panel}; color: {THEME.accent}; padding: 0 1; }}
     #banner.two-way {{ background: {THEME.warning}; color: {THEME.bg}; }}
 
+    #flash {{ dock: top; height: 1; background: {THEME.surface}; color: {THEME.added}; padding: 0 1; }}
+
     #hunk-strip {{ dock: bottom; height: 1; background: {THEME.panel}; color: {THEME.text}; padding: 0 1; }}
     #hint-bar  {{ dock: bottom; height: 1; background: {THEME.panel}; color: {THEME.dim}; padding: 0 1; }}
 
@@ -2902,22 +2904,17 @@ def _load_textual_ui() -> None:
                                                      is_current=False))
                 out.append(footer + "\n", style=border_color)
             else:
-                # Resolved block — show only the chosen content.
-                label = {
-                    Side.YOURS:   "YOURS",
-                    Side.THEIRS:  "THEIRS",
-                    Side.BOTH_YT: "BOTH (Y→T)",
-                    Side.BOTH_TY: "BOTH (T→Y)",
-                }.get(h.decision, str(h.decision))
-                header = f"╓─ Hunk {key+1} · ✓ {label} " + "─" * 20 + "╖"
-                footer = "╙" + "─" * (len(header) - 2) + "╜"
-                out.append(header + "\n", style=border_color)
+                # Resolved hunks vanish into the merged stream — no
+                # border, no header. The user has chosen; show the
+                # result inline as final content. When the cursor is
+                # on this hunk (user navigated back to revisit), give
+                # the cells a surface background so they can still see
+                # which lines they're on.
                 for row in group:
                     cell = _effective_middle_cell(row, decisions)
                     if cell.text is not None:
-                        out.append_text(_render_cell(cell, is_hunk=True,
-                                                     is_current=False))
-                out.append(footer + "\n", style=border_color)
+                        out.append_text(_render_cell(cell, is_hunk=False,
+                                                     is_current=is_current))
         return out
 
     class DiffPane(VerticalScroll):
@@ -3912,8 +3909,9 @@ MERGE SCREEN
                                     + sum(1 for r in group if r.yours.text is not None) + 1
                                     + sum(1 for r in group if r.theirs.text is not None) + 1)
                     else:
-                        # header + decided lines + footer
-                        line_no += 2 + sum(
+                        # Resolved hunks render as plain inline content
+                        # (no border, no header).
+                        line_no += sum(
                             1 for r in group
                             if _effective_middle_cell(
                                 r, {key: h.decision}).text is not None)
