@@ -215,6 +215,45 @@ else
 fi
 _hr
 
+# Pre-cutover detection. Installs predating the April 2026 packaging
+# cut-over were laid down by archiso without shedos-meta or its dep
+# closure. Running `pacman -Syu` alone leaves them missing fprintd,
+# the TOD fingerprint drivers, shedos-screensaver, and the rest. Run
+# `shedman migrate` first so the legacy install is bootstrapped onto
+# the packaged model before we touch upgrades.
+if [[ -x /usr/libexec/shedman/migrate ]]; then
+    migrate_state=$(/usr/libexec/shedman/migrate --detect 2>/dev/null || echo unknown)
+    if [[ $migrate_state == legacy ]]; then
+        echo
+        echo "Pre-cutover ShedOS detected (no shedos-meta installed)."
+        echo "Bootstrapping the packaged model before upgrading…"
+        echo
+        if (( YES )); then
+            sudo /usr/libexec/shedman/migrate --yes || {
+                echo "shedman migrate failed; aborting before update." >&2
+                exit 1
+            }
+        else
+            read -rp "Run shedman migrate now? [Y/n] " yn
+            case "$yn" in
+                [nN]|[nN][oO])
+                    echo "Skipped. shedman update may leave the system" \
+                         "partially packaged; rerun with migrate when ready."
+                    ;;
+                *)
+                    sudo /usr/libexec/shedman/migrate --yes || {
+                        echo "shedman migrate failed; aborting before update." >&2
+                        exit 1
+                    }
+                    ;;
+            esac
+        fi
+        # migrate already ran pacman -Syu shedos-meta which pulls every
+        # upgrade in transitively. Re-check below; in the common case
+        # there's nothing left for this run to do.
+    fi
+fi
+
 echo "Checking for pacman updates…"
 pac=$(checkupdates 2>/dev/null || true)
 
