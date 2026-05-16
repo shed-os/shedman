@@ -254,6 +254,22 @@ if [[ -x /usr/libexec/shedman/migrate ]]; then
     fi
 fi
 
+# Refresh the pacman mirrorlist if it's older than 4 hours. The
+# weekly timer can drift behind upstream mirror status between
+# runs; a fresh-enough list keeps `pacman -Syu` from crawling on a
+# slow regional mirror.
+_mirrorlist=/etc/pacman.d/mirrorlist
+_refresh=/usr/lib/shedos/refresh-mirrorlist.sh
+if [[ -x $_refresh ]] && command -v reflector >/dev/null 2>&1; then
+    _now=$(date +%s)
+    _mtime=$(stat -c %Y "$_mirrorlist" 2>/dev/null || echo 0)
+    if (( _now - _mtime > 14400 )); then
+        echo "Refreshing pacman mirrorlist (last ranked $(( (_now - _mtime) / 3600 ))h ago)…"
+        sudo "$_refresh" 2>&1 | sed 's/^/reflector: /' || \
+            echo "reflector exited non-zero; continuing with the current mirrorlist." >&2
+    fi
+fi
+
 echo "Checking for pacman updates…"
 pac=$(checkupdates 2>/dev/null || true)
 
