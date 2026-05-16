@@ -1,0 +1,347 @@
+#!/usr/bin/env python3
+"""shedman datetime — set timezone, NTP, and the system clock.
+
+Reads current state via `timedatectl show`, presents a single-screen
+Textual app, applies changes via `timedatectl set-{timezone,time,ntp}`
+on Apply. The three set- D-Bus actions are authorized for wheel users
+by /usr/share/polkit-1/rules.d/49-shedos-timedate.rules with
+auth_admin_keep; the shipped polkit-gnome agent (Hyprland autostart)
+gives the one password prompt per ~5 min session.
+"""
+
+from __future__ import annotations
+
+import argparse
+import subprocess
+import sys
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+from textual.app import App, ComposeResult
+from textual.binding import Binding
+from textual.containers import Container, Horizontal
+from textual.validation import ValidationResult, Validator
+from textual.widgets import (
+    Button, Footer, Input, Label, ListItem, ListView, Static, Switch,
+)
+
+
+class DateValidator(Validator):
+    def validate(self, value: str) -> ValidationResult:
+        if not value:
+            return self.failure("date required")
+        try:
+            datetime.strptime(value, "%Y-%m-%d")
+            return self.success()
+        except ValueError:
+            return self.failure("date must be YYYY-MM-DD (real calendar day)")
+
+
+class TimeValidator(Validator):
+    def validate(self, value: str) -> ValidationResult:
+        if not value:
+            return self.failure("time required")
+        try:
+            datetime.strptime(value, "%H:%M:%S")
+            return self.success()
+        except ValueError:
+            return self.failure("time must be HH:MM:SS (00:00:00 – 23:59:59)")
+
+
+def _show() -> dict[str, str]:
+    out = subprocess.run(
+        ["timedatectl", "show", "--all"],
+        capture_output=True, text=True, check=True,
+    ).stdout
+    return dict(line.split("=", 1) for line in out.splitlines() if "=" in line)
+
+
+def _zones() -> list[str]:
+    out = subprocess.run(
+        ["timedatectl", "list-timezones"],
+        capture_output=True, text=True, check=True,
+    ).stdout
+    return [line.strip() for line in out.splitlines() if line.strip()]
+
+
+class DateTime(App):
+    CSS = """
+    Screen { align: center middle; }
+
+    #panel {
+        width: 72;
+        height: auto;
+        border: round $primary;
+        padding: 1 2;
+        background: $surface;
+    }
+
+    #title {
+        content-align: center middle;
+        text-style: bold;
+        color: $primary;
+    }
+
+    #status {
+        content-align: center middle;
+        color: $text-muted;
+        padding-bottom: 1;
+    }
+
+    #ntp_row {
+        layout: horizontal;
+        height: 3;
+        margin-bottom: 1;
+    }
+    #ntp_row > Label {
+        width: 16;
+        padding: 1 0 0 0;
+    }
+    #ntp_row > Switch { margin: 0 1; }
+    #ntp_state {
+        width: 1fr;
+        padding: 1 0 0 0;
+        color: $text-muted;
+    }
+
+    .field-row { layout: horizontal; height: 3; }
+    .field-row > Label { width: 16; padding: 1 0 0 0; }
+    .field-row > Input { width: 1fr; }
+
+    #tz_results {
+        height: auto;
+        max-height: 6;
+        margin-top: 1;
+        margin-bottom: 1;
+        border: round $accent-darken-2;
+    }
+    #tz_results.hidden { display: none; }
+
+    Input.-disabled { color: $text-muted; }
+    Input.-invalid { border: tall $error; }
+    Input.-invalid:focus { border: tall $error; }
+
+    #msg {
+        min-height: 1;
+        content-align: center middle;
+        padding: 1 0;
+    }
+    #msg.ok { color: $success; text-style: bold; }
+    #msg.err { color: $error; text-style: bold; }
+
+    #buttons {
+        layout: horizontal;
+        height: 3;
+        align: center middle;
+    }
+    Button { margin: 0 1; min-width: 14; }
+    """
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel"),
+        Binding("ctrl+s", "apply", "Apply"),
+        Binding("ctrl+c", "cancel", "Cancel", priority=True),
+    ]
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.original: dict[str, str] = {}
+        self.zones: list[str] = []
+        self.ntp_on: bool = True
+        self.tz: str = "UTC"
+
+    def compose(self) -> ComposeResult:
+        with Container(id="panel"):
+            yield Static("Date & Time", id="title")
+            yield Static(id="status")
+            with Horizontal(id="ntp_row"):
+                yield Label("Network time")
+                yield Switch(id="ntp")
+                yield Static("off", id="ntp_state")
+            with Horizontal(classes="field-row"):
+                yield Label("Timezone")
+                yield Input(id="tz_search", placeholder="Type to filter…")
+            yield ListView(id="tz_results", classes="hidden")
+            with Horizontal(classes="field-row"):
+                yield Label("Date")
+                yield Input(
+                    id="date",
+                    placeholder="YYYY-MM-DD",
+                    restrict=r"[0-9\-]*",
+                    max_length=10,
+                    validators=[DateValidator()],
+                    validate_on=["changed"],
+                )
+            with Horizontal(classes="field-row"):
+                yield Label("Time")
+                yield Input(
+                    id="time",
+                    placeholder="HH:MM:SS",
+                    restrict=r"[0-9:]*",
+                    max_length=8,
+                    validators=[TimeValidator()],
+                    validate_on=["changed"],
+                )
+            yield Static(id="msg")
+            with Horizontal(id="buttons"):
+                yield Button("Apply", id="apply", variant="primary")
+                yield Button("Cancel", id="cancel")
+        yield Footer()
+
+    def on_mount(self) -> None:
+        self.original = _show()
+        self.zones = _zones()
+        self.tz = self.original.get("Timezone", "UTC")
+        self.ntp_on = self.original.get("NTP", "no") == "yes"
+        self.query_one("#ntp", Switch).value = self.ntp_on
+        self.query_one("#tz_search", Input).value = self.tz
+        self._refresh_results(self.tz)
+        self._refresh_status()
+        self.set_interval(1, self._refresh_status)
+        self._refresh_manual_state()
+        self._refresh_ntp_label()
+
+    def _now_in_zone(self) -> datetime:
+        try:
+            return datetime.now(tz=ZoneInfo(self.tz))
+        except Exception:
+            return datetime.now().astimezone()
+
+    def _refresh_status(self) -> None:
+        now = self._now_in_zone()
+        self.query_one("#status", Static).update(
+            f"{now.strftime('%A, %B %d, %Y · %H:%M:%S')}   ·   {self.tz}"
+        )
+        if self.ntp_on:
+            self.query_one("#date", Input).value = now.strftime("%Y-%m-%d")
+            self.query_one("#time", Input).value = now.strftime("%H:%M:%S")
+
+    def _refresh_manual_state(self) -> None:
+        self.query_one("#date", Input).disabled = self.ntp_on
+        self.query_one("#time", Input).disabled = self.ntp_on
+        self._refresh_apply_state()
+
+    def _refresh_ntp_label(self) -> None:
+        self.query_one("#ntp_state", Static).update("on" if self.ntp_on else "off")
+
+    def _refresh_apply_state(self) -> None:
+        self.query_one("#apply", Button).disabled = not self._valid()
+
+    def _refresh_results(self, prefix: str) -> None:
+        lv = self.query_one("#tz_results", ListView)
+        lv.clear()
+        prefix = (prefix or "").strip()
+        if not prefix:
+            lv.add_class("hidden")
+            return
+        lower = prefix.lower()
+        matches: list[str] = []
+        for z in self.zones:
+            if lower in z.lower():
+                matches.append(z)
+                if len(matches) >= 30:
+                    break
+        if not matches or (len(matches) == 1 and matches[0] == prefix):
+            lv.add_class("hidden")
+            return
+        for z in matches:
+            lv.append(ListItem(Label(z), name=z))
+        lv.remove_class("hidden")
+        lv.index = 0
+
+    def _valid(self) -> bool:
+        if self.ntp_on:
+            return True
+        date = self.query_one("#date", Input)
+        time = self.query_one("#time", Input)
+        return bool(date.is_valid and time.is_valid)
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        if event.input.id == "tz_search":
+            self._refresh_results(event.value)
+        elif event.input.id in ("date", "time"):
+            self._refresh_apply_state()
+            if not self.ntp_on and event.validation_result is not None \
+                    and not event.validation_result.is_valid:
+                msg = "; ".join(event.validation_result.failure_descriptions)
+                self._msg(msg, "err")
+            elif self._valid():
+                self._msg("", "")
+
+    def on_list_view_selected(self, event: ListView.Selected) -> None:
+        if event.list_view.id == "tz_results" and event.item is not None:
+            picked = event.item.name or self.tz
+            self.tz = picked
+            self.query_one("#tz_search", Input).value = picked
+
+    def on_switch_changed(self, event: Switch.Changed) -> None:
+        if event.switch.id == "ntp":
+            self.ntp_on = event.value
+            self._refresh_manual_state()
+            self._refresh_ntp_label()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "apply":
+            self.action_apply()
+        elif event.button.id == "cancel":
+            self.action_cancel()
+
+    def action_apply(self) -> None:
+        if not self._valid():
+            self._msg("Date or time format invalid.", "err")
+            return
+        try:
+            if self.tz != self.original.get("Timezone", ""):
+                subprocess.run(
+                    ["timedatectl", "set-timezone", self.tz],
+                    check=True, capture_output=True, text=True,
+                )
+            current_ntp = self.original.get("NTP", "no") == "yes"
+            if self.ntp_on != current_ntp:
+                subprocess.run(
+                    ["timedatectl", "set-ntp", "true" if self.ntp_on else "false"],
+                    check=True, capture_output=True, text=True,
+                )
+            if not self.ntp_on:
+                date = self.query_one("#date", Input).value.strip()
+                time = self.query_one("#time", Input).value.strip()
+                subprocess.run(
+                    ["timedatectl", "set-time", f"{date} {time}"],
+                    check=True, capture_output=True, text=True,
+                )
+            self.original = _show()
+            # Waybar caches tzdata via glibc and SIGUSR2 doesn't reliably
+            # force tzset(); a clean systemd-managed restart picks up the
+            # new zone immediately. No-op if waybar isn't a user unit.
+            subprocess.run(
+                ["systemctl", "--user", "restart", "waybar.service"],
+                check=False, capture_output=True,
+            )
+            self._msg("Applied.", "ok")
+        except subprocess.CalledProcessError as e:
+            err = (e.stderr or e.stdout or str(e)).strip().splitlines()[-1]
+            self._msg(f"Failed: {err}", "err")
+
+    def action_cancel(self) -> None:
+        self.exit(0)
+
+    def _msg(self, text: str, kind: str) -> None:
+        w = self.query_one("#msg", Static)
+        w.update(text)
+        w.set_class(kind == "ok", "ok")
+        w.set_class(kind == "err", "err")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(prog="shedman datetime")
+    parser.add_argument("--help-summary", action="store_true", help=argparse.SUPPRESS)
+    args = parser.parse_args()
+    if args.help_summary:
+        print("set timezone, network time, and the system clock")
+        return 0
+    DateTime().run()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
