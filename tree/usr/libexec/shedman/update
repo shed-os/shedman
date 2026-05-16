@@ -270,6 +270,16 @@ if [[ -x $_refresh ]] && command -v reflector >/dev/null 2>&1; then
     fi
 fi
 
+# hyprlock was superseded by shedos-screensaver. shedos-screensaver
+# declares conflicts=hyprlock but `pacman -Syu --noconfirm` defaults
+# the conflict-resolve prompt to NO and aborts; yank hyprlock
+# explicitly when it's still around.
+if pacman -Qq hyprlock &>/dev/null; then
+    echo "Removing hyprlock (superseded by shedos-screensaver)…"
+    sudo pacman -Rdd --noconfirm hyprlock 2>&1 | sed 's/^/pacman: /' || \
+        echo "hyprlock removal exited non-zero; continuing with upgrade." >&2
+fi
+
 echo "Checking for pacman updates…"
 pac=$(checkupdates 2>/dev/null || true)
 
