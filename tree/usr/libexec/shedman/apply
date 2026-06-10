@@ -169,7 +169,9 @@ def main() -> int:
                              "2 on schema error")
     args = parser.parse_args()
 
-    if not (args.dry_run or args.validate) and os.geteuid() != 0:
+    # SHEDOS_APPLY_ETC_ROOT redirects writes off the real system (tests); no root needed then.
+    redirected = "SHEDOS_APPLY_ETC_ROOT" in os.environ
+    if not (args.dry_run or args.validate or redirected) and os.geteuid() != 0:
         print("shedman apply: needs root. Re-run with sudo.", file=sys.stderr)
         return 1
 
