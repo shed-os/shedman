@@ -198,20 +198,16 @@ async def case_rollback_cancel(m, app, pilot) -> None:
 
 
 async def case_rollback_confirm_fires(m, app, pilot) -> None:
-    from textual.widgets import DataTable, Static
+    from textual.widgets import DataTable
     table = app.query_one(DataTable)
     table.move_cursor(row=0)
     await pilot.press("r")
     await _settle(pilot)
     await pilot.press("y")
-    # Worker runs; wait for the "queued" status.
-    for _ in range(15):
-        await pilot.pause()
-        text = app.query_one("#status-line", Static).render()
-        text = text.plain if hasattr(text, "plain") else str(text)
-        if "queued" in text:
-            break
-    assert "queued" in text, f"rollback did not complete: {text!r}"
+    # Confirm records the rollback target and exits the TUI; the
+    # interactive rollback itself runs afterwards, outside the pilot.
+    assert app._pending_rollback is not None, \
+        f"confirm should record a rollback target, got {app._pending_rollback!r}"
 
 
 async def case_rollback_on_manual_row(m, app, pilot) -> None:
