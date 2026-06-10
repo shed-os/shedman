@@ -414,4 +414,4 @@ fi
 
 # Refresh the waybar conflict indicator and notify if the count just went
 # up. Silent when there's nothing to see or no DBus session.
-/usr/bin/shedman conflicts --tick 2>/dev/null || true
+"${SHEDMAN_BIN:-/usr/bin/shedman}" conflicts --tick 2>/dev/null || true
