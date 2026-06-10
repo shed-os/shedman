@@ -311,9 +311,10 @@ _ALLOWED_SNAPPER_CLEANUP = {"number"}
 _ALLOWED_SNAPPER_CLEANUP_NUMBER = {"limit"}
 _ALLOWED_PACMAN = {"repos"}
 _ALLOWED_PACMAN_REPO_KEYS = {"server", "siglevel"}
-_ALLOWED_SERVICES = {"postgresql", "docker"}
+_ALLOWED_SERVICES = {"postgresql", "docker", "sshd"}
 _ALLOWED_SERVICES_POSTGRES = {"auto-init", "per-user-db"}
 _ALLOWED_SERVICES_DOCKER = {"enable"}
+_ALLOWED_SERVICES_SSHD = {"enable"}
 _ALLOWED_NETWORK = {"firewall"}
 _ALLOWED_FIREWALL_TOP = {"enabled", "incoming", "outgoing", "routed", "rules"}
 _ALLOWED_FIREWALL_RULE_KEYS = {
@@ -449,12 +450,22 @@ class DockerServices:
 
 
 @dataclass
+class SshdServices:
+    enable: Optional[bool] = None
+
+    def is_empty(self) -> bool:
+        return self.enable is None
+
+
+@dataclass
 class ServicesSection:
     postgresql: PostgresqlServices = field(default_factory=PostgresqlServices)
     docker: DockerServices = field(default_factory=DockerServices)
+    sshd: SshdServices = field(default_factory=SshdServices)
 
     def is_empty(self) -> bool:
-        return self.postgresql.is_empty() and self.docker.is_empty()
+        return (self.postgresql.is_empty() and self.docker.is_empty()
+                and self.sshd.is_empty())
 
 
 @dataclass
@@ -765,6 +776,15 @@ def validate_doc(doc: dict) -> ValidatedConfig:
             if "enable" in docker_raw:
                 cfg.services.docker.enable = _check_bool(
                     "services.docker.enable", docker_raw["enable"])
+
+        sshd_raw = svc_raw.get("sshd", {})
+        if sshd_raw:
+            if not isinstance(sshd_raw, dict):
+                raise SchemaError("[services.sshd] must be a table")
+            _check_keys("services.sshd", sshd_raw, _ALLOWED_SERVICES_SSHD)
+            if "enable" in sshd_raw:
+                cfg.services.sshd.enable = _check_bool(
+                    "services.sshd.enable", sshd_raw["enable"])
 
     net_raw = doc.get("network", {})
     if net_raw:
@@ -1615,6 +1635,7 @@ def plan_pacman(cfg: ValidatedConfig) -> list[Change]:
 POSTGRES_AUTO_INIT_UNIT = "shedos-pg-initdb.service"
 POSTGRES_PER_USER_DB_UNIT = "shedos-pg-user-bootstrap.service"
 DOCKER_UNIT = "docker.service"
+SSHD_UNIT = "sshd.service"
 
 
 def plan_services(cfg: ValidatedConfig) -> list[Change]:
@@ -1629,6 +1650,8 @@ def plan_services(cfg: ValidatedConfig) -> list[Change]:
          "services.postgresql.per-user-db"),
         (cfg.services.docker.enable, DOCKER_UNIT,
          "services.docker.enable"),
+        (cfg.services.sshd.enable, SSHD_UNIT,
+         "services.sshd.enable"),
     ]
     for desired, unit, label in flags:
         if desired is None:
