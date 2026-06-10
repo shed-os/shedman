@@ -284,7 +284,7 @@ def _run(cmd: list[str], env_override: Optional[str] = None) -> tuple[int, str]:
 
 def fetch_snapshots() -> list[Snapshot]:
     rc, text = _run(
-        ["sudo", "-n", "snapper", "--jsonout", "-c", "root", "list"],
+        ["snapper", "--jsonout", "-c", "root", "list"],
         env_override="SHEDOS_HISTORY_SNAPPER_LIST_CMD",
     )
     if rc != 0:
@@ -294,7 +294,7 @@ def fetch_snapshots() -> list[Snapshot]:
 
 def fetch_package_diff(pre: int, post: int) -> list[PackageChange]:
     rc, text = _run(
-        ["sudo", "-n", "snapper", "-c", "root", "status", f"{pre}..{post}"],
+        ["snapper", "-c", "root", "status", f"{pre}..{post}"],
         env_override="SHEDOS_HISTORY_SNAPPER_STATUS_CMD",
     )
     if rc != 0:
@@ -302,11 +302,19 @@ def fetch_package_diff(pre: int, post: int) -> list[PackageChange]:
     return parse_snapper_status(text)
 
 
-def trigger_rollback(pre_number: int) -> tuple[int, str]:
-    return _run(
-        ["sudo", "-n", "/usr/bin/shedman", "update", "--rollback", str(pre_number)],
-        env_override="SHEDOS_HISTORY_ROLLBACK_CMD",
-    )
+def run_rollback(pre_number: int) -> int:
+    """Run after the TUI exits so `update`'s interactive sudo can prompt on
+    the bare terminal. Returns the rollback command's exit code."""
+    override = os.environ.get("SHEDOS_HISTORY_ROLLBACK_CMD")
+    argv = (shlex.split(override) if override
+            else ["/usr/bin/shedman", "update", "--rollback",
+                  str(pre_number), "--yes"])
+    print(f"Rolling back to snapshot #{pre_number} …")
+    try:
+        return subprocess.run(argv).returncode
+    except OSError as e:
+        print(f"rollback failed to start: {e}", file=sys.stderr)
+        return 127
 
 
 # Date normalisation: snapper emits assorted formats depending on version
@@ -507,6 +515,8 @@ def build_app_class():
             self.view: HistoryView = HistoryView()
             self._row_lookup: dict[str, UpgradeRun] = {}
             self._manual_rows: dict[str, Snapshot] = {}
+            # Set on rollback confirm; _run_app runs it after the TUI exits.
+            self._pending_rollback: Optional[int] = None
 
         def compose(self) -> ComposeResult:
             yield Header(show_clock=False)
@@ -642,23 +652,10 @@ def build_app_class():
             if run is None:
                 self._status("rollback target vanished.", kind="err")
                 return
-            self._status(f"rolling back to #{run.pre.number} …", kind="warn")
-            self._fire_rollback(run.pre.number)
-
-        @work(thread=True, exclusive=True, group="rollback")
-        def _fire_rollback(self, pre: int) -> None:
-            rc, output = trigger_rollback(pre)
-            self.call_from_thread(self._rollback_finished, pre, rc, output)
-
-        def _rollback_finished(self, pre: int, rc: int, output: str) -> None:
-            if rc == 0:
-                self._status(
-                    f"rollback to #{pre} queued — reboot to take effect.",
-                    kind="ok",
-                )
-            else:
-                short = output.strip().splitlines()[-1][:120] if output else "?"
-                self._status(f"rollback #{pre} failed: {short}", kind="err")
+            # Record the target and drop out of the TUI; the interactive
+            # rollback runs after the app exits, where sudo can prompt.
+            self._pending_rollback = run.pre.number
+            self.exit()
 
         def action_quit(self) -> None:
             self.exit()
@@ -674,7 +671,11 @@ def _run_app() -> int:
     except RuntimeError as e:
         print(str(e), file=sys.stderr)
         return 2
-    cls().run()
+    app = cls()
+    app.run()
+    pending = getattr(app, "_pending_rollback", None)
+    if pending is not None:
+        return run_rollback(pending)
     return 0
 
 
