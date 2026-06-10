@@ -104,14 +104,9 @@ _run_one() {
         install -Dm644 "$fdir/sync-exclude" "$home/.config/shedos/sync-exclude"
     fi
 
-    # Run the tool with the synthetic defaults root. shedos-check-conflicts is
-    # invoked at the tail of the script — it's not on PATH in the test env,
-    # so stub with a no-op via PATH prepending.
-    local stubdir=$tmp/stubs
-    mkdir -p "$stubdir"
-    printf '#!/bin/sh\nexit 0\n' > "$stubdir/shedos-check-conflicts"
-    chmod +x "$stubdir/shedos-check-conflicts"
-
+    # _config-sync refreshes the waybar conflict badge at the tail via
+    # `shedman conflicts --tick`; SHEDMAN_BIN neutralizes it here. That's the
+    # conflicts tool's own behavior (real shedman + a notifier), not the sync.
     local rc out
     # shellcheck disable=SC2086  # intentional word-splitting of SYNC_ARGS
     out=$(
@@ -119,7 +114,7 @@ _run_one() {
         XDG_CONFIG_HOME=$home/.config \
         XDG_STATE_HOME=$state_root \
         SHEDOS_DEFAULTS_ROOT=$fdir/defaults \
-        PATH="$stubdir:$PATH" \
+        SHEDMAN_BIN=/bin/true \
         "$tool" $SYNC_ARGS 2>&1
     )
     rc=$?
