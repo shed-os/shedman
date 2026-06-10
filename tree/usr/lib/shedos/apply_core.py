@@ -2066,6 +2066,11 @@ def plan_firewall(cfg: ValidatedConfig) -> list[Change]:
         _ufw_run(["--force", "reset"], check=False)
         for r in live_rules:
             _ufw_run(["--force"] + _ufw_args_for_rule(r), check=False)
+        # `reset` leaves ufw disabled; restore the pre-apply active state
+        # so a rollback can't silently leave the box unfirewalled.
+        if live_active:
+            _systemctl_run(["enable", "ufw.service"], check=False)
+            _ufw_run(["--force", "enable"], check=False)
 
     live_change = Change(
         kind="~", section="network.firewall",
