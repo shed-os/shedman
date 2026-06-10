@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # run.sh — smoke tests for `shedman install`.
 #
-# Coverage: --help-summary, --help, root-refusal, missing-catalog
-# refusal, marker short-circuit. The yad UI + yay -S install path
-# is NOT exercised — that needs a Wayland session and a real AUR
-# helper. Manual install / first-boot welcome flow covers it.
+# Coverage: --help-summary, --help/-h, no-args usage, root-refusal,
+# --search (with/without query), and per-package source detection
+# (pacman vs AUR/yay) via PATH-stubbed pacman/yay/sudo. The real
+# pacman -S / yay -S install is never run — every external tool is
+# stubbed and logs its argv instead of executing.
 
 set -uo pipefail
 
@@ -27,34 +28,50 @@ _fail() { echo "FAIL: $1: $2" >&2; failures+=("$1"); ((fail++)); }
 tmp=$(mktemp -d -t shedos-install-test.XXXXXX)
 trap 'rm -rf -- "$tmp"' EXIT
 
-# Hermetic environment so our tests don't hit the real /var/lib or HOME.
-export XDG_STATE_HOME="$tmp/state"
-mkdir -p "$XDG_STATE_HOME/shedos"
-
-# PATH-stub yad so any error-dialog branch exits immediately instead of
-# blocking for OK on a Wayland session. Same for nm-online (the
-# connectivity check) so we never wait 10s+ for a real network probe.
+# Stub pacman/yay/sudo/id on PATH. Each tool appends its argv to a
+# per-tool log so the test can assert what got invoked, and exits
+# according to fixture env vars so we can drive both routing branches.
+#
+# STUB_PACMAN_SI_RC: rc for `pacman -Si` (source detection). 0 = found.
+# STUB_YAY_SI_RC:    rc for `yay -Si`.
+# STUB_ID_UID:       uid that `id -u` reports.
+# STUB_HIDE_YAY=1:   make `yay` vanish (command -v yay fails).
 stub_dir=$tmp/stubs
 mkdir -p "$stub_dir"
-cat > "$stub_dir/yad" <<STUB
+
+cat > "$stub_dir/pacman" <<STUB
 #!/usr/bin/env bash
-# Record that we were called (to a file the test can inspect) and exit 0.
-# Stdout stays empty so the install script's checklist-result parsing
-# yields zero selections (= "no apps selected" branch). Stderr goes
-# nowhere visible because install redirects yad's stderr to /dev/null
-# at line 223 — that's why we use a marker file instead.
-echo "called: \$*" >> "$tmp/yad-calls.log"
+echo "\$*" >> "$tmp/pacman.log"
+[[ \$1 == -Si ]] && exit "\${STUB_PACMAN_SI_RC:-0}"
 exit 0
 STUB
-cat > "$stub_dir/nm-online" <<'STUB'
+
+cat > "$stub_dir/yay" <<STUB
 #!/usr/bin/env bash
-# Pretend network is up — fast path through the connectivity check.
+echo "\$*" >> "$tmp/yay.log"
+[[ \$1 == -Si ]] && exit "\${STUB_YAY_SI_RC:-0}"
 exit 0
 STUB
-chmod +x "$stub_dir/yad" "$stub_dir/nm-online"
+
+# sudo just drops its own argv and runs the rest through the stubs.
+cat > "$stub_dir/sudo" <<STUB
+#!/usr/bin/env bash
+echo "\$*" >> "$tmp/sudo.log"
+exec "\$@"
+STUB
+
+cat > "$stub_dir/id" <<STUB
+#!/usr/bin/env bash
+[[ \$1 == -u ]] && { echo "\${STUB_ID_UID:-1000}"; exit 0; }
+exec /usr/bin/id "\$@"
+STUB
+
+chmod +x "$stub_dir"/{pacman,yay,sudo,id}
 export PATH="$stub_dir:$PATH"
 
-# T1 --help-summary
+reset_logs() { rm -f "$tmp"/{pacman,yay,sudo}.log; }
+
+# T1 --help-summary: one non-empty line, exit 0
 out=$("$tool" --help-summary 2>&1); rc=$?
 if (( rc == 0 )) && [[ -n $out ]] && (( $(printf '%s\n' "$out" | wc -l) == 1 )); then
     _ok T1_help_summary
@@ -62,9 +79,9 @@ else
     _fail T1_help_summary "rc=$rc out=$out"
 fi
 
-# T2 --help / -h
+# T2 --help / -h: Usage banner, exit 0
 for h in --help -h; do
-    out=$("$tool" $h 2>&1); rc=$?
+    out=$("$tool" "$h" 2>&1); rc=$?
     if (( rc == 0 )) && grep -q '^Usage:' <<<"$out"; then
         _ok "T2_help_${h:1}"
     else
@@ -72,163 +89,98 @@ for h in --help -h; do
     fi
 done
 
-# T3 missing catalog → exits 1. Use a path that genuinely doesn't exist
-# so the catalog-not-readable branch fires and the script exits before
-# any UI / connectivity work. Must use `env` to pass SHEDOS_APPS_CATALOG
-# into the subshell — bash treats `VAR=val out=$(...)` as a local
-# assignment, not an env-var prefix.
-out=$(env SHEDOS_APPS_CATALOG="$tmp/no-such-catalog.tsv" \
-    USER=test_not_calamares "$tool" 2>&1); rc=$?
-if (( rc == 1 )); then
-    _ok T3_missing_catalog_refused
+# T3 no args: print usage, exit 1
+out=$("$tool" 2>&1); rc=$?
+if (( rc == 1 )) && grep -q '^Usage:' <<<"$out"; then
+    _ok T3_no_args_usage_exit1
 else
-    _fail T3_missing_catalog_refused "rc=$rc (expected 1) out=$out"
+    _fail T3_no_args_usage_exit1 "rc=$rc out=$out"
 fi
 
-# T4 marker short-circuit: if the apps-installer-done marker exists and
-# --force isn't passed, install exits 0 without doing anything.
-# Pass SHEDOS_APPS_CATALOG explicitly because the script's dev-checkout
-# fallback path is currently broken (one `..` short — see deferred fix).
-catalog="$repo_root/packaging/shedos-system/tree/usr/share/shedos/apps-catalog.tsv"
-touch "$XDG_STATE_HOME/shedos/apps-installer-done"
-out=$(SHEDOS_APPS_CATALOG="$catalog" "$tool" 2>&1); rc=$?
-if (( rc == 0 )) && [[ -z $out ]]; then
-    _ok T4_marker_short_circuit
+# T4 root-refusal: install (not search/help) as uid 0 exits 2
+out=$(STUB_ID_UID=0 "$tool" somepkg 2>&1); rc=$?
+if (( rc == 2 )) && grep -q "don't run as root" <<<"$out"; then
+    _ok T4_root_refused
 else
-    _fail T4_marker_short_circuit "rc=$rc out=$out (expected silent rc=0)"
+    _fail T4_root_refused "rc=$rc out=$out"
 fi
 
-# T5 marker present + --force → does NOT short-circuit (proceeds past
-# the marker check and into the yad-checklist flow). The yad stub
-# records every invocation to $tmp/yad-calls.log; presence of any
-# `--list` call means we got past the marker short-circuit.
-rm -f "$tmp/yad-calls.log"
-out=$(timeout 10 env SHEDOS_APPS_CATALOG="$catalog" \
-    "$tool" --force --dry-run 2>&1); rc=$?
-if [[ -f "$tmp/yad-calls.log" ]] && grep -q -- '--list' "$tmp/yad-calls.log"; then
-    _ok T5_force_bypasses_marker
+# T5 --search routes the query to pacman -Ss and yay -Ss
+reset_logs
+out=$("$tool" --search ripgrep 2>&1); rc=$?
+if (( rc == 0 )) \
+   && grep -q '^-Ss ripgrep$' "$tmp/pacman.log" 2>/dev/null \
+   && grep -q -- '-Ss --aur ripgrep' "$tmp/yay.log" 2>/dev/null; then
+    _ok T5_search_hits_pacman_and_yay
 else
-    _fail T5_force_bypasses_marker "rc=$rc; yad-stub never saw --list, marker may not have been bypassed"
+    _fail T5_search_hits_pacman_and_yay "rc=$rc out=$out pacman=$(cat "$tmp/pacman.log" 2>/dev/null) yay=$(cat "$tmp/yay.log" 2>/dev/null)"
 fi
 
-# T6 catalog parsing — if the shipped catalog is malformed, the script
-# should fail loudly. Validate the catalog is parseable as TSV with at
-# least one row.
-catalog=$repo_root/packaging/shedos-system/tree/usr/share/shedos/apps-catalog.tsv
-if [[ -r $catalog ]]; then
-    # Each line: name<TAB>... (skip comments/blanks)
-    badlines=$(awk -F'\t' '!/^[[:space:]]*#/ && NF > 0 && NF < 2 { print NR": "$0 }' "$catalog")
-    if [[ -z $badlines ]]; then
-        _ok T6_catalog_well_formed
-    else
-        _fail T6_catalog_well_formed "malformed lines: $badlines"
-    fi
+# T5b -s with no query exits 1
+out=$("$tool" -s 2>&1); rc=$?
+if (( rc == 1 )) && grep -q 'needs a query' <<<"$out"; then
+    _ok T5b_search_no_query_exit1
 else
-    _fail T6_catalog_well_formed "catalog $catalog not readable"
+    _fail T5b_search_no_query_exit1 "rc=$rc out=$out"
 fi
 
-# T7 — yad missing → exits 1 with no marker. Regression test for the
-# v2026.04.27-rc1 silent-failure bug: the previous install would skip
-# the yad-availability check until after the catalog/marker checks,
-# which themselves used yad to render their error dialogs (resulting
-# in cryptic stderr if yad was missing).
-no_yad_stub=$tmp/no-yad-stubs
-mkdir -p "$no_yad_stub"
-for bin in bash id mkdir touch git getent grep cut date readlink dirname stat sleep rm cat sed awk head curl mktemp mkfifo kill wait nmcli; do
-    src=$(command -v "$bin" 2>/dev/null)
-    [[ -n $src ]] && ln -sf "$src" "$no_yad_stub/$bin"
-done
-
-HOME_T7=$tmp/home-t7
-mkdir -p "$HOME_T7/.local/state/shedos"
-out=$(env -i \
-    PATH="$no_yad_stub" \
-    HOME="$HOME_T7" \
-    USER=test_not_calamares \
-    XDG_STATE_HOME="$HOME_T7/.local/state" \
-    SHEDOS_APPS_CATALOG="$catalog" \
-    "$tool" 2>&1); rc=$?
-
-if (( rc == 1 )) && \
-   [[ ! -f "$HOME_T7/.local/state/shedos/apps-installer-done" ]] && \
-   grep -q "yad not installed" "$HOME_T7/.local/state/shedos/install.log" 2>/dev/null; then
-    _ok T7_yad_missing_exits_1_no_marker
+# T6 pacman routing: pacman -Si succeeds → installed via sudo pacman -S
+reset_logs
+out=$(STUB_PACMAN_SI_RC=0 "$tool" fd 2>&1); rc=$?
+if (( rc == 0 )) \
+   && grep -q '^-Si fd$' "$tmp/pacman.log" 2>/dev/null \
+   && grep -q -- '-S --needed --noconfirm fd' "$tmp/pacman.log" 2>/dev/null \
+   && [[ ! -s "$tmp/yay.log" ]]; then
+    _ok T6_pacman_routing
 else
-    log_content=$(cat "$HOME_T7/.local/state/shedos/install.log" 2>/dev/null || echo "(no log)")
-    marker_state=$([[ -f "$HOME_T7/.local/state/shedos/apps-installer-done" ]] && echo present || echo absent)
-    _fail T7_yad_missing_exits_1_no_marker "rc=$rc marker=$marker_state log=${log_content//$'\n'/ | }"
+    _fail T6_pacman_routing "rc=$rc out=$out pacman=$(cat "$tmp/pacman.log" 2>/dev/null) yay=$(cat "$tmp/yay.log" 2>/dev/null)"
 fi
 
-# T8 — --dry-run-no-yad prints the exact yay command line the
-# autonomous flow will run. Confirms the autonomous flag set is wired
-# correctly: --noconfirm + --answerclean N + --answerdiff N +
-# --answeredit N + --cleanafter + --removemake + --mflags=--skippgpcheck.
-HOME_T8=$tmp/home-t8
-mkdir -p "$HOME_T8/.local/state/shedos"
-mini_catalog=$tmp/mini-catalog.tsv
-cat > "$mini_catalog" <<'EOF'
-# minimal test catalog
-foo-bin	Editors	Foo	desc1	icon
-bar-bin	Browsers	Bar	desc2	icon
-EOF
-out=$(env -i \
-    PATH="$PATH" \
-    HOME="$HOME_T8" \
-    USER=test_not_calamares \
-    XDG_STATE_HOME="$HOME_T8/.local/state" \
-    SHEDOS_APPS_CATALOG="$mini_catalog" \
-    SHEDOS_TEST_PKGS="foo-bin bar-bin" \
-    "$tool" --dry-run-no-yad 2>&1); rc=$?
-
-expected_args=(
-    "yay -S --needed --noconfirm"
-    "--answerclean N --answerdiff N --answeredit N"
-    "--cleanafter --removemake"
-    "--mflags=--skippgpcheck"
-    "foo-bin bar-bin"
-)
-ok_t8=1
-if (( rc != 0 )); then
-    ok_t8=0
-fi
-for needle in "${expected_args[@]}"; do
-    if ! grep -qF -- "$needle" <<<"$out"; then
-        ok_t8=0
-    fi
-done
-if (( ok_t8 == 1 )); then
-    _ok T8_dry_run_emits_autonomous_flag_set
+# T7 AUR routing: pacman -Si fails, yay -Si succeeds → installed via yay -S
+reset_logs
+out=$(STUB_PACMAN_SI_RC=1 STUB_YAY_SI_RC=0 "$tool" some-aur-bin 2>&1); rc=$?
+if (( rc == 0 )) \
+   && grep -q -- '-Si --aur some-aur-bin' "$tmp/yay.log" 2>/dev/null \
+   && grep -q -- '-S --needed --noconfirm' "$tmp/yay.log" 2>/dev/null \
+   && grep -q -- '--mflags=--skippgpcheck some-aur-bin' "$tmp/yay.log" 2>/dev/null \
+   && ! grep -q -- '-S --needed' "$tmp/pacman.log" 2>/dev/null; then
+    _ok T7_aur_routing
 else
-    _fail T8_dry_run_emits_autonomous_flag_set "rc=$rc out=$out"
+    _fail T7_aur_routing "rc=$rc out=$out pacman=$(cat "$tmp/pacman.log" 2>/dev/null) yay=$(cat "$tmp/yay.log" 2>/dev/null)"
 fi
 
-# T9 — --dry-run-no-yad with empty SHEDOS_TEST_PKGS exits without
-# attempting to run anything (no apps selected = "user picked
-# nothing", marker SHOULD be written so we don't re-prompt forever).
-# Note: when DRY_RUN=1 we skip the actual install, but the no-apps-
-# selected branch still touches the marker — that's the right policy
-# for a real run too.
-HOME_T9=$tmp/home-t9
-mkdir -p "$HOME_T9/.local/state/shedos"
-out=$(env -i \
-    PATH="$PATH" \
-    HOME="$HOME_T9" \
-    USER=test_not_calamares \
-    XDG_STATE_HOME="$HOME_T9/.local/state" \
-    SHEDOS_APPS_CATALOG="$mini_catalog" \
-    SHEDOS_TEST_PKGS="" \
-    "$tool" --dry-run-no-yad 2>&1); rc=$?
-if (( rc == 0 )) && [[ -f "$HOME_T9/.local/state/shedos/apps-installer-done" ]]; then
-    _ok T9_dry_run_no_pkgs_marks_done
+# T8 unknown package: neither repo has it → exit 1, nothing installed
+reset_logs
+out=$(STUB_PACMAN_SI_RC=1 STUB_YAY_SI_RC=1 "$tool" nope-pkg 2>&1); rc=$?
+if (( rc == 1 )) \
+   && grep -q 'not found in any repo: nope-pkg' <<<"$out" \
+   && ! grep -q -- '-S --needed' "$tmp/pacman.log" 2>/dev/null \
+   && ! grep -q -- '-S --needed' "$tmp/yay.log" 2>/dev/null; then
+    _ok T8_unknown_pkg_exit1
 else
-    marker_state=$([[ -f "$HOME_T9/.local/state/shedos/apps-installer-done" ]] && echo present || echo absent)
-    _fail T9_dry_run_no_pkgs_marks_done "rc=$rc marker=$marker_state out=$out"
+    _fail T8_unknown_pkg_exit1 "rc=$rc out=$out"
+fi
+
+# T9 AUR-only pkg but yay missing: exit 1 before any install attempt.
+# Drop the yay stub so command -v yay fails; pacman -Si still fails so
+# the pkg can't route to pacman either → "not found in any repo".
+reset_logs
+no_yay=$tmp/no-yay
+mkdir -p "$no_yay"
+ln -sf "$stub_dir/pacman" "$no_yay/pacman"
+ln -sf "$stub_dir/sudo" "$no_yay/sudo"
+ln -sf "$stub_dir/id" "$no_yay/id"
+out=$(PATH="$no_yay:/usr/bin:/bin" STUB_PACMAN_SI_RC=1 "$tool" aur-only 2>&1); rc=$?
+if (( rc == 1 )) && grep -q 'not found in any repo' <<<"$out"; then
+    _ok T9_aur_pkg_no_yay_exit1
+else
+    _fail T9_aur_pkg_no_yay_exit1 "rc=$rc out=$out"
 fi
 
 # Summary
 total=$((pass + fail))
 echo
-echo "install: $pass/$total passed"
+echo "Summary: $pass passed, $fail failed"
 if (( fail > 0 )); then
     printf '  %s\n' "${failures[@]}" >&2
     exit 1
