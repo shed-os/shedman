@@ -563,8 +563,12 @@ def _classify(relpath: str, yours: Path, theirs: Path) -> Conflict:
 # .shedosnew and bump the manifest. Never surfaced to the user.
 
 
-def auto_resolve_identical(conflicts: list[Conflict]) -> tuple[list[Conflict], int]:
-    """Return (remaining, auto_resolved_count)."""
+def auto_resolve_identical(conflicts: list[Conflict], *,
+                           dry_run: bool = False) -> tuple[list[Conflict], int]:
+    """Return (remaining, auto_resolved_count). With dry_run the
+    identical conflicts are only counted and filtered — nothing is
+    deleted or recorded — so --list/--dry-run stay read-only (they
+    run without the process lock)."""
     remaining: list[Conflict] = []
     auto_n = 0
     for c in conflicts:
@@ -573,9 +577,10 @@ def auto_resolve_identical(conflicts: list[Conflict]) -> tuple[list[Conflict], i
             continue
         try:
             if sha256_file(c.yours_path) == sha256_file(c.theirs_path):
-                # Identical: delete .shedosnew, update manifest to current src.
-                c.theirs_path.unlink()
-                _update_manifest(c.relpath, c.src_path)
+                if not dry_run:
+                    # Identical: delete .shedosnew, update manifest.
+                    c.theirs_path.unlink()
+                    _update_manifest(c.relpath, c.src_path)
                 auto_n += 1
                 continue
         except OSError:
@@ -2388,17 +2393,27 @@ def main(argv: Optional[list[str]] = None) -> int:
     else:
         lock_fd = None
 
+    # --list/--dry-run hold no lock, so they must not mutate: the tmp
+    # sweep waits for a real run, and identical conflicts are counted
+    # without being resolved.
+    read_only = bool(args.list or args.dry_run)
     try:
-        swept = sweep_leftover_tmps()
-        if swept and not args.list:
-            print(f"Cleaned up {swept} stale .shedosmerge.tmp file(s) from a previous run.",
-                  file=sys.stderr)
+        if not read_only:
+            swept = sweep_leftover_tmps()
+            if swept:
+                print(f"Cleaned up {swept} stale .shedosmerge.tmp file(s) from a previous run.",
+                      file=sys.stderr)
 
         conflicts, excluded = scan_conflicts()
-        conflicts, auto_n = auto_resolve_identical(conflicts)
+        conflicts, auto_n = auto_resolve_identical(conflicts,
+                                                   dry_run=read_only)
         if auto_n and not args.list:
-            print(f"Auto-resolved {auto_n} identical-content conflict(s).",
-                  file=sys.stderr)
+            if read_only:
+                print(f"{auto_n} identical-content conflict(s) will "
+                      f"auto-resolve on the next review.", file=sys.stderr)
+            else:
+                print(f"Auto-resolved {auto_n} identical-content conflict(s).",
+                      file=sys.stderr)
         if excluded and not args.list:
             print(f"Note: {len(excluded)} .shedosnew file(s) live under "
                   f"excluded paths (e.g. ~/.cache, ~/.local/state) and "
