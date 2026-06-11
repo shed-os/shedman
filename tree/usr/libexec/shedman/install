@@ -85,9 +85,12 @@ if [[ ${#aur_pkgs[@]} -gt 0 ]]; then
         echo "Install yay first: pacman -S yay" >&2
         exit 1
     fi
-    yay -S --needed --noconfirm \
-        --answerclean N --answerdiff N --answeredit N \
+    # No --noconfirm/--answerdiff N/--skippgpcheck: AUR packages are
+    # arbitrary user-submitted build scripts, so the user gets yay's
+    # normal review prompts and makepkg verifies PGP signatures where
+    # the PKGBUILD declares them. Hands-off installs were installing
+    # unreviewed, unverified sources.
+    yay -S --needed \
         --cleanafter --removemake \
-        --mflags=--skippgpcheck \
         "${aur_pkgs[@]}"
 fi
