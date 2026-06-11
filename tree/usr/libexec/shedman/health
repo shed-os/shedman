@@ -164,11 +164,62 @@ _cpu() {
     printf '%s\tcpu: max %d°C\n' "$class" "$max"
 }
 
+_smart() {
+    # smartctl needs root, so a daily root timer (shedos-smart-check)
+    # caches verdicts; we read the cache. Silent when absent — desktops
+    # without smartmontools data shouldn't show a hole in the bar.
+    local cache=${SHEDOS_SMART_CACHE:-/var/lib/shedos/smart-health.json}
+    [[ -r $cache ]] || return 0
+    local age now
+    now=$(date +%s)
+    age=$(( now - $(stat -c %Y "$cache" 2>/dev/null || echo "$now") ))
+    if (( age > 172800 )); then
+        printf 'unavailable\tdisk SMART: cache stale (timer not running?)\n'
+        return
+    fi
+    local failed
+    failed=$(awk -F'"' '/"failed"/ {print $4}' "$cache" | paste -sd, -)
+    if [[ -n $failed ]]; then
+        printf 'critical\tdisk SMART: %s reporting failure — back up now\n' "$failed"
+    else
+        printf 'ok\tdisk SMART: all drives healthy\n'
+    fi
+}
+
+_scrub() {
+    # Data integrity maintenance: warn when / has never been scrubbed
+    # or the last scrub is older than ~5 weeks (the shipped monthly
+    # timer keeps this quiet on healthy systems).
+    command -v btrfs >/dev/null 2>&1 || return 0
+    local out started epoch now days
+    out=$(btrfs scrub status / 2>/dev/null) || return 0
+    if grep -q 'no stats available' <<<"$out"; then
+        printf 'warning\tbtrfs scrub: never run on / (timer will catch up)\n'
+        return
+    fi
+    started=$(sed -n 's/^Scrub started:[[:space:]]*//p' <<<"$out")
+    [[ -n $started ]] || return 0
+    epoch=$(date -d "$started" +%s 2>/dev/null) || return 0
+    now=$(date +%s)
+    days=$(( (now - epoch) / 86400 ))
+    if (( days > 35 )); then
+        printf 'warning\tbtrfs scrub: last ran %sd ago\n' "$days"
+    else
+        printf 'ok\tbtrfs scrub: %sd ago\n' "$days"
+    fi
+    # errors found by the last scrub trump the age signal
+    if grep -qE 'Error summary:.*[a-z]+=[1-9]' <<<"$out"; then
+        printf 'critical\tbtrfs scrub: errors found — check btrfs scrub status /\n'
+    fi
+}
+
 _metrics() {
     _disk
     _memory
     _battery
     _cpu
+    _smart
+    _scrub
 }
 
 _overall() {
