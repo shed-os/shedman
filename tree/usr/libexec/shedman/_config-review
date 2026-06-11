@@ -1931,13 +1931,13 @@ def _run_vscode(conflicts: list[Conflict], *, force_2way: bool) -> int:
         print("shedman config --review: --gui requested but neither "
               "`code` nor `codium` is on PATH. Falling back to TUI.",
               file=sys.stderr)
-        return _run_textual(conflicts, start_file=None, walk_all=False,
+        return _run_textual(conflicts, start_file=None,
                             force_2way=force_2way)
 
     if not shutil.which("git"):
         print("shedman config --review: --gui needs git to stage "
               "conflicts. Falling back to TUI.", file=sys.stderr)
-        return _run_textual(conflicts, start_file=None, walk_all=False,
+        return _run_textual(conflicts, start_file=None,
                             force_2way=force_2way)
 
     staging = Path(tempfile.mkdtemp(prefix="shedman-review-"))
@@ -2321,7 +2321,7 @@ def _relaunch_in_floating_window_if_needed() -> None:
 
 
 def _run_textual(conflicts: list[Conflict], *, start_file: Optional[str] = None,
-                 walk_all: bool = False, force_2way: bool = False) -> int:
+                 force_2way: bool = False) -> int:
     _relaunch_in_floating_window_if_needed()
     try:
         from .review_configs_ui import run_app  # type: ignore
@@ -2334,9 +2334,9 @@ def _run_textual(conflicts: list[Conflict], *, start_file: Optional[str] = None,
                   "Install python-textual and python-rich, or run with --list "
                   "and resolve conflicts manually.", file=sys.stderr)
             return 1
-        return runner(conflicts, start_file=start_file, walk_all=walk_all,
+        return runner(conflicts, start_file=start_file,
                       force_2way=force_2way)
-    return run_app(conflicts, start_file=start_file, walk_all=walk_all,
+    return run_app(conflicts, start_file=start_file,
                    force_2way=force_2way)
 
 
@@ -2351,8 +2351,6 @@ def main(argv: Optional[list[str]] = None) -> int:
     )
     p.add_argument("--list", action="store_true",
                    help="Print a tab-separated list of conflicts and exit.")
-    p.add_argument("--all", action="store_true",
-                   help="Walk every conflict sequentially (skip the file list).")
     p.add_argument("--file", metavar="PATH",
                    help="Open merge screen for one file (relpath under $HOME).")
     p.add_argument("--dry-run", action="store_true",
@@ -2479,7 +2477,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             return 2
 
         populate_hunk_counts(conflicts, force_2way=args.two_way)
-        return _run_textual(conflicts, start_file=args.file, walk_all=args.all,
+        return _run_textual(conflicts, start_file=args.file,
                             force_2way=args.two_way)
     finally:
         if lock_fd is not None:
@@ -4022,11 +4020,10 @@ MERGE SCREEN
         BINDINGS = [Binding("ctrl+c", "quit", "quit", priority=True)]
 
         def __init__(self, conflicts: list[Conflict], *, start_file: Optional[str],
-                     walk_all: bool, force_2way: bool) -> None:
+                     force_2way: bool) -> None:
             super().__init__()
             self.conflicts = list(conflicts)
             self.start_file = start_file
-            self.walk_all = walk_all
             self.force_2way = force_2way
             self._resolved: set[str] = set()
             # Merge state shared with ReviewScreen, MergePanel, and DecisionModal.
@@ -4181,7 +4178,7 @@ MERGE SCREEN
 
     # Install the inline runner.
     def _runner(conflicts: list[Conflict], *, start_file: Optional[str],
-                walk_all: bool, force_2way: bool) -> int:
+                force_2way: bool) -> int:
         if not conflicts:
             print("Nothing to review. All configs are in sync.")
             return 0
@@ -4194,7 +4191,7 @@ MERGE SCREEN
             return 2
         install_signal_handlers()
         app = ReviewApp(conflicts, start_file=start_file,
-                        walk_all=walk_all, force_2way=force_2way)
+                        force_2way=force_2way)
         app.run()
         return 0
 

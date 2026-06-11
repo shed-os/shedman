@@ -34,11 +34,9 @@ conflicts.
 
 *-r*, *--review*
 	Open the merge UI for every _.shedosnew_ sidecar in $HOME. Two
-	backends are available: a Textual TUI and a VS Code GUI. When a
-	display is available and *code* (or *codium*) is on $PATH the
-	GUI runs by default; otherwise the TUI runs. Force a backend
-	with *--gui* or *--tui*. If *--gui* is requested but no VS Code
-	binary is found, the TUI runs with a notice on stderr.
+	backends are available: a Textual TUI (the default) and an
+	opt-in VS Code GUI via *--gui*. If *--gui* is requested but no
+	VS Code binary is found, the TUI runs with a notice on stderr.
 
 	TUI: per-hunk decisions y (yours), t (theirs), b (both YT), B
 	(both TY), x (skip), u (undo); whole-file shortcuts A (all

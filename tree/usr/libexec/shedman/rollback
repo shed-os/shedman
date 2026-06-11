@@ -29,8 +29,7 @@ if [[ "${1:-}" == "--help-summary" ]]; then
 fi
 
 if [[ "${1:-}" == "--complete-bash" || "${1:-}" == "--complete-zsh" ]]; then
-    printf '%s\n' --list -l --undo -u --yes -y --keep-current -k \
-        --help -h
+    printf '%s\n' --list -l --undo -u --yes -y --help -h
     exit 0
 fi
 if [[ "${1:-}" == "--complete-fish" ]]; then
@@ -42,8 +41,6 @@ if [[ "${1:-}" == "--complete-fish" ]]; then
 -u	promote the most recent rollback backup back to @
 --yes	skip the y/N confirmation prompt
 -y	skip the y/N confirmation prompt
---keep-current	with --undo: keep the prior backup around
--k	with --undo: keep the prior backup around
 --help	show usage
 -h	show usage
 EOF
@@ -54,7 +51,7 @@ PROG="shedman rollback"
 
 usage() {
     cat <<EOF
-Usage: shedman rollback [-y|--yes] [-k|--keep-current] <snapshot-number>
+Usage: shedman rollback [-y|--yes] <snapshot-number>
        shedman rollback -l|--list
        shedman rollback -u|--undo
 
@@ -68,10 +65,6 @@ Options:
   -l, --list             Show recent snapper snapshots and exit.
   -u, --undo             Roll the last rollback back — promotes the most recent
                          @.rollback-<ts> backup to become @ again.
-  -k, --keep-current     Don't delete the prior @.rollback-<ts> backup after
-                         confirming the rollback boot. Default is to keep it
-                         until the next rollback anyway; this flag is only
-                         meaningful paired with --undo.
   -y, --yes              Skip the "are you sure" confirmation prompt.
   -h, --help             This message.
 
@@ -207,13 +200,12 @@ do_rollback() {
 }
 
 main() {
-    local action="" target="" yes=0 keep=0
+    local action="" target="" yes=0
     while (( $# )); do
         case $1 in
             -l|--list) action=list ;;
             -u|--undo) action=undo ;;
             -y|--yes) yes=1 ;;
-            -k|--keep-current) keep=1 ;;
             -h|--help) usage; exit 0 ;;
             --) shift; break ;;
             -*) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;

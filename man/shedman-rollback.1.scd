@@ -6,7 +6,7 @@ shedman-rollback - restore root subvolume from a snapper snapshot
 
 # SYNOPSIS
 
-*sudo shedman rollback* [*-y*|*--yes*] [*-k*|*--keep-current*] _N_++
+*sudo shedman rollback* [*-y*|*--yes*] _N_++
 *sudo shedman rollback* {*-l*|*--list*}++
 *sudo shedman rollback* {*-u*|*--undo*}
 
@@ -40,10 +40,6 @@ _N_
 *-u*, *--undo*
 	Promote the most recent @.rollback-_<ts>_ backup back to *@*.
 	Reboot to apply.
-
-*-k*, *--keep-current*
-	Pair with *--undo*: keep the prior backup around even after the
-	undo.
 
 *-y*, *--yes*
 	Skip the "are you sure" prompt.
