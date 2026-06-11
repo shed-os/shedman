@@ -182,6 +182,25 @@ class DateTime(App):
                     validators=[TimeValidator()],
                     validate_on=["changed"],
                 )
+            with Horizontal(id="nl_row", classes="hidden"):
+                yield Label("Night light")
+                yield Switch(id="nl")
+                yield Static("off", id="nl_state")
+            with Horizontal(id="nl_times", classes="field-row hidden"):
+                yield Label("On at")
+                yield Input(
+                    id="nl_on",
+                    placeholder="HH:MM",
+                    restrict=r"[0-9:]*",
+                    max_length=5,
+                )
+                yield Label("Off at")
+                yield Input(
+                    id="nl_off",
+                    placeholder="HH:MM",
+                    restrict=r"[0-9:]*",
+                    max_length=5,
+                )
             yield Static(id="msg")
             with Horizontal(id="buttons"):
                 yield Button("Apply", id="apply", variant="primary")
@@ -198,6 +217,7 @@ class DateTime(App):
         self._refresh_results(self.tz)
         self._refresh_status()
         self.set_interval(1, self._refresh_status)
+        self._nightlight_mount()
         self._refresh_manual_state()
         self._refresh_ntp_label()
 
@@ -317,10 +337,66 @@ class DateTime(App):
                 ["systemctl", "--user", "restart", "waybar.service"],
                 check=False, capture_output=True,
             )
+            self._nightlight_apply()
             self._msg("Applied.", "ok")
+        except ValueError as e:
+            self._msg(f"Failed: {e}", "err")
         except subprocess.CalledProcessError as e:
             err = (e.stderr or e.stdout or str(e)).strip().splitlines()[-1]
             self._msg(f"Failed: {err}", "err")
+
+    NL_HELPER = "/usr/libexec/shedos-hyprland/nightlight"
+
+    def _nightlight_mount(self) -> None:
+        # Desktop-side feature; hide the rows on installs without the
+        # Hyprland profile.
+        import os
+        if not os.access(self.NL_HELPER, os.X_OK):
+            return
+        self.query_one("#nl_row").remove_class("hidden")
+        self.query_one("#nl_times").remove_class("hidden")
+        self.nl_was_on = False
+        on_t, off_t = "19:00", "07:00"
+        try:
+            out = subprocess.run(
+                [self.NL_HELPER, "status"],
+                capture_output=True, text=True, timeout=5,
+            ).stdout
+            for line in out.splitlines():
+                if line.startswith("schedule: on"):
+                    import re
+                    m = re.findall(r"\d{2}:\d{2}", line)
+                    if len(m) == 2:
+                        on_t, off_t = m
+                        self.nl_was_on = True
+        except Exception:
+            pass
+        self.query_one("#nl", Switch).value = self.nl_was_on
+        self.query_one("#nl_state", Static).update(
+            "scheduled" if self.nl_was_on else "off")
+        self.query_one("#nl_on", Input).value = on_t
+        self.query_one("#nl_off", Input).value = off_t
+
+    def _nightlight_apply(self) -> None:
+        import os, re
+        if not os.access(self.NL_HELPER, os.X_OK):
+            return
+        want = self.query_one("#nl", Switch).value
+        on_t = self.query_one("#nl_on", Input).value.strip()
+        off_t = self.query_one("#nl_off", Input).value.strip()
+        if want:
+            if not (re.fullmatch(r"[0-2]\d:[0-5]\d", on_t)
+                    and re.fullmatch(r"[0-2]\d:[0-5]\d", off_t)):
+                raise ValueError("night-light times must be HH:MM")
+            subprocess.run([self.NL_HELPER, "schedule", on_t, off_t],
+                           check=True, capture_output=True, text=True)
+            self.nl_was_on = True
+        elif self.nl_was_on:
+            subprocess.run([self.NL_HELPER, "schedule", "off"],
+                           check=True, capture_output=True, text=True)
+            self.nl_was_on = False
+        self.query_one("#nl_state", Static).update(
+            "scheduled" if self.nl_was_on else "off")
 
     def action_cancel(self) -> None:
         self.exit(0)
