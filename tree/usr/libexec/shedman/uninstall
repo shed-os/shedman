@@ -9,6 +9,7 @@ usage() {
     cat <<'EOF'
 Usage:
   shedman uninstall <pkg> [<pkg>...]        Remove one or more packages.
+  shedman uninstall -y|--yes <pkg>...       Skip the confirmation prompts.
   shedman uninstall -v|--verbose <pkg>...   Print the command before running.
   shedman uninstall -s|--search <query>     List installed packages matching.
   shedman uninstall -h|--help               Show this message.
@@ -26,6 +27,7 @@ if [[ $# -eq 0 ]]; then
 fi
 
 verbose=0
+yes=0
 
 case "$1" in
     -h|--help)
@@ -37,12 +39,14 @@ case "$1" in
         exit 0
         ;;
     --complete-bash|--complete-zsh)
-        printf '%s\n' --verbose -v --search -s --help -h
+        printf '%s\n' --yes -y --verbose -v --search -s --help -h
         pacman -Qq 2>/dev/null || true
         exit 0
         ;;
     --complete-fish)
         cat <<'EOF'
+--yes	skip the removal confirmation prompts
+-y	skip the removal confirmation prompts
 --verbose	print the resolved command before running
 -v	print the resolved command before running
 --search	list installed packages matching a query
@@ -98,6 +102,14 @@ EOF
             exit 1
         fi
         ;;
+    -y|--yes)
+        yes=1
+        shift
+        if [[ $# -eq 0 ]]; then
+            echo "shedman uninstall: -y needs at least one package" >&2
+            exit 1
+        fi
+        ;;
 esac
 
 if [[ $(id -u) -eq 0 ]]; then
@@ -125,11 +137,19 @@ if [[ ${#not_installed[@]} -gt 0 ]]; then
     exit 1
 fi
 
+# pacman/yay show the full -Rns closure and prompt before removing;
+# that prompt is the only thing standing between a typo and a nuked
+# dependency tree, so it stays unless -y was explicit.
+confirm_flag=()
+if (( yes )); then
+    confirm_flag=(--noconfirm)
+fi
+
 if [[ ${#pacman_pkgs[@]} -gt 0 ]]; then
     if (( verbose )); then
-        echo "via pacman: sudo pacman -Rns --noconfirm ${pacman_pkgs[*]}"
+        echo "via pacman: sudo pacman -Rns ${confirm_flag[*]} ${pacman_pkgs[*]}"
     fi
-    sudo pacman -Rns --noconfirm "${pacman_pkgs[@]}"
+    sudo pacman -Rns "${confirm_flag[@]}" "${pacman_pkgs[@]}"
 fi
 
 if [[ ${#aur_pkgs[@]} -gt 0 ]]; then
@@ -138,7 +158,7 @@ if [[ ${#aur_pkgs[@]} -gt 0 ]]; then
         exit 1
     fi
     if (( verbose )); then
-        echo "via yay: yay -Rns --noconfirm ${aur_pkgs[*]}"
+        echo "via yay: yay -Rns ${confirm_flag[*]} ${aur_pkgs[*]}"
     fi
-    yay -Rns --noconfirm "${aur_pkgs[@]}"
+    yay -Rns "${confirm_flag[@]}" "${aur_pkgs[@]}"
 fi
