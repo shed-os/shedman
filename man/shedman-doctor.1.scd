@@ -16,6 +16,12 @@ but never mutates anything. It returns a Plan describing the
 differences between /etc/shedos/system.toml and the live system.
 Outputs vary by mode.
 
+It runs fine as a regular user: planning writes no state, and
+sections whose live side is root-only — the snapper config, ufw —
+degrade to a *?* note instead of failing. Run as root for full
+coverage. Notify hysteresis is per-invoker: root keeps it under
+/var/lib/shedos, users under _$XDG_STATE_HOME/shedos_.
+
 # OPTIONS
 
 *-c* _PATH_, *--config* _PATH_

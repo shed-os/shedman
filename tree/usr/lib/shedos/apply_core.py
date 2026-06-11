@@ -248,25 +248,40 @@ class Change:
     apply_fn: Optional[Callable[[], None]] = None
     # Optional undo function; called in LIFO order if a later change raises.
     undo_fn: Optional[Callable[[], None]] = None
+    # Housekeeping: executed on apply like any change, but invisible to
+    # drift accounting and the plan view. Used for state-cache
+    # reconciliation so that planning itself stays read-only (doctor
+    # runs the planner as a regular user).
+    quiet: bool = False
 
 
 @dataclass
 class Plan:
     changes: list[Change] = field(default_factory=list)
+    # Informational lines (e.g. "needs root to verify X"): rendered and
+    # exported, but never counted as drift.
+    notes: list[str] = field(default_factory=list)
+
+    def visible_changes(self) -> list[Change]:
+        return [c for c in self.changes if not c.quiet]
 
     def is_empty(self) -> bool:
-        return not self.changes
+        return not self.visible_changes()
 
     def render(self) -> str:
-        if self.is_empty():
-            return "(no changes — system matches system.toml)"
+        visible = self.visible_changes()
         out = []
-        width = max(len(c.section) for c in self.changes)
-        for c in self.changes:
-            sym = {"+": colorize("+", "green"),
-                   "~": colorize("~", "yellow"),
-                   "-": colorize("-", "red")}.get(c.kind, c.kind)
-            out.append(f"  {sym} [{c.section:<{width}}]  {c.summary}")
+        if not visible:
+            out.append("(no changes — system matches system.toml)")
+        else:
+            width = max(len(c.section) for c in visible)
+            for c in visible:
+                sym = {"+": colorize("+", "green"),
+                       "~": colorize("~", "yellow"),
+                       "-": colorize("-", "red")}.get(c.kind, c.kind)
+                out.append(f"  {sym} [{c.section:<{width}}]  {c.summary}")
+        for n in self.notes:
+            out.append(f"  {colorize('?', 'yellow')} {n}")
         return "\n".join(out)
 
     def render_diffs(self) -> str:
@@ -280,13 +295,15 @@ class Plan:
         return "\n".join(out) or "(no diffable changes)"
 
     def to_json(self) -> dict[str, Any]:
+        visible = self.visible_changes()
         return {
             "aligned": self.is_empty(),
-            "drift_count": len(self.changes),
+            "drift_count": len(visible),
             "changes": [
                 {"kind": c.kind, "section": c.section, "summary": c.summary}
-                for c in self.changes
+                for c in visible
             ],
+            "notes": list(self.notes),
         }
 
 
@@ -1257,15 +1274,13 @@ def save_state_set(path: Path, items: set[tuple]) -> None:
     atomic_write_text(path, json.dumps(payload, indent=2) + "\n", mode=0o644)
 
 
-def seed_baseline_if_missing(section: str, live: set[tuple]) -> set[tuple]:
-    """First-apply seed: snapshot the current live state as the
-    permanent baseline. On subsequent applies, return the existing
-    file's contents unchanged."""
-    p = baseline_path(section)
-    if p.exists():
-        return load_state_set(p)
-    save_state_set(p, live)
-    return live
+# Planner-side informational notes (e.g. "needs root to verify X").
+# Sections append via plan_note(); build_plan() drains into Plan.notes.
+_PLAN_NOTES: list[str] = []
+
+
+def plan_note(msg: str) -> None:
+    _PLAN_NOTES.append(msg)
 
 
 def atomic_write_system_toml(
@@ -1498,7 +1513,14 @@ def plan_snapper(cfg: ValidatedConfig) -> list[Change]:
             summary=f"SKIP: {cfg_path} not found (run `snapper create-config /` first)",
             apply_fn=lambda: None,
         )]
-    current_text = cfg_path.read_text(encoding="utf-8")
+    try:
+        current_text = cfg_path.read_text(encoding="utf-8")
+    except PermissionError:
+        # The snapper config is root-readable only (0640). doctor runs
+        # the planner as a regular user; report instead of crashing.
+        plan_note(f"snapper: {cfg_path} is root-readable only — "
+                  "run as root to verify this section")
+        return []
     current = _parse_snapper_config(current_text)
     changes: list[Change] = []
 
@@ -1919,6 +1941,12 @@ def plan_firewall(cfg: ValidatedConfig) -> list[Change]:
     try:
         live = _firewall_status(check=True)
     except RuntimeError as e:
+        # ufw refuses to disclose state to non-root. doctor runs the
+        # planner as a regular user; report instead of crashing.
+        if os.geteuid() != 0 and "root" in str(e).lower():
+            plan_note("network.firewall: ufw requires root — "
+                      "run as root to verify this section")
+            return []
         raise RuntimeError(f"plan_firewall: {e}") from e
     live_active = live.active
     live_rules = live.rules
@@ -1930,12 +1958,17 @@ def plan_firewall(cfg: ValidatedConfig) -> list[Change]:
     # First apply seeds the baseline as the empty set; bypassing the
     # baseline-protection path because the firewall ship state is "off,
     # no rules". This matches the user-approved behavior: any rules
-    # already present at first apply get adopted into TOML.
+    # already present at first apply get adopted into TOML. Planning is
+    # read-only (doctor runs it as a regular user); the first applying
+    # change persists the seed.
     if baseline_p.exists():
         baseline = load_state_set(baseline_p)
     else:
         baseline = set()
-        save_state_set(baseline_p, baseline)
+
+    def _seed_baseline() -> None:
+        if not baseline_p.exists():
+            save_state_set(baseline_p, baseline)
 
     merge = threeway_merge(declared_set, live_set, last_applied, baseline)
 
@@ -1970,6 +2003,7 @@ def plan_firewall(cfg: ValidatedConfig) -> list[Change]:
         )
 
         def apply_adopt() -> None:
+            _seed_baseline()
             atomic_write_system_toml(config_p, new_doc_text)
 
         def undo_adopt() -> None:
@@ -2012,14 +2046,26 @@ def plan_firewall(cfg: ValidatedConfig) -> list[Change]:
     needs_live = (default_changes or service_action
                   or rules_to_remove or rules_to_add)
     if not needs_live and not adoption_changes:
-        # Aligned. Still record the merged set so a future remove
-        # propagates correctly.
-        save_state_set(state_p, declared_set | merge.to_adopt)
+        # Aligned. The merged set still needs recording so a future
+        # remove propagates correctly — but planning is read-only, so
+        # emit it as quiet housekeeping for the next apply instead of
+        # writing here. No-op when the state file is already current.
+        target = declared_set | merge.to_adopt
+        if last_applied != target:
+            def apply_record_state() -> None:
+                _seed_baseline()
+                save_state_set(state_p, target)
+            return [Change(
+                kind="~", section="network.firewall",
+                summary="record reconciled rule state",
+                apply_fn=apply_record_state, quiet=True,
+            )]
         return []
 
     if not needs_live:
         # Adoption-only; write state and return.
         def apply_state_only() -> None:
+            _seed_baseline()
             save_state_set(state_p, declared_set | merge.to_adopt)
         # Splice the state save into the adoption Change's apply_fn.
         original_apply = adoption_changes[0].apply_fn
@@ -2043,6 +2089,7 @@ def plan_firewall(cfg: ValidatedConfig) -> list[Change]:
     live_summary = "; ".join(summary_parts) or "noop"
 
     def apply_live() -> None:
+        _seed_baseline()
         # Remove first (descending), then add, then defaults, then
         # service flip.
         for num, _rule in rules_to_remove:
@@ -2252,8 +2299,12 @@ def plan_keyring(cfg: ValidatedConfig) -> list[Change]:
     else:
         # First apply: snapshot the entire live keyring as baseline.
         # The shedos install-time fingerprints become invisible forever.
+        # Persisted by the first applying change; planning is read-only.
         baseline = set(live)
-        save_state_set(baseline_p, baseline)
+
+    def _seed_baseline() -> None:
+        if not baseline_p.exists():
+            save_state_set(baseline_p, baseline)
 
     merge = threeway_merge(declared, live, last_applied, baseline)
 
@@ -2277,6 +2328,7 @@ def plan_keyring(cfg: ValidatedConfig) -> list[Change]:
                    f"fingerprint(s) into [security.keyring]")
 
         def apply_adopt() -> None:
+            _seed_baseline()
             atomic_write_system_toml(config_p, new_doc_text)
 
         def undo_adopt() -> None:
@@ -2312,7 +2364,18 @@ def plan_keyring(cfg: ValidatedConfig) -> list[Change]:
     # removals work. The state-save needs to happen on adoption-only
     # paths too.
     if not changes and not merge.to_add:
-        save_state_set(state_p, declared | merge.to_adopt)
+        # Planning is read-only; record the merged set as quiet
+        # housekeeping on the next apply. No-op when already current.
+        target = declared | merge.to_adopt
+        if last_applied != target:
+            def apply_record_state() -> None:
+                _seed_baseline()
+                save_state_set(state_p, target)
+            return [Change(
+                kind="~", section="pacman.keyring",
+                summary="record reconciled keyring state",
+                apply_fn=apply_record_state, quiet=True,
+            )]
         return []
 
     # Live additions: lsign each declared fingerprint not yet trusted.
@@ -2320,6 +2383,7 @@ def plan_keyring(cfg: ValidatedConfig) -> list[Change]:
 
     if add_fps:
         def apply_lsign() -> None:
+            _seed_baseline()
             for fp in add_fps:
                 _pacman_key_run(["--lsign-key", fp])
             save_state_set(state_p, declared | merge.to_adopt)
@@ -2532,8 +2596,12 @@ def plan_mounts(cfg: ValidatedConfig) -> list[Change]:
         baseline = load_state_set(baseline_p)
     else:
         # First apply: snapshot every existing fstab entry as baseline.
+        # Persisted by the first applying change; planning is read-only.
         baseline = set(live)
-        save_state_set(baseline_p, baseline)
+
+    def _seed_baseline() -> None:
+        if not baseline_p.exists():
+            save_state_set(baseline_p, baseline)
 
     merge = threeway_merge(declared, live, last_applied, baseline)
 
@@ -2560,6 +2628,7 @@ def plan_mounts(cfg: ValidatedConfig) -> list[Change]:
                    f"into [[fs.mounts]]")
 
         def apply_adopt() -> None:
+            _seed_baseline()
             atomic_write_system_toml(config_p, new_doc_text)
 
         def undo_adopt() -> None:
@@ -2610,6 +2679,7 @@ def plan_mounts(cfg: ValidatedConfig) -> list[Change]:
                    f"entry(ies); +{n_added}, -{n_removed})")
 
         def apply_fstab() -> None:
+            _seed_baseline()
             atomic_write_text(fstab, desired_text, mode=0o644)
             save_state_set(state_p, declared | merge.to_adopt)
 
@@ -2632,7 +2702,18 @@ def plan_mounts(cfg: ValidatedConfig) -> list[Change]:
                 save_state_set(state_p, declared | merge.to_adopt)
             changes[0].apply_fn = combined
         else:
-            save_state_set(state_p, declared | merge.to_adopt)
+            # Planning is read-only; record the merged set as quiet
+            # housekeeping on the next apply. No-op when current.
+            target = declared | merge.to_adopt
+            if last_applied != target:
+                def apply_record_state() -> None:
+                    _seed_baseline()
+                    save_state_set(state_p, target)
+                changes.append(Change(
+                    kind="~", section="fs.mounts",
+                    summary="record reconciled mount state",
+                    apply_fn=apply_record_state, quiet=True,
+                ))
 
     return changes
 
@@ -2769,8 +2850,12 @@ def plan_kernel_cmdline(cfg: ValidatedConfig) -> list[Change]:
     if baseline_p.exists():
         baseline = load_state_set(baseline_p)
     else:
+        # Persisted by the first applying change; planning is read-only.
         baseline = set(live_set)
-        save_state_set(baseline_p, baseline)
+
+    def _seed_baseline() -> None:
+        if not baseline_p.exists():
+            save_state_set(baseline_p, baseline)
 
     merge = threeway_merge(declared_set, live_set, last_applied, baseline)
 
@@ -2794,6 +2879,7 @@ def plan_kernel_cmdline(cfg: ValidatedConfig) -> list[Change]:
                    f"into [kernel.cmdline].append")
 
         def apply_adopt() -> None:
+            _seed_baseline()
             atomic_write_system_toml(config_p, new_doc_text)
 
         def undo_adopt() -> None:
@@ -2886,6 +2972,7 @@ def plan_kernel_cmdline(cfg: ValidatedConfig) -> list[Change]:
                    f"token(s){suffix}")
 
         def apply_cmdline() -> None:
+            _seed_baseline()
             atomic_write_text(limine_path, new_limine_text, mode=0o644)
             _sync_limine_to_esp(new_limine_text)
             save_state_set(state_p, declared_set | merge.to_adopt)
@@ -2911,7 +2998,18 @@ def plan_kernel_cmdline(cfg: ValidatedConfig) -> list[Change]:
                 save_state_set(state_p, declared_set | merge.to_adopt)
             changes[0].apply_fn = combined
         else:
-            save_state_set(state_p, declared_set | merge.to_adopt)
+            # Planning is read-only; record the merged set as quiet
+            # housekeeping on the next apply. No-op when current.
+            target = declared_set | merge.to_adopt
+            if last_applied != target:
+                def apply_record_state() -> None:
+                    _seed_baseline()
+                    save_state_set(state_p, target)
+                changes.append(Change(
+                    kind="~", section="kernel.cmdline",
+                    summary="record reconciled cmdline state",
+                    apply_fn=apply_record_state, quiet=True,
+                ))
 
     return changes
 
@@ -3041,8 +3139,12 @@ def plan_groups(cfg: ValidatedConfig) -> list[Change]:
     if baseline_p.exists():
         baseline = load_state_set(baseline_p)
     else:
+        # Persisted by the first applying change; planning is read-only.
         baseline = set(live)
-        save_state_set(baseline_p, baseline)
+
+    def _seed_baseline() -> None:
+        if not baseline_p.exists():
+            save_state_set(baseline_p, baseline)
 
     merge = threeway_merge(declared, live, last_applied, baseline)
 
@@ -3066,6 +3168,7 @@ def plan_groups(cfg: ValidatedConfig) -> list[Change]:
         summary = f"adopt {len(adopted)} hand-created group(s) into [[groups]]"
 
         def apply_adopt() -> None:
+            _seed_baseline()
             atomic_write_system_toml(config_p, new_doc_text)
 
         def undo_adopt() -> None:
@@ -3094,6 +3197,7 @@ def plan_groups(cfg: ValidatedConfig) -> list[Change]:
         by_name = {g.name: g for g in cfg.groups_sec.groups}
 
         def apply_groupadd() -> None:
+            _seed_baseline()
             for t in add_groups:
                 gname = t[0]
                 ge = by_name.get(gname) or GroupEntry(name=gname)
@@ -3122,7 +3226,18 @@ def plan_groups(cfg: ValidatedConfig) -> list[Change]:
                 save_state_set(state_p, declared | merge.to_adopt)
             changes[0].apply_fn = combined
         else:
-            save_state_set(state_p, declared | merge.to_adopt)
+            # Planning is read-only; record the merged set as quiet
+            # housekeeping on the next apply. No-op when current.
+            target = declared | merge.to_adopt
+            if last_applied != target:
+                def apply_record_state() -> None:
+                    _seed_baseline()
+                    save_state_set(state_p, target)
+                changes.append(Change(
+                    kind="~", section="groups",
+                    summary="record reconciled group state",
+                    apply_fn=apply_record_state, quiet=True,
+                ))
 
     return changes
 
@@ -3157,14 +3272,19 @@ def plan_users(cfg: ValidatedConfig) -> list[Change]:
     if baseline_p.exists():
         baseline_users = load_state_set(baseline_p)
     else:
+        # Persisted by the first applying change; planning is read-only.
         baseline_users = set(live_users_set)
-        save_state_set(baseline_p, baseline_users)
 
     if mem_baseline_p.exists():
         baseline_mem = load_state_set(mem_baseline_p)
     else:
         baseline_mem = set(live_memberships_set)
-        save_state_set(mem_baseline_p, baseline_mem)
+
+    def _seed_baseline() -> None:
+        if not baseline_p.exists():
+            save_state_set(baseline_p, baseline_users)
+        if not mem_baseline_p.exists():
+            save_state_set(mem_baseline_p, baseline_mem)
 
     user_merge = threeway_merge(declared_users, live_users_set,
                                 last_applied_users, baseline_users)
@@ -3213,6 +3333,7 @@ def plan_users(cfg: ValidatedConfig) -> list[Change]:
                    f"into [[users]]")
 
         def apply_adopt() -> None:
+            _seed_baseline()
             atomic_write_system_toml(config_p, new_doc_text)
 
         def undo_adopt() -> None:
@@ -3260,6 +3381,7 @@ def plan_users(cfg: ValidatedConfig) -> list[Change]:
                              if m not in covered_by_useradd]
 
         def apply_users() -> None:
+            _seed_baseline()
             for t in user_adds:
                 uname = t[0]
                 entry = by_name_decl.get(uname) or UserEntry(name=uname)
@@ -3301,9 +3423,20 @@ def plan_users(cfg: ValidatedConfig) -> list[Change]:
                                mem_merge.to_adopt)
             changes[0].apply_fn = combined
         else:
-            save_state_set(state_p, declared_users | user_merge.to_adopt)
-            save_state_set(mem_state_p, declared_memberships |
-                           mem_merge.to_adopt)
+            # Planning is read-only; record the merged set as quiet
+            # housekeeping on the next apply. No-op when current.
+            target = declared_users | user_merge.to_adopt
+            mem_target = declared_memberships | mem_merge.to_adopt
+            if last_applied_users != target or last_applied_mem != mem_target:
+                def apply_record_state() -> None:
+                    _seed_baseline()
+                    save_state_set(state_p, target)
+                    save_state_set(mem_state_p, mem_target)
+                changes.append(Change(
+                    kind="~", section="users",
+                    summary="record reconciled user state",
+                    apply_fn=apply_record_state, quiet=True,
+                ))
 
     return changes
 
@@ -3383,6 +3516,7 @@ def _render_system_toml_with_users(
 
 def build_plan(cfg: ValidatedConfig,
                manifest: Manifest) -> tuple[Plan, Manifest]:
+    _PLAN_NOTES.clear()
     changes: list[Change] = []
     changes.extend(plan_systemd(cfg))
     dropin_changes, new_manifest = plan_dropins(cfg, manifest)
@@ -3396,14 +3530,14 @@ def build_plan(cfg: ValidatedConfig,
     changes.extend(plan_kernel_cmdline(cfg))
     changes.extend(plan_groups(cfg))
     changes.extend(plan_users(cfg))
-    return Plan(changes=changes), new_manifest
+    return Plan(changes=changes, notes=list(_PLAN_NOTES)), new_manifest
 
 
 def plan_hash(plan: Plan) -> str:
     """Stable fingerprint of the plan — used by shedos-doctor to decide
     whether drift is genuinely new since the last notification."""
     h = hashlib.sha256()
-    for c in plan.changes:
+    for c in plan.visible_changes():
         h.update(c.kind.encode("utf-8"))
         h.update(b"\x00")
         h.update(c.section.encode("utf-8"))

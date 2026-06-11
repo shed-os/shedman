@@ -92,9 +92,19 @@ def run_apply(cfg_path: _core.Optional[Path] = None, *,
     print(_core.colorize(f"Plan for {cfg_path or _core.config_path()}:", "bold"))
     print(plan.render())
 
-    if plan.is_empty():
-        return 0
     if dry_run:
+        # Fully side-effect-free: not even quiet housekeeping runs.
+        return 0
+    if plan.is_empty():
+        # Quiet housekeeping (state-cache reconciliation deferred by
+        # the read-only planner) still runs on a real apply.
+        for change in plan.changes:
+            if change.quiet and change.apply_fn is not None:
+                try:
+                    change.apply_fn()
+                except OSError as e:
+                    print(f"housekeeping skipped ({change.summary}): {e}",
+                          file=sys.stderr)
         return 0
 
     if not assume_yes:

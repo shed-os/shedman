@@ -249,6 +249,60 @@ def case_reset_notify_state(td: Path) -> None:
     assert '"last_notified_hash": ""' in state, state
 
 
+def case_plan_is_side_effect_free(td: Path) -> None:
+    # Ledger A3: doctor (and apply --dry-run) used to seed permanent
+    # per-section baselines and rewrite state files during PLANNING.
+    # Drive a plan over reconciler-backed sections and assert the state
+    # dir comes through byte-identical — twice, for determinism.
+    _setup(td, toml=(
+        'schema = 1\n'
+        '[network.firewall]\n'
+        'enabled = false\n'
+    ))
+    ufw = td / "stubs" / "ufw"
+    ufw.write_text('#!/usr/bin/env bash\necho "Status: inactive"\nexit 0\n')
+    ufw.chmod(0o755)
+    env = {"SHEDOS_APPLY_UFW": str(ufw)}
+
+    def snapshot() -> dict[str, bytes]:
+        state = td / "state"
+        return {str(p): p.read_bytes() for p in sorted(state.rglob("*"))
+                if p.is_file()}
+
+    before = snapshot()
+    r1 = _run(td, env_extra=env)
+    assert r1.returncode in (0, 1), (r1.returncode, r1.stderr)
+    after1 = snapshot()
+    assert before == after1, (
+        f"planning wrote state: {set(after1) ^ set(before)} "
+        f"or mutated contents"
+    )
+    r2 = _run(td, env_extra=env)
+    assert r2.returncode == r1.returncode
+    assert snapshot() == before, "second plan wrote state"
+
+
+def case_snapper_unreadable_is_note_not_crash(td: Path) -> None:
+    # Ledger A1: the snapper config is root-readable only (0640); a
+    # non-root doctor must degrade to a note, not die with Errno 13.
+    if os.geteuid() == 0:
+        return  # root can read anything; the case only means something unprivileged
+    _setup(td, toml='schema = 1\n[snapper.timeline]\ndaily = 7\n')
+    snap_cfg = td / "etc" / "snapper" / "configs" / "root"
+    snap_cfg.parent.mkdir(parents=True, exist_ok=True)
+    snap_cfg.write_text('TIMELINE_LIMIT_DAILY="10"\n')
+    snap_cfg.chmod(0o000)
+    try:
+        r = _run(td)
+        assert r.returncode in (0, 1), (r.returncode, r.stderr)
+        assert "root-readable only" in r.stdout, r.stdout
+        j = _run(td, "--json")
+        doc = json.loads(j.stdout)
+        assert any("root-readable" in n for n in doc.get("notes", [])), doc
+    finally:
+        snap_cfg.chmod(0o644)
+
+
 CASES = [
     ("aligned-bare",              case_aligned_bare),
     ("aligned-json",              case_aligned_json),
@@ -263,6 +317,8 @@ CASES = [
     ("schema-error",              case_schema_error),
     ("diff-renders",              case_diff_renders),
     ("reset-notify-state",        case_reset_notify_state),
+    ("plan-side-effect-free",     case_plan_is_side_effect_free),
+    ("snapper-unreadable-note",   case_snapper_unreadable_is_note_not_crash),
 ]
 
 

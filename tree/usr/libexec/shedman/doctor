@@ -92,7 +92,15 @@ DOCTOR_STATE = "doctor.state.json"
 # so the timer-driven invocation doesn't spam the same message every
 # 6 hours.
 def _doctor_state_path() -> Path:
-    return _core.state_root() / DOCTOR_STATE
+    # The notify hysteresis is per-invoker: root keeps the system state
+    # dir; a regular user (the waybar/mako notify path, plain doctor)
+    # gets an XDG state file it can actually write. An explicit state
+    # root override (tests, sandboxes) wins either way.
+    if os.environ.get("SHEDOS_APPLY_STATE_ROOT") or os.geteuid() == 0:
+        return _core.state_root() / DOCTOR_STATE
+    xdg = os.environ.get("XDG_STATE_HOME",
+                         str(Path.home() / ".local" / "state"))
+    return Path(xdg) / "shedos" / DOCTOR_STATE
 
 
 def _load_last_hash() -> str:
@@ -111,12 +119,17 @@ def _load_last_hash() -> str:
 
 def _save_last_hash(hash_value: str) -> None:
     p = _doctor_state_path()
-    p.parent.mkdir(parents=True, exist_ok=True)
-    _core.atomic_write_text(
-        p,
-        json.dumps({"last_notified_hash": hash_value}, indent=2) + "\n",
-        mode=0o644,
-    )
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        _core.atomic_write_text(
+            p,
+            json.dumps({"last_notified_hash": hash_value}, indent=2) + "\n",
+            mode=0o644,
+        )
+    except OSError as e:
+        # Hysteresis is best-effort; never let it break doctor itself.
+        print(f"shedman doctor: cannot persist notify state: {e}",
+              file=sys.stderr)
 
 
 # Plan acquisition: shared entry for every mode. Returns (rc, plan)
@@ -186,8 +199,10 @@ def _delegate_apply(cfg_path: "_core.Optional[Path]") -> int:
 def _emit_human(plan: _core.Plan) -> None:
     if plan.is_empty():
         print(_core.colorize("aligned — no drift detected.", "green"))
+        for n in plan.notes:
+            print(f"  {_core.colorize('?', 'yellow')} {n}")
         return
-    n = len(plan.changes)
+    n = len(plan.visible_changes())
     print(_core.colorize(
         f"drift — {n} item(s) differ from /etc/shedos/system.toml:",
         "yellow"))
@@ -219,11 +234,12 @@ def _waybar_payload(plan: _core.Plan) -> dict[str, str]:
     if plan.is_empty():
         return {"text": "", "tooltip": "system state aligned",
                 "class": "aligned", "alt": "aligned"}
-    n = len(plan.changes)
+    visible = plan.visible_changes()
+    n = len(visible)
     # One-per-line tooltip mirroring shedos-check-health's style.
-    lines = [f"{c.kind} [{c.section}] {c.summary}" for c in plan.changes[:8]]
-    if len(plan.changes) > 8:
-        lines.append(f"… and {len(plan.changes) - 8} more")
+    lines = [f"{c.kind} [{c.section}] {c.summary}" for c in visible[:8]]
+    if len(visible) > 8:
+        lines.append(f"… and {len(visible) - 8} more")
     tooltip = r"\n".join(lines).replace('"', r'\"')
     return {
         "text": f" {n}",
@@ -287,10 +303,11 @@ def main() -> int:
         current_hash = _core.plan_hash(plan)
         last = _load_last_hash()
         if not plan.is_empty() and current_hash != last:
-            n = len(plan.changes)
-            body_lines = [f"{c.kind} {c.summary}" for c in plan.changes[:4]]
-            if len(plan.changes) > 4:
-                body_lines.append(f"… and {len(plan.changes) - 4} more")
+            visible = plan.visible_changes()
+            n = len(visible)
+            body_lines = [f"{c.kind} {c.summary}" for c in visible[:4]]
+            if len(visible) > 4:
+                body_lines.append(f"… and {len(visible) - 4} more")
             _notify_send(
                 f"ShedOS: {n} config item(s) have drifted",
                 "\n".join(body_lines) +
