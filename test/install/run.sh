@@ -136,13 +136,16 @@ else
     _fail T6_pacman_routing "rc=$rc out=$out pacman=$(cat "$tmp/pacman.log" 2>/dev/null) yay=$(cat "$tmp/yay.log" 2>/dev/null)"
 fi
 
-# T7 AUR routing: pacman -Si fails, yay -Si succeeds → installed via yay -S
+# T7 AUR routing: pacman -Si fails, yay -Si succeeds → installed via
+# yay -S. The AUR path is deliberately interactive (S5): no
+# --noconfirm, no --answerdiff N, no --skippgpcheck — the user reviews
+# the build and makepkg verifies declared signatures.
 reset_logs
 out=$(STUB_PACMAN_SI_RC=1 STUB_YAY_SI_RC=0 "$tool" some-aur-bin 2>&1); rc=$?
 if (( rc == 0 )) \
    && grep -q -- '-Si --aur some-aur-bin' "$tmp/yay.log" 2>/dev/null \
-   && grep -q -- '-S --needed --noconfirm' "$tmp/yay.log" 2>/dev/null \
-   && grep -q -- '--mflags=--skippgpcheck some-aur-bin' "$tmp/yay.log" 2>/dev/null \
+   && grep -q -- '-S --needed --cleanafter --removemake some-aur-bin' "$tmp/yay.log" 2>/dev/null \
+   && ! grep -q -- 'noconfirm\|skippgpcheck\|answerdiff' "$tmp/yay.log" 2>/dev/null \
    && ! grep -q -- '-S --needed' "$tmp/pacman.log" 2>/dev/null; then
     _ok T7_aur_routing
 else
