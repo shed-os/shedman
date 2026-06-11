@@ -1,0 +1,65 @@
+#!/bin/bash
+# shedman snapshot; manual "before I break something" checkpoint.
+#
+# Wraps snapper with the same userdata convention shedman update uses,
+# so manual checkpoints appear in `shedman upgrade-history` and roll
+# back through the same `shedman rollback` path.
+
+set -uo pipefail
+
+usage() {
+    cat <<'USAGE'
+Usage:
+  shedman snapshot <label>      Create a checkpoint named <label>.
+  shedman snapshot -l|--list    List manual checkpoints.
+  shedman snapshot -h|--help    Show this message.
+
+Checkpoints are btrfs snapshots via snapper. Restore one with
+`sudo shedman rollback <number>` (numbers shown by --list and in
+`shedman upgrade-history`).
+USAGE
+}
+
+case "${1:-}" in
+    --help-summary)
+        echo "create a manual btrfs checkpoint (snapper) you can roll back to"
+        exit 0
+        ;;
+    --complete-bash|--complete-zsh)
+        printf '%s\n' --list -l --help -h
+        exit 0
+        ;;
+    --complete-fish)
+        cat <<'COMPEOF'
+--list	list manual checkpoints
+-l	list manual checkpoints
+--help	show usage
+-h	show usage
+COMPEOF
+        exit 0
+        ;;
+    -h|--help|"")
+        usage
+        [[ -n ${1:-} ]] && exit 0 || exit 1
+        ;;
+    -l|--list)
+        if ! sudo snapper -c root list --columns number,date,description,userdata 2>/dev/null \
+            | awk 'NR<=2 || /source=shedman-snapshot/'; then
+            echo "shedman snapshot: snapper refused (is btrfs/snapper set up?)" >&2
+            exit 1
+        fi
+        exit 0
+        ;;
+esac
+
+label=$*
+n=$(sudo snapper -c root create \
+        --type single --cleanup-algorithm number \
+        --description "$label" \
+        --userdata 'source=shedman-snapshot' \
+        --print-number 2>/dev/null) || {
+    echo "shedman snapshot: snapper create failed (is btrfs/snapper set up?)" >&2
+    exit 1
+}
+echo "Checkpoint #$n created: \"$label\""
+echo "Restore later with: sudo shedman rollback $n"
