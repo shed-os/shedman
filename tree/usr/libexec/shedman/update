@@ -208,6 +208,10 @@ fi
 
 # ----- upgrade flow ------------------------------------------------------
 
+# Captured up front so the end of the run can tell whether ShedOS
+# itself changed (vs only upstream Arch packages) and say what's new.
+_shedos_pre_ver=$(pacman -Q shedos-system 2>/dev/null | awk '{print $2}')
+
 _hr
 if (( YES )); then
     echo "ShedOS update (unattended — --yes)"
@@ -477,6 +481,24 @@ if [[ -d /usr/libexec/shedos-postupgrade ]]; then
         [[ -x $_hook ]] || continue
         "$_hook" || echo "post-upgrade hook $(basename "$_hook") exited non-zero." >&2
     done
+fi
+
+# When ShedOS's own packages moved (not just upstream Arch), point at
+# the changelog so users can see what their distro just gained.
+_shedos_post_ver=$(pacman -Q shedos-system 2>/dev/null | awk '{print $2}')
+if [[ -n $_shedos_post_ver && $_shedos_post_ver != "$_shedos_pre_ver" ]]; then
+    echo
+    echo "ShedOS updated: $_shedos_pre_ver → $_shedos_post_ver"
+    echo "What's new: https://shedos.org/changelog"
+    if command -v notify-send >/dev/null 2>&1 \
+        && [[ -n ${DBUS_SESSION_BUS_ADDRESS:-} ]]; then
+        timeout 2s notify-send \
+            --app-name=ShedOS \
+            --icon=system-software-update \
+            "ShedOS updated to $_shedos_post_ver" \
+            "See what's new: https://shedos.org/changelog" \
+            2>/dev/null || true
+    fi
 fi
 
 # Count leftover .shedosnew conflicts. A sync may have produced new ones, or
