@@ -172,8 +172,10 @@ def _refresh_waybar() -> None:
     if override is not None:
         cmd = shlex.split(override)
     else:
-        # SIGRTMIN+11: slot 11 (updates=8, conflicts=9, health=10, doctor=11).
-        cmd = ["pkill", "-RTMIN+11", "waybar"]
+        # SIGRTMIN+12: slot 12 (updates=8, conflicts=9, health=10,
+        # screenrecording=11, doctor=12). Slot 11 was claimed here
+        # before, colliding with the screenrecording indicator.
+        cmd = ["pkill", "-RTMIN+12", "waybar"]
     try:
         subprocess.run(cmd, check=False, timeout=5)
     except (OSError, subprocess.TimeoutExpired):
