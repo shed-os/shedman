@@ -1429,10 +1429,6 @@ def save_merged(state: MergeState, force: bool = False) -> None:
 
 _CONFLICT_MARKER_RE = re.compile(r"^(<{7} |={7}$|>{7} )", re.MULTILINE)
 
-_VSCODE_SETTINGS_TEMPLATE = Path(
-    "/usr/share/shedos-hyprland/vscode-merge-settings.json"
-)
-
 # VS Code extension that focuses the Source Control panel on workspace
 # open. Shipped under /usr/share/shedos-system/vscode-merge-helper/
 # and synced into the user's ~/.vscode/extensions/ on each --gui run
@@ -1878,10 +1874,7 @@ def _stage_for_vscode(conflicts: list[Conflict], force_2way: bool,
     vscode_dir = staging / ".vscode"
     vscode_dir.mkdir(parents=True, exist_ok=True)
     settings_dst = vscode_dir / "settings.json"
-    if _VSCODE_SETTINGS_TEMPLATE.is_file():
-        shutil.copy2(_VSCODE_SETTINGS_TEMPLATE, settings_dst)
-    else:
-        settings_dst.write_text(_DEFAULT_VSCODE_SETTINGS)
+    settings_dst.write_text(_DEFAULT_VSCODE_SETTINGS)
 
     # Marker dir + file the shedman-merge-helper VS Code extension
     # checks for. Its presence tells the extension "this workspace
@@ -2639,6 +2632,13 @@ def _load_textual_ui() -> None:
     #flash {{ dock: top; height: 1; background: {THEME.surface}; color: {THEME.added}; padding: 0 1; }}
 
     #hunk-strip {{ dock: bottom; height: 1; background: {THEME.panel}; color: {THEME.text}; padding: 0 1; }}
+
+    DecisionModal {{ align: center middle; }}
+    #decision-modal {{ width: 80; max-width: 90%; height: auto;
+            background: {THEME.panel}; border: round {THEME.accent};
+            padding: 1 2; }}
+    #modal-title {{ color: {THEME.accent}; text-style: bold; }}
+    #modal-body  {{ color: {THEME.text}; margin-top: 1; }}
     #hint-bar  {{ dock: bottom; height: 1; background: {THEME.panel}; color: {THEME.dim}; padding: 0 1; }}
 
     .pane {{ border: round {THEME.surface}; padding: 0; width: 1fr; height: 1fr;

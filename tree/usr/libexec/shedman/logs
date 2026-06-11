@@ -14,7 +14,7 @@ Keybindings (also visible in the footer + `?`):
     f               cycle severity floor (emerg → debug → all)
     t               cycle time window (1h / 6h / 24h / boot)
     s               toggle streaming mode (journalctl -f)
-    c               copy the highlighted line to clipboard
+    c               copy the newest visible log line to clipboard
     r               refresh unit list
     ?               show help
     q, ctrl+c       quit
@@ -391,6 +391,11 @@ def build_app_class():
             Binding("s", "toggle_stream", "stream"),
             Binding("c", "copy_line", "copy"),
             Binding("tab", "focus_next", "focus", show=False),
+            # The header/help promise j/k + space; DataTable only
+            # binds the arrow keys natively.
+            Binding("j", "cursor_down", "down", show=False),
+            Binding("k", "cursor_up", "up", show=False),
+            Binding("space", "load_selected", "load", show=False),
         ]
 
         def __init__(self) -> None:
@@ -428,6 +433,18 @@ def build_app_class():
 
         def action_help(self) -> None:
             self.push_screen(HelpScreen())
+
+        def action_cursor_down(self) -> None:
+            self.query_one(DataTable).action_cursor_down()
+
+        def action_cursor_up(self) -> None:
+            self.query_one(DataTable).action_cursor_up()
+
+        def action_load_selected(self) -> None:
+            # Same path as enter/RowSelected: the highlighted-row
+            # handler has already tracked selected_unit.
+            if self.selected_unit:
+                self._load_messages()
 
         def action_refresh_units(self) -> None:
             table = self.query_one(DataTable)
