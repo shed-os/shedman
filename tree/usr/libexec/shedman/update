@@ -256,7 +256,7 @@ if [[ -x /usr/libexec/shedman/migrate ]]; then
 fi
 
 # Refresh the pacman mirrorlist if it's older than 4 hours. The
-# weekly timer can drift behind upstream mirror status between
+# daily timer can drift behind upstream mirror status between
 # runs; a fresh-enough list keeps `pacman -Syu` from crawling on a
 # slow regional mirror.
 _mirrorlist=/etc/pacman.d/mirrorlist

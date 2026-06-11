@@ -112,7 +112,11 @@ list_snapshots() {
     if ! snapper -c root list >/dev/null 2>&1; then
         die "snapper config 'root' not set up — reinstall shedos-system"
     fi
-    snapper -c root list --columns number,type,pre-number,date,description,userdata
+    if ! snapper -c root list --columns number,type,pre-number,date,description,userdata; then
+        echo "shedman rollback: snapper refused (it needs root):" \
+             "re-run as \`sudo shedman rollback --list\`" >&2
+        exit 1
+    fi
 }
 
 do_undo() {

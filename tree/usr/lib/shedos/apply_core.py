@@ -1363,7 +1363,7 @@ def _systemctl_run(args: list[str], *, check: bool = True) -> tuple[int, str]:
 def _enabled_units(scope: str) -> set[str]:
     """Return the set of enabled units at the given scope ("system"|"user")."""
     args = ["list-unit-files", "--no-legend", "--no-pager", "--plain",
-            "--state=enabled"]
+            "--state=enabled,enabled-runtime,static,alias,generated,indirect"]
     if scope == "user":
         args = ["--user", "--global"] + args
     rc, out = _systemctl_run(args, check=False)
@@ -2818,6 +2818,10 @@ _ESP_LIMINE_MIRRORS = (
 
 
 def _sync_limine_to_esp(text: str) -> None:
+    # The mirror list is real absolute ESP paths; under a test/sandbox
+    # boot-root override, writing them would touch the host's ESP.
+    if os.environ.get("SHEDOS_APPLY_BOOT_ROOT"):
+        return
     for path_str in _ESP_LIMINE_MIRRORS:
         p = Path(path_str)
         if p.exists():
