@@ -6,6 +6,8 @@
 #                      postgres LOGIN+CREATEDB role and a same-named
 #                      database they own. Idempotent. Called on boot
 #                      by shedos-pg-user-bootstrap.service.
+#   create/drop/list   Per-project databases, run as the invoking user
+#                      (whose role has CREATEDB from the bootstrap).
 
 set -u
 
@@ -13,11 +15,14 @@ set -u
 # Completion contract: answer statically, never run the tool's work.
 case "${1:-}" in
     --complete-bash|--complete-zsh)
-        printf '%s\n' --pg-bootstrap --help -h
+        printf '%s\n' create drop list --pg-bootstrap --help -h
         exit 0
         ;;
     --complete-fish)
         cat <<'COMPEOF'
+create	create a project database
+drop	drop a project database (asks first)
+list	list your databases with sizes
 --pg-bootstrap	bootstrap per-user postgres roles and databases
 --help	show usage
 COMPEOF
@@ -26,13 +31,31 @@ COMPEOF
 esac
 _usage() {
     cat <<'EOF'
-usage: shedman db --pg-bootstrap
+usage: shedman db <create|drop> <name>
+       shedman db list
+       sudo shedman db --pg-bootstrap
 
 Database-service bootstrap/admin tools.
+
+Commands (run as you; your role owns what it creates):
+  create <name>    Create a project database.
+  drop <name>      Drop one — asks for confirmation first.
+  list             Your databases, with sizes.
 
 Modes:
   --pg-bootstrap   Bootstrap per-user postgres roles and databases.
 EOF
+}
+
+_valid_name() {
+    [[ $1 =~ ^[a-z_][a-z0-9_-]{0,62}$ ]]
+}
+
+_pg_up() {
+    if ! pg_isready -q 2>/dev/null; then
+        echo "shedman db: PostgreSQL is not running (try: sudo shedman services --fix)" >&2
+        exit 1
+    fi
 }
 
 case "${1:-}" in
@@ -46,6 +69,64 @@ case "${1:-}" in
         ;;
     --pg-bootstrap)
         : # fall through to the pg bootstrap body below
+        ;;
+    create)
+        name=${2:-}
+        if [[ -z $name ]] || ! _valid_name "$name"; then
+            echo "shedman db: name must be lowercase letters/digits/_/- (got '${name:-}')" >&2
+            exit 2
+        fi
+        _pg_up
+        if psql -ltqA 2>/dev/null | cut -d'|' -f1 | grep -qx "$name"; then
+            echo "Database \"$name\" already exists."
+            exit 0
+        fi
+        if createdb "$name"; then
+            echo "Database \"$name\" created. Connect with: psql $name"
+        else
+            echo "shedman db: createdb failed (does your role exist? sudo shedman db --pg-bootstrap)" >&2
+            exit 1
+        fi
+        exit 0
+        ;;
+    drop)
+        name=${2:-}
+        if [[ -z $name ]] || ! _valid_name "$name"; then
+            echo "shedman db: name must be lowercase letters/digits/_/- (got '${name:-}')" >&2
+            exit 2
+        fi
+        if [[ $name == "$USER" ]]; then
+            echo "shedman db: refusing to drop your personal default database" >&2
+            exit 1
+        fi
+        _pg_up
+        if ! psql -ltqA 2>/dev/null | cut -d'|' -f1 | grep -qx "$name"; then
+            echo "shedman db: no database named \"$name\"" >&2
+            exit 1
+        fi
+        printf 'Drop database "%s" and everything in it? [y/N] ' "$name"
+        read -r answer
+        case $answer in
+            y|Y|yes|YES)
+                dropdb "$name" && echo "Database \"$name\" dropped."
+                ;;
+            *)
+                echo "Cancelled."
+                ;;
+        esac
+        exit 0
+        ;;
+    list)
+        _pg_up
+        psql -tA -F$'\t' -c \
+            "SELECT d.datname, pg_size_pretty(pg_database_size(d.datname))
+             FROM pg_database d
+             WHERE NOT d.datistemplate
+               AND pg_catalog.pg_get_userbyid(d.datdba) = current_user
+             ORDER BY d.datname" 2>/dev/null \
+            | awk -F'\t' 'BEGIN { printf "%-32s %s\n", "DATABASE", "SIZE" }
+                           { printf "%-32s %s\n", $1, $2 }'
+        exit 0
         ;;
     *)
         echo "shedman db: unknown mode '$1'" >&2
