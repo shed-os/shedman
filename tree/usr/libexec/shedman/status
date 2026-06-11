@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+
 """shedman status — aggregated dashboard across the four waybar signals.
 
 Runs ``updates``, ``conflicts``, ``health``, ``doctor`` in --waybar mode,
@@ -15,6 +16,13 @@ only on schema-violating input (e.g. can't find /usr/libexec/shedman).
 """
 
 from __future__ import annotations
+
+# Completion contract: answer statically before any heavy imports run.
+import sys as _sys
+if len(_sys.argv) > 1 and _sys.argv[1] in (
+        "--complete-bash", "--complete-zsh", "--complete-fish"):
+    print("--json\n-j\n--watch\n-w\n--interval\n--help\n-h")
+    raise SystemExit(0)
 
 import argparse
 import json

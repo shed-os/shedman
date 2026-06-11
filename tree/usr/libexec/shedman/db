@@ -9,6 +9,21 @@
 
 set -u
 
+
+# Completion contract: answer statically, never run the tool's work.
+case "${1:-}" in
+    --complete-bash|--complete-zsh)
+        printf '%s\n' --pg-bootstrap --help -h
+        exit 0
+        ;;
+    --complete-fish)
+        cat <<'COMPEOF'
+--pg-bootstrap	bootstrap per-user postgres roles and databases
+--help	show usage
+COMPEOF
+        exit 0
+        ;;
+esac
 _usage() {
     cat <<'EOF'
 usage: shedman db --pg-bootstrap

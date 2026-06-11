@@ -4,6 +4,21 @@
 
 set -euo pipefail
 
+
+# Completion contract: answer statically, never run the tool's work.
+case "${1:-}" in
+    --complete-bash|--complete-zsh)
+        printf '%s\n' --search -s --help -h
+        exit 0
+        ;;
+    --complete-fish)
+        cat <<'COMPEOF'
+--search	search pacman repos and AUR
+--help	show usage
+COMPEOF
+        exit 0
+        ;;
+esac
 usage() {
     cat <<'EOF'
 Usage:

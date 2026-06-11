@@ -5,6 +5,22 @@
 
 set -uo pipefail
 
+
+# Completion contract: answer statically, never run the tool's work.
+case "${1:-}" in
+    --complete-bash|--complete-zsh)
+        printf '%s\n' --sync -s --review -r --help -h
+        exit 0
+        ;;
+    --complete-fish)
+        cat <<'COMPEOF'
+--sync	seed or refresh packaged defaults in $HOME
+--review	open the merge TUI for .shedosnew conflicts
+--help	show usage
+COMPEOF
+        exit 0
+        ;;
+esac
 LIBEXEC=/usr/libexec/shedman
 
 usage() {

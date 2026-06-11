@@ -7,6 +7,21 @@
 
 set -u
 
+
+# Completion contract: answer statically, never run the tool's work.
+case "${1:-}" in
+    --complete-bash|--complete-zsh)
+        printf '%s\n' --fix -f --help -h
+        exit 0
+        ;;
+    --complete-fish)
+        cat <<'COMPEOF'
+--fix	enable and start anything missing (needs root)
+--help	show usage
+COMPEOF
+        exit 0
+        ;;
+esac
 if [[ "${1:-}" == "--help-summary" ]]; then
     echo "verify ShedOS expected services are enabled + running"
     exit 0
