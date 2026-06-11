@@ -261,13 +261,53 @@ fi
 # slow regional mirror.
 _mirrorlist=/etc/pacman.d/mirrorlist
 _refresh=/usr/lib/shedos/refresh-mirrorlist.sh
+# Rank into a user-owned temp file in the BACKGROUND (no root needed
+# for the ranking itself) and install the result only after the user
+# consents to the upgrade. Reflector's per-mirror "failed to rate …
+# timed out" warnings are normal probing chatter, but inline on the
+# update screen they read like an error storm — they now land in a log
+# that is only mentioned if the refresh actually fails. The live
+# mirrorlist is never written while checkupdates is reading it.
+_mirror_tmp="" _mirror_log="" _mirror_pid=""
+
+_mirror_cleanup() {
+    if [[ -n $_mirror_pid ]] && kill -0 "$_mirror_pid" 2>/dev/null; then
+        kill "$_mirror_pid" 2>/dev/null || true
+    fi
+    rm -f "$_mirror_tmp" "$_mirror_log"
+}
+
+_mirror_join() {
+    [[ -n $_mirror_pid ]] || return 0
+    if kill -0 "$_mirror_pid" 2>/dev/null; then
+        echo "Waiting for the background mirrorlist ranking to finish…"
+    fi
+    local rc=0
+    wait "$_mirror_pid" || rc=$?
+    _mirror_pid=""
+    if (( rc == 0 )) && grep -q '^Server' "$_mirror_tmp" 2>/dev/null; then
+        sudo install -m644 "$_mirror_tmp" "$_mirrorlist"
+        echo "Mirrorlist refreshed ($(grep -c '^Server' "$_mirror_tmp") mirrors ranked)."
+        rm -f "$_mirror_log"
+    else
+        echo "Mirrorlist refresh failed; keeping the current list" \
+             "(details: $_mirror_log)." >&2
+        _mirror_log=""   # keep the log for inspection
+    fi
+    rm -f "$_mirror_tmp"
+    _mirror_tmp=""
+}
+
 if [[ -x $_refresh ]] && command -v reflector >/dev/null 2>&1; then
     _now=$(date +%s)
     _mtime=$(stat -c %Y "$_mirrorlist" 2>/dev/null || echo 0)
     if (( _now - _mtime > 14400 )); then
-        echo "Refreshing pacman mirrorlist (last ranked $(( (_now - _mtime) / 3600 ))h ago)…"
-        sudo "$_refresh" 2>&1 | sed 's/^/reflector: /' || \
-            echo "reflector exited non-zero; continuing with the current mirrorlist." >&2
+        echo "Refreshing pacman mirrorlist in the background (last ranked $(( (_now - _mtime) / 3600 ))h ago)…"
+        _mirror_tmp=$(mktemp /tmp/shedman-mirrorlist.XXXXXX)
+        _mirror_log=$(mktemp /tmp/shedman-mirrorlist-log.XXXXXX)
+        "$_refresh" "$_mirror_tmp" >"$_mirror_log" 2>&1 &
+        _mirror_pid=$!
+        trap _mirror_cleanup EXIT
     fi
 fi
 
@@ -322,6 +362,10 @@ if ! (( YES )); then
         *) echo "Cancelled."; exit 0 ;;
     esac
 fi
+
+# Consent given: land the freshly-ranked mirrorlist (if the background
+# ranking is still running, the prompt usually absorbed most of it).
+_mirror_join
 
 # Pre-upgrade btrfs snapshot; only on machines where snapper is configured
 # (which, on a standard ShedOS install, is everywhere after shedos-system is
