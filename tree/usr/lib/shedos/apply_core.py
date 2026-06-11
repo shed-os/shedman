@@ -341,7 +341,7 @@ _ALLOWED_FIREWALL_RULE_KEYS = {
 }
 _ALLOWED_FIREWALL_DEFAULT_POLICIES = {"allow", "deny", "reject"}
 _ALLOWED_FIREWALL_RULE_ACTIONS = {"allow", "deny", "reject", "limit"}
-_ALLOWED_FIREWALL_DIRECTIONS = {"in", "out"}
+_ALLOWED_FIREWALL_DIRECTIONS = {"in", "out", "fwd"}
 _ALLOWED_FIREWALL_LOG = {"log", "log-all"}
 # Loose proto allowlist mirroring `man ufw`'s "PROTOCOLS" section. Anything
 # not on this list (e.g. typos like `tpc`) raises a schema error.
@@ -398,6 +398,29 @@ def _check_int(section: str, val: Any, *, minimum: int = 0) -> int:
     if val < minimum:
         raise SchemaError(f"[{section}] must be >= {minimum}, got {val}")
     return val
+
+
+_PORT_RANGE_RE = re.compile(r"^(\d{1,5}):(\d{1,5})$")
+
+
+def _check_port(section: str, val: Any) -> "int | str":
+    """A ufw port: an integer, or a `low:high` range string (ufw's
+    own range syntax, e.g. \"8000:9000\")."""
+    if isinstance(val, str):
+        m = _PORT_RANGE_RE.match(val)
+        if not m:
+            raise SchemaError(
+                f"[{section}] must be an integer or a 'low:high' port "
+                f"range, got {val!r}"
+            )
+        low, high = int(m.group(1)), int(m.group(2))
+        if not (1 <= low < high <= 65535):
+            raise SchemaError(
+                f"[{section}] range must satisfy 1 <= low < high <= "
+                f"65535, got {val!r}"
+            )
+        return val
+    return _check_int(section, val, minimum=1)
 
 
 def _check_bool(section: str, val: Any) -> bool:
@@ -497,9 +520,10 @@ class FirewallRule:
     log: Optional[str] = None
     from_: Optional[str] = None       # `from` is a Python keyword
     to: Optional[str] = None
-    from_port: Optional[int] = None
-    to_port: Optional[int] = None
-    port: Optional[int] = None
+    # Ports are an int or a ufw `low:high` range string.
+    from_port: "Optional[int | str]" = None
+    to_port: "Optional[int | str]" = None
+    port: "Optional[int | str]" = None
     proto: Optional[str] = None
     app: Optional[str] = None
     comment: Optional[str] = None
@@ -1081,13 +1105,18 @@ def _validate_firewall_rule(idx: int, item: dict) -> "FirewallRule":
         raise SchemaError(f"[{pfx}].to must be a string")
     from_port = item.get("from-port")
     if from_port is not None:
-        from_port = _check_int(f"{pfx}.from-port", from_port, minimum=1)
+        from_port = _check_port(f"{pfx}.from-port", from_port)
     to_port = item.get("to-port")
     if to_port is not None:
-        to_port = _check_int(f"{pfx}.to-port", to_port, minimum=1)
+        to_port = _check_port(f"{pfx}.to-port", to_port)
     port = item.get("port")
     if port is not None:
-        port = _check_int(f"{pfx}.port", port, minimum=1)
+        port = _check_port(f"{pfx}.port", port)
+        if isinstance(port, str) and not item.get("proto"):
+            raise SchemaError(
+                f"[{pfx}].port ranges require proto (ufw rejects a "
+                f"range without one)"
+            )
     app = item.get("app")
     if app is not None and not isinstance(app, str):
         raise SchemaError(f"[{pfx}].app must be a string")
@@ -1803,10 +1832,14 @@ def _parse_ufw_status_numbered(text: str) -> tuple[bool, list[FirewallRule]]:
         body = m.group("body")
         rule = _decode_ufw_rule_body(body)
         if rule is None:
-            raise SchemaError(
-                f"could not parse ufw rule line {num!r}: {body!r}. "
-                f"Refusing to apply — aborts before any mutation."
-            )
+            # A shape this parser doesn't know. Skipping is
+            # mutation-safe: removals go by live rule number (which an
+            # unparsed rule never gets) and re-adding a matching
+            # declared rule is idempotent in ufw — while aborting here
+            # used to take down doctor and apply entirely.
+            plan_note(f"network.firewall: cannot parse ufw rule "
+                      f"{num} ({body!r}); leaving it untouched")
+            continue
         # First occurrence wins (v4 line before v6 (v6) line).
         seen.setdefault(num, rule)
     return active, [seen[k] for k in sorted(seen)]
@@ -1836,12 +1869,12 @@ def _decode_ufw_rule_body(body: str) -> Optional[FirewallRule]:
     dst_part = m.group("dst").strip()
     src_part = m.group("src").strip()
     action = m.group("action").lower()
-    direction = {"in": "in", "out": "out", "fwd": "in"}[m.group("dir").lower()]
+    direction = {"in": "in", "out": "out", "fwd": "fwd"}[m.group("dir").lower()]
 
-    # Decode dst; `<port>/<proto>` | `<addr>` | `<addr> <port>` |
-    # `App profile`.
-    port: Optional[int] = None
-    to_port: Optional[int] = None
+    # Decode dst; `<port>/<proto>` | `<low:high>/<proto>` | `<addr>` |
+    # `<addr> <port>` | `App profile`.
+    port: Optional[int | str] = None
+    to_port: Optional[int | str] = None
     proto: Optional[str] = None
     to_addr: Optional[str] = None
     app: Optional[str] = None
@@ -1852,6 +1885,9 @@ def _decode_ufw_rule_body(body: str) -> Optional[FirewallRule]:
         port_str, _, proto_str = dst_part.partition("/")
         if port_str.isdigit():
             port = int(port_str)
+            proto = proto_str.lower() or None
+        elif _PORT_RANGE_RE.match(port_str):
+            port = port_str
             proto = proto_str.lower() or None
         else:
             return None
@@ -1886,7 +1922,9 @@ def _ufw_args_for_rule(rule: FirewallRule) -> list[str]:
     """Build the argv for `ufw <action> ...` from a FirewallRule.
     Mirrors `man ufw` rule syntax. Caller prepends the ufw binary +
     `--force`."""
-    args = [rule.action]
+    # Forwarded-traffic rules use ufw's `route` sub-grammar, which
+    # otherwise mirrors the regular rule syntax.
+    args = ["route", rule.action] if rule.direction == "fwd" else [rule.action]
     if rule.direction == "out":
         args.append("out")
     if rule.interface:
