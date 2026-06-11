@@ -29,7 +29,14 @@ from typing import Any
 SCHEMA_VERSION = 1
 SIGNALS = ("updates", "conflicts", "health", "doctor")
 DEFAULT_LIBEXEC = "/usr/libexec/shedman"
-SUBCOMMAND_TIMEOUT_SECONDS = 2.0
+# `updates` syncs a throwaway pacman DB over the network (checkupdates)
+# and `doctor` walks the whole plan engine; 2 s produced constant
+# "unavailable (timed out)" rows on ordinary connections.
+SUBCOMMAND_TIMEOUT_SECONDS = {
+    "updates": 30.0,
+    "doctor": 15.0,
+}
+DEFAULT_TIMEOUT_SECONDS = 5.0
 
 
 # States that count as "attention needed". Each underlying signal
@@ -60,7 +67,8 @@ def _run_signal(libexec: Path, name: str) -> dict[str, Any]:
             [str(bin_path), "--waybar"],
             capture_output=True,
             text=True,
-            timeout=SUBCOMMAND_TIMEOUT_SECONDS,
+            timeout=SUBCOMMAND_TIMEOUT_SECONDS.get(
+                name, DEFAULT_TIMEOUT_SECONDS),
         )
     except subprocess.TimeoutExpired:
         return {"status": "unavailable",
