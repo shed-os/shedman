@@ -221,6 +221,12 @@ for pkg_root in "$SHEDOS_DEFAULTS_ROOT"/*/defaults; do
             kind=seed
         elif [[ $src_sha == "$last_sha" ]]; then
             kind=noop
+        elif [[ $src_sha == "$dst_sha" ]]; then
+            # Already byte-identical but the manifest doesn't know it
+            # (fresh machine, manual copy, lost state): adopt by
+            # recording last-seen. Used to fall through to conflict and
+            # drop a .shedosnew identical to the live file.
+            kind=adopt
         elif [[ $dst_sha == "$last_sha" ]]; then
             if [[ $policy == always-conflict ]]; then
                 kind=conflict
@@ -290,18 +296,19 @@ if (( REBUILD_MANIFEST )); then
 fi
 
 # Print plan.
-seed_n=0 auto_n=0 conflict_n=0 noop_n=0
+seed_n=0 auto_n=0 adopt_n=0 conflict_n=0 noop_n=0
 for entry in "${plan[@]}"; do
     IFS=$'\t' read -r kind pkg relpath _ _ _ <<<"$entry"
     case $kind in
         seed) ((seed_n++)) ;;
         auto) ((auto_n++)) ;;
+        adopt) ((adopt_n++)) ;;
         conflict) ((conflict_n++)) ;;
         noop) ((noop_n++)) ;;
     esac
 done
 
-if (( seed_n + auto_n + conflict_n == 0 )); then
+if (( seed_n + auto_n + adopt_n + conflict_n == 0 )); then
     echo "Nothing to sync ($noop_n files already in sync)."
     # Still honour freshly-added excludes even when the defaults walk is a
     # no-op. Otherwise users running sync solely to clean up after editing
@@ -331,11 +338,12 @@ for entry in "${plan[@]}"; do
     case $kind in
         seed)     printf '  seed         %s  (first-time copy)\n' "$relpath" ;;
         auto)     printf '  auto-update  %s  (no local changes)\n' "$relpath" ;;
+        adopt)    printf '  adopt        %s  (already identical; record it)\n' "$relpath" ;;
         conflict) printf '  conflict     %s  → will write %s.shedosnew\n' "$relpath" "$relpath" ;;
     esac
 done
 echo
-echo "Summary: $seed_n seed, $auto_n auto-update, $conflict_n conflict, $noop_n noop"
+echo "Summary: $seed_n seed, $auto_n auto-update, $adopt_n adopt, $conflict_n conflict, $noop_n noop"
 
 # Preview stale state for paths the user has newly excluded (e.g. added a
 # matcher to ~/.config/shedos/sync-exclude after the last sync). Normal apply
@@ -388,6 +396,11 @@ for entry in "${plan[@]}"; do
         auto)
             cp -a "$dst" "$dst.shedosbak"
             cp --preserve=mode "$src" "$dst"
+            _write_content "$relpath" "$src"
+            _write_sha "$last" "$(_sha "$src")"
+            ;;
+        adopt)
+            # Content already matches; just record it.
             _write_content "$relpath" "$src"
             _write_sha "$last" "$(_sha "$src")"
             ;;
