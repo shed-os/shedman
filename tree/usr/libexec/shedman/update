@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # shedman update; interactive ShedOS upgrade flow.
 #
-# The user is prompted to confirm before ANYTHING is applied, and pacman /
-# yay re-prompt with their own package lists. No silent paths by default.
+# One y/N gate up front, after the pending pacman + AUR lists are
+# shown. Past that gate the run is hands-off (--noconfirm throughout)
+# so a long upgrade never stalls waiting at a buried prompt.
 #
 # Flow:
 #   1. checkupdates        → list pacman updates
@@ -385,14 +386,19 @@ if [[ -d /usr/share/shedos/aur-pkgs ]]; then
 fi
 
 if (( aur_n > 0 )); then
-    echo
-    _hr
-    echo "Running yay -Sua --noconfirm…"
-    _hr
+    aur_helper=""
     if command -v yay >/dev/null 2>&1; then
-        yay -Sua --noconfirm || echo "yay exited non-zero; continuing." >&2
+        aur_helper=yay
     elif command -v paru >/dev/null 2>&1; then
-        paru -Sua --noconfirm || echo "paru exited non-zero; continuing." >&2
+        aur_helper=paru
+    fi
+    if [[ -n $aur_helper ]]; then
+        echo
+        _hr
+        echo "Running $aur_helper -Sua --noconfirm…"
+        _hr
+        "$aur_helper" -Sua --noconfirm \
+            || echo "$aur_helper exited non-zero; continuing." >&2
     fi
 fi
 

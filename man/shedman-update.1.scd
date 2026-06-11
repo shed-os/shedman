@@ -22,9 +22,11 @@ btrfs snapshot pair:
 . *shedman config --sync* — 3-way merge of dotfiles in $HOME against
   packaged defaults.
 
-Every step is gated by an explicit y/N prompt; nothing destructive
-runs without confirmation. The snapper snapshots make every upgrade
-reversible via *shedman rollback* or *shedman update --rollback*.
+One y/N prompt gates the whole run: the pending pacman and AUR lists
+are shown first, and after confirmation the steps run hands-off
+(--noconfirm) so a long upgrade never stalls at a buried prompt. The
+snapper snapshots make every upgrade reversible via *shedman
+rollback* or *shedman update --rollback*.
 
 # OPTIONS
 
