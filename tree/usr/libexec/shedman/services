@@ -12,17 +12,46 @@ if [[ "${1:-}" == "--help-summary" ]]; then
     exit 0
 fi
 
+# Platform invariants every ShedOS install runs, regardless of
+# system.toml. The declarative layer owns everything else — derive it
+# from the TOML so --fix can never fight `shedman apply` (it used to
+# hardcode docker.service and re-enable it after a user disabled it
+# via [services.docker], which doctor then reported as drift).
 EXPECTED=(
     NetworkManager.service
     bluetooth.service
     iwd.service
     greetd.service
     fstrim.timer
-    postgresql.service
-    shedos-pg-user-bootstrap.service
-    docker.service
     thermald.service
 )
+
+if [[ -r /etc/shedos/system.toml ]]; then
+    mapfile -t _toml_units < <(python3 - <<'PY'
+import tomllib
+
+try:
+    with open("/etc/shedos/system.toml", "rb") as f:
+        doc = tomllib.load(f)
+except (OSError, tomllib.TOMLDecodeError):
+    raise SystemExit(0)
+units = list(doc.get("systemd", {}).get("system", {}).get("enable", []))
+svc = doc.get("services", {})
+if svc.get("docker", {}).get("enable"):
+    units.append("docker.service")
+if svc.get("postgresql", {}).get("auto-init"):
+    units += ["postgresql.service", "shedos-pg-user-bootstrap.service"]
+print("\n".join(units))
+PY
+    )
+    for _u in "${_toml_units[@]}"; do
+        [[ -n $_u ]] && EXPECTED+=("$_u")
+    done
+else
+    # No system.toml (unusual): historical full set.
+    EXPECTED+=(postgresql.service shedos-pg-user-bootstrap.service
+               docker.service)
+fi
 
 FIX=0
 for arg in "$@"; do
@@ -52,8 +81,15 @@ _yellow() { _color '1;33' "$1"; }
 # /var/lib/postgres is 0700 postgres-owned, so a plain `[[ -f ]]` test of
 # PG_VERSION returns false for a regular user even when the file exists
 # (traversal denied). Use systemctl is-active as the authoritative signal:
-# a running postgresql.service proves the cluster is initialized.
-if systemctl is-active --quiet postgresql.service; then
+# a running postgresql.service proves the cluster is initialized. Skip
+# the whole check when the TOML doesn't expect postgres on this box.
+pg_expected=0
+for u in "${EXPECTED[@]}"; do
+    [[ $u == postgresql.service ]] && pg_expected=1 && break
+done
+if (( ! pg_expected )); then
+    pg_ok=1
+elif systemctl is-active --quiet postgresql.service; then
     pg_ok=1
 elif sudo -n test -f /var/lib/postgres/data/PG_VERSION 2>/dev/null; then
     pg_ok=1
@@ -88,12 +124,14 @@ done
 
 echo
 if [[ $pg_ok -eq 0 ]]; then
-    _red "PostgreSQL cluster at /var/lib/postgres/data is NOT initialized.\n"
+    _red "PostgreSQL cluster at /var/lib/postgres/data is NOT initialized."
+    echo
     echo "  postgresql.service will fail to start until you run initdb."
 fi
 
 if [[ ${#bad[@]} -eq 0 && $pg_ok -eq 1 ]]; then
-    _green "All ShedOS services are enabled.\n"
+    _green "All ShedOS services are enabled."
+    echo
     exit 0
 fi
 
