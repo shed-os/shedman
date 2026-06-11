@@ -103,6 +103,28 @@ case "$mode" in
         echo "report pending pacman + AUR updates"
         exit 0
         ;;
+    # Completion must never run the check (it shells out to the
+    # network); answer from the static flag list and leave.
+    --complete-bash|--complete-zsh)
+        printf '%s\n' --waybar --refresh-waybar --notify-if-new \
+            --tick --reset-notify-state --help -h
+        exit 0
+        ;;
+    --complete-fish)
+        cat <<'EOF'
+--waybar	Print JSON for waybar custom module
+--refresh-waybar	Kick waybar's updates module to re-poll
+--notify-if-new	Notify when the count rose since last notification
+--tick	Periodic timer entry: count, notify, kick waybar
+--reset-notify-state	Forget the last-notified count
+--help	Show this help
+EOF
+        exit 0
+        ;;
+    -h|--help)
+        sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'
+        exit 0
+        ;;
     --refresh-waybar)
         pkill -RTMIN+8 waybar 2>/dev/null || true
         exit 0

@@ -47,6 +47,30 @@ if [[ "$mode" == "--help-summary" ]]; then
     exit 0
 fi
 
+# Completion must never run the checks (sensors/df); answer statically.
+case "$mode" in
+    --complete-bash|--complete-zsh)
+        printf '%s\n' --waybar --refresh-waybar --notify-if-new \
+            --tick --reset-notify-state --help -h
+        exit 0
+        ;;
+    --complete-fish)
+        cat <<'EOF'
+--waybar	JSON for waybar custom module
+--refresh-waybar	Kick waybar's health module to re-poll
+--notify-if-new	Notify on ok→warning / any→critical transitions
+--tick	Periodic timer entry: refresh, notify, kick waybar
+--reset-notify-state	Forget the last-notified class
+--help	Show this help
+EOF
+        exit 0
+        ;;
+    -h|--help)
+        sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'
+        exit 0
+        ;;
+esac
+
 # --- Metric helpers ------------------------------------------------------
 
 _classify() {
