@@ -76,8 +76,22 @@ The headline set:
 
 *shedman migrate*
 	One-shot retrofit for installs dated before the April 2026
-	packaging cut-over. Idempotent — runs on a packaged install
-	are a fast no-op.
+	packaging cut-over. With *--from-arch*, instead adopts an
+	existing vanilla Arch install into ShedOS (Manjaro is
+	refused). Idempotent — runs on a packaged install are a fast
+	no-op.
+
+*shedman snapshot*
+	Manual btrfs checkpoint before risky changes; restore through
+	*shedman rollback*. See *shedman-snapshot*(1).
+
+*shedman db*
+	Per-project PostgreSQL databases (create/drop/list) on the
+	per-user setup. See *shedman-db*(1).
+
+*shedman tour*
+	Replay the first-run welcome tour overlay. See
+	*shedos-tour*(1).
 
 # BUILT-INS
 
@@ -113,8 +127,12 @@ the per-command man pages.
 # SEE ALSO
 
 *shedman-update*(1), *shedman-apply*(1), *shedman-doctor*(1),
-*shedman-rollback*(1), *shedman-config*(1), *shedman-status*(1),
-*shedman-fingerprint*(1), *shedman-uninstall*(1), *shedman-dock*(1),
+*shedman-rollback*(1), *shedman-snapshot*(1), *shedman-config*(1),
+*shedman-status*(1), *shedman-fingerprint*(1), *shedman-uninstall*(1),
+*shedman-install*(1), *shedman-services*(1), *shedman-health*(1),
+*shedman-updates*(1), *shedman-conflicts*(1), *shedman-kernel*(1),
+*shedman-logs*(1), *shedman-upgrade-history*(1), *shedman-db*(1),
+*shedman-theme*(1), *shedman-lock*(1), *shedman-dock*(1),
 *pacman*(8), *yay*(8).
 
 The web reference at https://shedos.org/docs/commands covers every

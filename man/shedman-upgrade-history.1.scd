@@ -15,6 +15,11 @@ snapshot pairs and the package changes each one made. From the TUI a
 run can be rolled back (delegating to *shedman rollback* with the
 matching snapshot).
 
+Checkpoints created with *shedman snapshot* list in a separate
+manual-snapshots section. They have no pre/post pair, so the in-TUI
+diff and rollback actions apply to upgrade runs; restore a
+checkpoint with *shedman rollback* and its snapshot number.
+
 # OPTIONS
 
 *--list*
@@ -22,4 +27,4 @@ matching snapshot).
 
 # SEE ALSO
 
-*shedman-update*(1), *shedman-rollback*(1)
+*shedman-update*(1), *shedman-rollback*(1), *shedman-snapshot*(1)

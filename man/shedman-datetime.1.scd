@@ -2,7 +2,7 @@ shedman-datetime(1)
 
 # NAME
 
-shedman-datetime - set timezone, network time, and the system clock
+shedman-datetime - set timezone, network time, the system clock, and the night-light schedule
 
 # SYNOPSIS
 
@@ -23,6 +23,14 @@ are local until *Apply*; *Cancel* (or *Esc*) discards.
 	Searchable filter over the full *tzdata* set. Type to narrow
 	the list, arrow keys to highlight, Enter to confirm. Pre-filled
 	with the current zone.
+
+*Night light*
+	Nightly warm-color schedule (hyprsunset). Toggling on with
+	HH:MM on/off times enables the *shedos-nightlight-on/off* user
+	timers and immediately applies whichever state the schedule
+	implies; toggling off removes the timers. The ad-hoc manual
+	toggle (Super+F9) is unaffected. Shown only on desktops with
+	the Hyprland profile.
 
 *Date*, *Time*
 	Manual time-of-day entry. Disabled while NTP is on. Format is

@@ -18,13 +18,20 @@ three steps in one interactive flow, bracketed by a snapper pre/post
 btrfs snapshot pair:
 
 . *pacman -Syu* — official repo updates.
-. *yay -Sua* — AUR updates (if *yay* is installed).
+. *yay -Sua* (or *paru -Sua*) — AUR updates, when an AUR helper
+  is installed.
 . *shedman config --sync* — 3-way merge of dotfiles in $HOME against
   packaged defaults.
 
 One y/N prompt gates the whole run: the pending pacman and AUR lists
 are shown first, and after confirmation the steps run hands-off
-(--noconfirm) so a long upgrade never stalls at a buried prompt. The
+(--noconfirm) so a long upgrade never stalls at a buried prompt.
+While the lists are reviewed, a mirrorlist older than four hours is
+re-ranked in the background; the refreshed list installs only after
+confirmation (cancelling discards it). When the upgrade moved
+ShedOS's own packages — not just upstream Arch — the summary prints
+the version jump with a what's-new pointer and sends a desktop
+notification linking the changelog. The
 snapper snapshots make every upgrade reversible via *shedman
 rollback* or *shedman update --rollback*.
 

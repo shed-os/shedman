@@ -10,8 +10,11 @@ shedman-health - aggregate hardware health signals
 
 # DESCRIPTION
 
-Summarizes disk usage, memory pressure, battery state, and CPU
-temperature into one ok/warning/critical verdict. With no flag,
+Summarizes disk usage, disk SMART status, btrfs scrub age and
+errors, memory pressure, battery state, and CPU temperature into one
+ok/warning/critical verdict. The SMART metric reads a cache the
+daily *shedos-smart-check.timer* refreshes (smartctl needs root;
+this tool doesn't); the scrub metric appears on btrfs roots. With no flag,
 prints the per-metric table.
 
 # OPTIONS
@@ -32,6 +35,13 @@ prints the per-metric table.
 
 *--reset-notify-state*
 	Forget the last-notified class.
+
+# FILES
+
+*/var/lib/shedos/smart-health.json*
+	SMART verdict cache, refreshed daily by
+	*shedos-smart-check.timer*. Stale (>48h) reads report
+	"unavailable" and point at the timer.
 
 # ENVIRONMENT
 

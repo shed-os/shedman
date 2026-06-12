@@ -54,4 +54,4 @@ _N_
 
 # SEE ALSO
 
-*shedman*(1), *shedman-update*(1), *snapper*(8).
+*shedman*(1), *shedman-update*(1), *snapper*(8)., *shedman-snapshot*(1)
