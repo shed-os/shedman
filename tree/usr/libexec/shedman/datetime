@@ -409,6 +409,12 @@ class DateTime(App):
 
 
 def main() -> int:
+    # Completion contract: static answers, before argparse can exit 2
+    # on the unknown flags.
+    if len(sys.argv) > 1 and sys.argv[1] in (
+        "--complete-bash", "--complete-zsh", "--complete-fish",
+    ):
+        return 0
     parser = argparse.ArgumentParser(prog="shedman datetime")
     parser.add_argument("--help-summary", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
