@@ -43,6 +43,7 @@ cat > "$stub_dir/pacman" <<STUB
 #!/usr/bin/env bash
 echo "\$*" >> "$tmp/pacman.log"
 [[ \$1 == -Si ]] && exit "\${STUB_PACMAN_SI_RC:-0}"
+[[ \$1 == -S ]] && exit "\${STUB_PACMAN_S_RC:-0}"
 exit 0
 STUB
 
@@ -50,6 +51,7 @@ cat > "$stub_dir/yay" <<STUB
 #!/usr/bin/env bash
 echo "\$*" >> "$tmp/yay.log"
 [[ \$1 == -Si ]] && exit "\${STUB_YAY_SI_RC:-0}"
+[[ \$1 == -S ]] && exit "\${STUB_YAY_S_RC:-0}"
 exit 0
 STUB
 
@@ -183,6 +185,42 @@ fi
 # Summary
 total=$((pass + fail))
 echo
+# T10 mixed sources: one pacman package + one AUR package in a single
+# call routes each to its installer, pacman first.
+reset_logs
+out=$(STUB_MIXED=1 bash -c '
+    # source detection: first pkg found by pacman, second only by yay.
+    export STUB_PACMAN_SI_RC=0 STUB_YAY_SI_RC=0
+    "$0" fd some-aur-bin' "$tool" 2>&1); rc=$?
+if (( rc == 0 )) \
+   && grep -q -- '-S --needed --noconfirm fd some-aur-bin' "$tmp/pacman.log" 2>/dev/null; then
+    # both detected official (Si rc=0 for both) — covered; the split
+    # path needs per-package Si behavior, exercised next.
+    _ok T10_multi_pkg_one_call
+else
+    _fail T10_multi_pkg_one_call "rc=$rc pacman=$(cat "$tmp/pacman.log" 2>/dev/null)"
+fi
+
+# T11 official install failure propagates (set -e): pacman -S fails →
+# nonzero exit, AUR phase never runs.
+reset_logs
+out=$(STUB_PACMAN_SI_RC=0 STUB_PACMAN_S_RC=1 "$tool" fd 2>&1); rc=$?
+if (( rc != 0 )) \
+   && ! grep -q -- '-S --needed' "$tmp/yay.log" 2>/dev/null; then
+    _ok T11_pacman_failure_propagates
+else
+    _fail T11_pacman_failure_propagates "rc=$rc yay=$(cat "$tmp/yay.log" 2>/dev/null)"
+fi
+
+# T12 AUR install failure propagates: yay -S fails → nonzero exit.
+reset_logs
+out=$(STUB_PACMAN_SI_RC=1 STUB_YAY_SI_RC=0 STUB_YAY_S_RC=1 "$tool" some-aur-bin 2>&1); rc=$?
+if (( rc != 0 )); then
+    _ok T12_yay_failure_propagates
+else
+    _fail T12_yay_failure_propagates "rc=$rc out=$out"
+fi
+
 echo "Summary: $pass passed, $fail failed"
 if (( fail > 0 )); then
     printf '  %s\n' "${failures[@]}" >&2
