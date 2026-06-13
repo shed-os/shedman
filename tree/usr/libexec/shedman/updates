@@ -145,8 +145,10 @@ total=$(( pac + aur ))
 
 case "$mode" in
     --waybar)
+        # waybar renders the tooltip as Pango markup, so keep these
+        # strings free of raw & < > (they fail the parse → empty box).
         if (( total > 0 )); then
-            printf '{"text":" %d","tooltip":"%d update(s) available\\n(click to review & upgrade)","class":"has-updates"}\n' \
+            printf '{"text":" %d","tooltip":"%d update(s) available\\n(click to review and upgrade)","class":"has-updates"}\n' \
                 "$total" "$total"
         else
             printf '{"text":"","tooltip":"System is up to date","class":"no-updates"}\n'
