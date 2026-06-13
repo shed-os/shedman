@@ -244,7 +244,7 @@ def _waybar_payload(plan: _core.Plan) -> dict[str, str]:
         lines.append(f"… and {len(visible) - 8} more")
     tooltip = r"\n".join(lines).replace('"', r'\"')
     return {
-        "text": f" {n}",
+        "text": f" {n}",  #  = stethoscope (nf-fa-stethoscope)
         "tooltip": f"shedman doctor: {n} drift item(s)\\n{tooltip}",
         "class": "drift",
         "alt": "drift",
