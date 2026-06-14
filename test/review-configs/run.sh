@@ -204,6 +204,30 @@ for f in "${fixtures[@]}"; do
     _run_one "$f"
 done
 
+# Multi-conflict scenarios the per-fixture harness can't express: the --count
+# the updater gates on, and the identical-cleanup-failure resurface guard.
+_mk() {  # _mk <tmp> <relpath> <yours> <theirs> <src>
+    install -Dm644 /dev/stdin "$1/home/$2"                  <<<"$3"
+    install -Dm644 /dev/stdin "$1/home/$2.shedosnew"        <<<"$4"
+    install -Dm644 /dev/stdin "$1/defaults/pkg/defaults/$2" <<<"$5"
+}
+_count() { HOME=$1/home XDG_STATE_HOME=$1/state SHEDOS_DEFAULTS_ROOT=$1/defaults "$tool" --count 2>/dev/null; }
+_assert() {
+    if [[ $2 == "$3" ]]; then echo "PASS $1"; ((pass++))
+    else echo "FAIL $1: got '$2', want '$3'"; failures+=("$1"); ((fail++)); fi
+}
+
+t=$(mktemp -d); mkdir -p "$t/state"
+_mk "$t" .config/same x x x
+_mk "$t" .config/diff yours theirs src
+_assert count-excludes-identical "$(_count "$t")" 1
+rm -rf "$t"
+
+t=$(mktemp -d); mkdir -p "$t/state"
+_mk "$t" .config/same x x x
+_assert count-zero-when-only-identical "$(_count "$t")" 0
+rm -rf "$t"
+
 echo
 echo "Summary: $pass passed, $fail failed"
 if (( fail > 0 )); then
