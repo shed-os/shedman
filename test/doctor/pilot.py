@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -74,6 +73,8 @@ def _make_env(td: Path, *, notify_log: Path, refresh_log: Path,
         "SHEDOS_DOCTOR_NOTIFY_CMD":  f"sh -c 'printf \"%s\\t%s\\n\" \"$0\" \"$1\" >> {notify_log}'",
         "SHEDOS_DOCTOR_REFRESH_CMD": f"sh -c 'echo REFRESHED >> {refresh_log}'",
         "SHEDOS_DOCTOR_APPLY_CMD":   f"sh -c 'echo FIXED: \"$@\" >> {apply_log}'",
+        # Sandbox the post-boot breadcrumb so cases never read the real one.
+        "SHEDOS_MOUNT_REPORT_STATE": str(td / "mount-missed.json"),
     })
     return env
 
@@ -245,8 +246,9 @@ def case_reset_notify_state(td: Path) -> None:
     _run(td, "--tick")
     r = _run(td, "--reset-notify-state")
     assert r.returncode == 0
-    state = (td / "state" / "doctor.state.json").read_text()
-    assert '"last_notified_hash": ""' in state, state
+    state = json.loads((td / "state" / "doctor.state.json").read_text())
+    assert state.get("last_notified_hash", "") == "", state
+    assert state.get("last_missed_fp", "") == "", state
 
 
 def case_plan_is_side_effect_free(td: Path) -> None:
@@ -360,6 +362,49 @@ def case_mount_safety_fix(td: Path) -> None:
     assert "boot safety" not in r2.stdout, r2.stdout
 
 
+_MISSED_BREADCRUMB = json.dumps({"missed": [
+    {"target": "/mnt/data", "device": "UUID=GONE", "fstype": "ext4"}]})
+
+
+def case_mount_missed_warns(td: Path) -> None:
+    _setup(td, toml='schema = 1\n')
+    (td / "mount-missed.json").write_text(_MISSED_BREADCRUMB)
+    r = _run(td)
+    assert r.returncode == 1, (r.returncode, r.stdout, r.stderr)
+    assert "did not mount this boot" in r.stdout, r.stdout
+    assert "/mnt/data" in r.stdout, r.stdout
+
+
+def case_mount_missed_json(td: Path) -> None:
+    _setup(td, toml='schema = 1\n')
+    (td / "mount-missed.json").write_text(_MISSED_BREADCRUMB)
+    r = _run(td, "--json")
+    assert r.returncode == 1, (r.returncode, r.stderr)
+    doc = json.loads(r.stdout)
+    assert [m["target"] for m in doc.get("mount_missed", [])] == ["/mnt/data"], doc
+
+
+def case_mount_missed_absent_is_clean(td: Path) -> None:
+    _setup(td, toml='schema = 1\n')
+    # no breadcrumb written -> nothing missed, nothing to report
+    r = _run(td)
+    assert r.returncode == 0, (r.returncode, r.stdout)
+    assert "did not mount" not in r.stdout, r.stdout
+
+
+def case_mount_missed_tick_critical(td: Path) -> None:
+    _setup(td, toml='schema = 1\n')
+    (td / "mount-missed.json").write_text(_MISSED_BREADCRUMB)
+    log = td / "urgency.log"; log.touch()
+    env = {"SHEDOS_DOCTOR_NOTIFY_CMD":
+           f"sh -c 'printf \"%s|%s|%s\\n\" \"$0\" \"$1\" \"$2\" >> {log}'"}
+    r = _run(td, "--tick", env_extra=env)
+    assert r.returncode == 0, (r.returncode, r.stderr)
+    fired = log.read_text()
+    assert "a disk did not mount this boot" in fired, fired
+    assert "critical" in fired, fired
+
+
 CASES = [
     ("aligned-bare",              case_aligned_bare),
     ("aligned-json",              case_aligned_json),
@@ -380,6 +425,10 @@ CASES = [
     ("mount-safety-json",         case_mount_safety_json),
     ("mount-safety-aligned-safe", case_mount_safety_aligned_when_safe),
     ("mount-safety-fix",          case_mount_safety_fix),
+    ("mount-missed-warns",        case_mount_missed_warns),
+    ("mount-missed-json",         case_mount_missed_json),
+    ("mount-missed-absent-clean", case_mount_missed_absent_is_clean),
+    ("mount-missed-tick-critical", case_mount_missed_tick_critical),
 ]
 
 

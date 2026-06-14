@@ -7,7 +7,7 @@ shedman-doctor - read-only drift detector for /etc/shedos/system.toml
 # SYNOPSIS
 
 *shedman doctor* [*-c*|*--config* _PATH_]++
-*shedman doctor* [*-j*|*--json*] | [*-d*|*--diff*] | [*-f*|*--fix*] | *--waybar* | *--tick* | *--notify-if-new* | *--reset-notify-state*
+*shedman doctor* [*-j*|*--json*] | [*-d*|*--diff*] | [*-f*|*--fix*] | *--fix-mounts* [*-y*|*--yes*] | *--waybar* | *--tick* | *--notify-if-new* | *--reset-notify-state*
 
 # DESCRIPTION
 
@@ -22,6 +22,12 @@ degrade to a *?* note instead of failing. Run as root for full
 coverage. Notify hysteresis is per-invoker: root keeps it under
 /var/lib/shedos, users under _$XDG_STATE_HOME/shedos_.
 
+Alongside the drift report, *doctor* runs two boot-safety checks: it
+flags non-root /etc/fstab mounts that lack *nofail* and could drop the
+system to emergency mode if their disk is absent (fix with
+*--fix-mounts*), and it surfaces any auto mount that silently failed to
+mount on the last boot. See _docs/boot-safety.md_.
+
 # OPTIONS
 
 *-c* _PATH_, *--config* _PATH_
@@ -34,7 +40,8 @@ default (no flag)
 *-j*, *--json*
 	Emit a machine-readable JSON document suitable for the
 	*custom/doctor* waybar module. Includes a stable _plan_hash_
-	fingerprint.
+	fingerprint and _mount_safety_ / _mount_missed_ arrays for the
+	two boot-safety checks.
 
 *-d*, *--diff*
 	Render unified diffs for every drift entry. Useful before
@@ -60,13 +67,27 @@ default (no flag)
 *--reset-notify-state*
 	Clear the hysteresis file. Use this if a notification got stuck.
 
+*--fix-mounts*
+	Add *nofail* (and a short device-timeout) to any non-root
+	/etc/fstab mount that lacks it — the hand-added entries that can
+	wedge boot. Prompts for confirmation and writes a timestamped
+	_fstab.shedos-bak_ backup first. This repairs lines *outside* the
+	managed fence, which *--fix* does not touch.
+
+*-y*, *--yes*
+	Assume yes for *--fix-mounts* (non-interactive).
+
 # FILES
 
 /etc/shedos/system.toml
 	Source of truth (read-only).
 
 /var/lib/shedos/doctor.state.json
-	Hysteresis file (last-notified plan_hash).
+	Notify hysteresis (last-notified drift and missed-disk fingerprints).
+
+/var/lib/shedos/mount-missed.json
+	Breadcrumb from *shedos-mount-report.service*: auto fstab mounts
+	that did not mount on the last boot. Read-only input to doctor.
 
 # ENVIRONMENT
 
@@ -77,10 +98,13 @@ _BOOT_ROOT.
 # EXIT STATUS
 
 *0*
-	Aligned, or drift found (default mode + waybar/tick modes).
+	Aligned and boot-safe (default/diff/json); waybar, tick and
+	notify modes always exit 0.
 
 *1*
-	*--fix* delegated to apply, which returned non-zero.
+	Drift, an unsafe fstab mount, or a disk that did not mount this
+	boot (default/diff/json); or *--fix* delegated to apply and it
+	returned non-zero.
 
 *2*
 	Schema or environment-shape error.

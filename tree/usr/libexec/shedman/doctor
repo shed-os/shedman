@@ -8,7 +8,7 @@ a list of would-be changes, and shedos-doctor reports them.
 Modes:
 
     (no flag)          human-readable drift report + boot-safety audit
-    --json             machine-readable drift report (incl. mount_safety)
+    --json             machine-readable drift report (incl. mount_safety, mount_missed)
     --diff             unified-diff view of every drift entry
     --fix              delegate to `shedman apply --yes`
     --fix-mounts       add nofail to risky fstab mounts (backup + confirm)
@@ -108,33 +108,49 @@ def _doctor_state_path() -> Path:
     return Path(xdg) / "shedos" / DOCTOR_STATE
 
 
-def _load_last_hash() -> str:
+def _load_state() -> dict:
     p = _doctor_state_path()
-    if not p.exists():
-        return ""
     try:
         doc = json.loads(p.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return ""
-    if isinstance(doc, dict):
-        last = doc.get("last_notified_hash", "")
-        return last if isinstance(last, str) else ""
-    return ""
+        return {}
+    return doc if isinstance(doc, dict) else {}
 
 
-def _save_last_hash(hash_value: str) -> None:
+def _save_state(state: dict) -> None:
     p = _doctor_state_path()
     try:
         p.parent.mkdir(parents=True, exist_ok=True)
         _core.atomic_write_text(
-            p,
-            json.dumps({"last_notified_hash": hash_value}, indent=2) + "\n",
-            mode=0o644,
-        )
+            p, json.dumps(state, indent=2) + "\n", mode=0o644)
     except OSError as e:
         # Hysteresis is best-effort; never let it break doctor itself.
         print(f"shedman doctor: cannot persist notify state: {e}",
               file=sys.stderr)
+
+
+# Two keys in the one state file: drift and missed-disk fingerprints.
+# Read-modify-write so neither clobbers the other.
+def _load_last_hash() -> str:
+    v = _load_state().get("last_notified_hash", "")
+    return v if isinstance(v, str) else ""
+
+
+def _save_last_hash(hash_value: str) -> None:
+    state = _load_state()
+    state["last_notified_hash"] = hash_value
+    _save_state(state)
+
+
+def _load_last_missed() -> str:
+    v = _load_state().get("last_missed_fp", "")
+    return v if isinstance(v, str) else ""
+
+
+def _save_last_missed(fp: str) -> None:
+    state = _load_state()
+    state["last_missed_fp"] = fp
+    _save_state(state)
 
 
 # Plan acquisition: shared entry for every mode. Returns (rc, plan)
@@ -159,12 +175,13 @@ def _compute_plan(cfg_path: "_core.Optional[Path]") -> tuple[int, "_core.Optiona
 
 
 # Subprocess hooks: env-overridable for tests.
-def _notify_send(title: str, body: str) -> None:
+def _notify_send(title: str, body: str, urgency: str = "normal") -> None:
     override = os.environ.get("SHEDOS_DOCTOR_NOTIFY_CMD")
     if override is not None:
-        cmd = shlex.split(override) + [title, body]
+        # urgency last so a stub reading $0/$1 is unaffected.
+        cmd = shlex.split(override) + [title, body, urgency]
     else:
-        cmd = ["notify-send", "-a", "shedman doctor", "-u", "normal",
+        cmd = ["notify-send", "-a", "shedman doctor", "-u", urgency,
                title, body]
     try:
         subprocess.run(cmd, check=False, timeout=10)
@@ -221,7 +238,7 @@ def _emit_human(plan: _core.Plan) -> None:
         "dim"))
 
 
-def _emit_json(plan: _core.Plan, findings: list) -> None:
+def _emit_json(plan: _core.Plan, findings: list, missed: list) -> None:
     doc = plan.to_json()
     doc["plan_hash"] = _core.plan_hash(plan)
     doc["mount_safety"] = [
@@ -229,6 +246,7 @@ def _emit_json(plan: _core.Plan, findings: list) -> None:
          "fstype": f.fstype, "reason": f.reason}
         for f in findings
     ]
+    doc["mount_missed"] = missed
     print(json.dumps(doc, indent=2, sort_keys=True))
 
 
@@ -263,6 +281,36 @@ def _emit_mount_safety_human(findings: list) -> None:
         print(f"  {_core.colorize('!', 'yellow')} {f.target}  ({f.device})")
         print(f"      {f.reason}")
     print(_core.colorize("  fix: sudo shedman doctor --fix-mounts", "dim"))
+
+
+def _audit_mount_missed() -> list:
+    """Read the breadcrumb shedos-mount-report leaves: auto fstab mounts that
+    didn't mount this boot. Empty when absent."""
+    path = Path(os.environ.get("SHEDOS_MOUNT_REPORT_STATE",
+                               "/var/lib/shedos/mount-missed.json"))
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    missed = doc.get("missed", []) if isinstance(doc, dict) else []
+    return missed if isinstance(missed, list) else []
+
+
+def _emit_mount_missed_human(missed: list) -> None:
+    if not missed:
+        return
+    print()
+    print(_core.colorize(
+        "boot safety — disk(s) that did not mount this boot:", "yellow"))
+    for m in missed:
+        print(f"  {_core.colorize('!', 'yellow')} {m.get('target', '?')}  "
+              f"({m.get('device', '?')})")
+        print("      its disk was missing at boot, so this nofail mount was "
+              "skipped; reconnect or repair the disk to restore it")
+
+
+def _missed_fingerprint(missed: list) -> str:
+    return ",".join(sorted(m.get("target", "") for m in missed))
 
 
 def _fix_mounts(assume_yes: bool) -> int:
@@ -368,7 +416,7 @@ def main() -> int:
     args = parser.parse_args()
 
     if args.reset_notify_state:
-        _save_last_hash("")
+        _save_state({})
         return 0
 
     if args.fix:
@@ -386,18 +434,20 @@ def main() -> int:
         print(json.dumps(_waybar_payload(plan)))
         return 0
 
-    # Boot-safety audit rides alongside the drift report (human/json/diff).
-    # An unsafe mount is an attention condition like drift → exit 1.
+    # Boot-safety findings (a risky mount, or a disk that didn't mount) are an
+    # attention condition like drift → exit 1.
     findings = _audit_mount_safety()
-    attn_rc = 1 if (rc == 1 or findings) else 0
+    missed = _audit_mount_missed()
+    attn_rc = 1 if (rc == 1 or findings or missed) else 0
 
     if args.json:
-        _emit_json(plan, findings)
+        _emit_json(plan, findings, missed)
         return attn_rc
 
     if args.diff:
         _emit_diff(plan)
         _emit_mount_safety_human(findings)
+        _emit_mount_missed_human(missed)
         return attn_rc
 
     if args.notify_if_new or args.tick:
@@ -418,12 +468,30 @@ def main() -> int:
         elif plan.is_empty() and last:
             # Drift cleared; clear the state so the next drift fires.
             _save_last_hash("")
+        # A missed disk fires a critical notice, with its own fingerprint so
+        # it doesn't repeat every tick.
+        missed_fp = _missed_fingerprint(missed)
+        if missed and missed_fp != _load_last_missed():
+            body_lines = [f"{m.get('target', '?')}  ({m.get('device', '?')})"
+                          for m in missed[:4]]
+            if len(missed) > 4:
+                body_lines.append(f"… and {len(missed) - 4} more")
+            _notify_send(
+                "ShedOS: a disk did not mount this boot",
+                "\n".join(body_lines) +
+                "\n\nReconnect or repair the disk, then run `shedman doctor`.",
+                urgency="critical",
+            )
+            _save_last_missed(missed_fp)
+        elif not missed and _load_last_missed():
+            _save_last_missed("")
         if args.tick:
             _refresh_waybar()
         return 0
 
     _emit_human(plan)
     _emit_mount_safety_human(findings)
+    _emit_mount_missed_human(missed)
     return attn_rc
 
 
