@@ -303,6 +303,63 @@ def case_snapper_unreadable_is_note_not_crash(td: Path) -> None:
         snap_cfg.chmod(0o644)
 
 
+_RISKY_FSTAB = (
+    "UUID=ROOT / btrfs subvol=/@,defaults 0 0\n"
+    "UUID=ROOT /home btrfs subvol=/@home,defaults 0 0\n"        # same fs as root -> safe
+    "UUID=BKP /mnt/backup btrfs subvol=@backup,defaults 0 0\n"  # separate, no nofail -> risk
+)
+_SAFE_FSTAB = (
+    "UUID=ROOT / btrfs subvol=/@,defaults 0 0\n"
+    "UUID=ROOT /home btrfs subvol=/@home,defaults 0 0\n"
+)
+
+
+def case_mount_safety_warns(td: Path) -> None:
+    _setup(td, toml='schema = 1\n')
+    (td / "etc" / "fstab").write_text(_RISKY_FSTAB)
+    r = _run(td)
+    assert r.returncode == 1, (r.returncode, r.stdout, r.stderr)
+    assert "boot safety" in r.stdout, r.stdout
+    assert "/mnt/backup" in r.stdout, r.stdout
+    # the same-fs /home subvol must NOT be flagged
+    assert "/home" not in r.stdout, r.stdout
+
+
+def case_mount_safety_json(td: Path) -> None:
+    _setup(td, toml='schema = 1\n')
+    (td / "etc" / "fstab").write_text(_RISKY_FSTAB)
+    r = _run(td, "--json")
+    assert r.returncode == 1, (r.returncode, r.stderr)
+    doc = json.loads(r.stdout)
+    ms = doc.get("mount_safety", [])
+    assert [m["target"] for m in ms] == ["/mnt/backup"], ms
+
+
+def case_mount_safety_aligned_when_safe(td: Path) -> None:
+    _setup(td, toml='schema = 1\n')
+    (td / "etc" / "fstab").write_text(_SAFE_FSTAB)
+    r = _run(td)
+    assert r.returncode == 0, (r.returncode, r.stdout)
+    assert "boot safety" not in r.stdout, r.stdout
+
+
+def case_mount_safety_fix(td: Path) -> None:
+    _setup(td, toml='schema = 1\n')
+    fstab = td / "etc" / "fstab"
+    fstab.write_text(_RISKY_FSTAB)
+    r = _run(td, "--fix-mounts", "--yes")
+    assert r.returncode == 0, (r.returncode, r.stderr)
+    txt = fstab.read_text()
+    assert "subvol=@backup,defaults,nofail,x-systemd.device-timeout=5s" in txt, txt
+    assert "UUID=ROOT / btrfs subvol=/@,defaults 0 0" in txt, txt  # untouched
+    bak = td / "etc" / "fstab.shedos-bak"
+    assert bak.exists() and bak.read_text() == _RISKY_FSTAB, "backup missing/wrong"
+    # the fix is complete: a re-audit is clean
+    r2 = _run(td)
+    assert r2.returncode == 0, (r2.returncode, r2.stdout)
+    assert "boot safety" not in r2.stdout, r2.stdout
+
+
 CASES = [
     ("aligned-bare",              case_aligned_bare),
     ("aligned-json",              case_aligned_json),
@@ -319,6 +376,10 @@ CASES = [
     ("reset-notify-state",        case_reset_notify_state),
     ("plan-side-effect-free",     case_plan_is_side_effect_free),
     ("snapper-unreadable-note",   case_snapper_unreadable_is_note_not_crash),
+    ("mount-safety-warns",        case_mount_safety_warns),
+    ("mount-safety-json",         case_mount_safety_json),
+    ("mount-safety-aligned-safe", case_mount_safety_aligned_when_safe),
+    ("mount-safety-fix",          case_mount_safety_fix),
 ]
 
 

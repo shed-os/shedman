@@ -350,7 +350,7 @@ _ALLOWED_SECURITY = {"keyring"}
 _ALLOWED_SECURITY_KEYRING = {"trusted"}
 _ALLOWED_FS = {"mounts"}
 _ALLOWED_MOUNT_KEYS = {"name", "device", "target", "fstype",
-                      "options", "dump", "pass"}
+                      "options", "dump", "pass", "required"}
 MOUNT_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 _ALLOWED_KERNEL = {"cmdline"}
 _ALLOWED_KERNEL_CMDLINE = {"append"}
@@ -1016,6 +1016,24 @@ def validate_doc(doc: dict) -> ValidatedConfig:
     return cfg
 
 
+def _ensure_boot_safe_options(target: str, options: str, required: bool) -> str:
+    """Return `options` with `nofail` (and a default device-timeout) folded
+    in so an absent device can never wedge boot at local-fs.target — a
+    missing/required mount there drops the whole system to emergency mode.
+    The root mount and entries the user marks `required = true` are left
+    untouched. Idempotent: never doubles a token, never overrides a user's
+    own x-systemd.device-timeout."""
+    if target == "/" or required:
+        return options
+    toks = [t for t in options.split(",") if t]
+    have = {t.split("=", 1)[0] for t in toks}
+    if "nofail" not in have:
+        toks.append("nofail")
+    if "x-systemd.device-timeout" not in have:
+        toks.append("x-systemd.device-timeout=5s")
+    return ",".join(toks)
+
+
 def _validate_mount_entry(idx: int, item: dict, seen_names: set[str],
                           seen_targets: set[str]) -> "MountEntry":
     pfx = f"fs.mounts[{idx}]"
@@ -1043,6 +1061,9 @@ def _validate_mount_entry(idx: int, item: dict, seen_names: set[str],
     options = item.get("options", "defaults")
     if not isinstance(options, str):
         raise SchemaError(f"[{pfx}].options must be a string")
+    required = item.get("required", False)
+    if not isinstance(required, bool):
+        raise SchemaError(f"[{pfx}].required must be a boolean")
     dump = item.get("dump", 0)
     if isinstance(dump, bool) or not isinstance(dump, int):
         raise SchemaError(f"[{pfx}].dump must be an integer")
@@ -1050,9 +1071,14 @@ def _validate_mount_entry(idx: int, item: dict, seen_names: set[str],
     if isinstance(pass_, bool) or not isinstance(pass_, int):
         raise SchemaError(f"[{pfx}].pass must be an integer")
 
+    # Boot safety: a non-root mount whose device is absent at boot wedges
+    # local-fs.target → emergency mode. Fold in nofail unless the user
+    # opted out with `required = true`.
+    safe_options = _ensure_boot_safe_options(
+        target, options.strip() or "defaults", required)
     return MountEntry(
         name=name, device=device.strip(), target=target,
-        fstype=fstype.strip(), options=options.strip() or "defaults",
+        fstype=fstype.strip(), options=safe_options,
         dump=dump, pass_=pass_,
     )
 
@@ -2588,6 +2614,71 @@ def _slugify_target(target: str, counter: dict[str, int]) -> str:
     return f"{base}-{n}"
 
 
+_FSTAB_PSEUDO_FSTYPES = {
+    "tmpfs", "proc", "sysfs", "devpts", "devtmpfs", "mqueue",
+    "hugetlbfs", "debugfs", "tracefs", "configfs", "securityfs",
+    "cgroup", "cgroup2", "swap", "none", "overlay", "ramfs",
+}
+
+
+@dataclass
+class MountSafetyFinding:
+    target: str
+    device: str
+    fstype: str
+    reason: str
+
+
+def audit_fstab_mount_safety(fstab_text: str) -> list[MountSafetyFinding]:
+    """Find fstab mounts that could drop the system to emergency mode if
+    their device is absent at boot: non-root, real filesystem, no `nofail`,
+    on a filesystem other than root. Same-as-root subvolumes are always
+    present when root is, so they are never the risk and are skipped; the
+    root identity is read from the fstab's own `/` entry (None if absent,
+    in which case every non-nofail real mount is flagged — the safe
+    default)."""
+    entries = _parse_fstab(fstab_text)[0]
+    root_source = next((e.device for e in entries if e.target == "/"), None)
+    findings: list[MountSafetyFinding] = []
+    for e in entries:
+        if e.target == "/":
+            continue
+        if e.fstype in _FSTAB_PSEUDO_FSTYPES:
+            continue
+        opts = {t.split("=", 1)[0] for t in e.options.split(",") if t}
+        if "nofail" in opts:
+            continue
+        if root_source is not None and e.device == root_source:
+            continue
+        findings.append(MountSafetyFinding(
+            target=e.target, device=e.device, fstype=e.fstype,
+            reason="missing nofail — if this device is absent at boot the "
+                   "system drops to emergency mode (local-fs.target fails)"))
+    return findings
+
+
+def add_nofail_to_fstab(fstab_text: str, targets: list[str]) -> str:
+    """Return fstab_text with `nofail` + a device-timeout folded into the
+    options field of every line whose mount target is in `targets`. Only
+    the options field changes; the line's original column spacing, dump,
+    and pass are preserved."""
+    want = set(targets)
+    out: list[str] = []
+    for line in fstab_text.splitlines(keepends=True):
+        nl = "\n" if line.endswith("\n") else ""
+        body = line[:-1] if nl else line
+        stripped = body.strip()
+        if stripped and not stripped.startswith("#"):
+            fields = body.split()
+            if len(fields) >= 4 and fields[1] in want:
+                new_opts = _ensure_boot_safe_options(fields[1], fields[3], False)
+                m = re.match(r"^(\s*\S+\s+\S+\s+\S+\s+)(\S+)(.*)$", body)
+                if m:
+                    body = m.group(1) + new_opts + m.group(3)
+        out.append(body + nl)
+    return "".join(out)
+
+
 def _render_fstab(out_lines: list[str], managed: list[MountEntry]) -> str:
     """Serialize fstab — original non-fence lines, then a fresh fence
     block holding the managed entries. Trailing newline guaranteed."""
@@ -2605,6 +2696,18 @@ def _render_fstab(out_lines: list[str], managed: list[MountEntry]) -> str:
             out += e.to_fstab_line() + "\n"
         out += _FSTAB_FENCE_CLOSE + "\n"
     return out
+
+
+def _boot_safe_adopted(e: MountEntry) -> MountEntry:
+    """An adopted (hand-added) fstab entry never passed through schema
+    validation, so give it the same boot-safety default a declared mount
+    gets: fold in nofail unless it's root. Returns a copy with the new
+    options; the original (used for identity comparison) is untouched."""
+    safe = _ensure_boot_safe_options(e.target, e.options, False)
+    if safe == e.options:
+        return e
+    return MountEntry(name=e.name, device=e.device, target=e.target,
+                      fstype=e.fstype, options=safe, dump=e.dump, pass_=e.pass_)
 
 
 def plan_mounts(cfg: ValidatedConfig) -> list[Change]:
@@ -2650,7 +2753,7 @@ def plan_mounts(cfg: ValidatedConfig) -> list[Change]:
         # Sort adopted entries by target so the adoption-write is
         # deterministic across runs (frozenset iteration is not).
         adopted_sorted = sorted(merge.to_adopt, key=lambda t: t[1])
-        adopted = [live_by_id[t] for t in adopted_sorted]
+        adopted = [_boot_safe_adopted(live_by_id[t]) for t in adopted_sorted]
         new_for_toml = list(cfg.fs.mounts) + adopted
         new_doc_text = _render_system_toml_with_mounts(config_p, new_for_toml)
         old_doc_text = config_p.read_text(encoding="utf-8") if config_p.exists() else ""
@@ -2683,10 +2786,14 @@ def plan_mounts(cfg: ValidatedConfig) -> list[Change]:
     managed_ids = sorted((declared | merge.to_adopt) - baseline,
                          key=lambda t: t[1])
     # Resolve each managed id to a MountEntry; prefer declared shape
-    # over live (lets options/fstype updates take effect).
+    # over live (lets options/fstype updates take effect). A declared
+    # entry is already boot-safe-finalized (respecting required=true);
+    # an adopted (live-only) entry never was, so finalize it here too.
     managed_entries: list[MountEntry] = []
     for mid in managed_ids:
-        managed_entries.append(declared_entries.get(mid) or live_by_id[mid])
+        decl = declared_entries.get(mid)
+        managed_entries.append(decl if decl is not None
+                               else _boot_safe_adopted(live_by_id[mid]))
 
     # Outside-fence lines; strip out tool-managed entries that lived
     # outside the fence (they're being moved into it).
@@ -2827,8 +2934,20 @@ def _sync_limine_to_esp(text: str) -> None:
         if p.exists():
             try:
                 atomic_write_text(p, text, mode=0o644)
-            except OSError:
-                pass
+            except OSError as exc:
+                # Don't swallow it. A full ESP means this cmdline change
+                # never reaches the FAT volume Limine actually boots from,
+                # so the next boot would silently use the old cmdline. The
+                # write to /boot already succeeded and atomic_write_text
+                # leaves the previous ESP config intact, so warn rather
+                # than report success over the miss.
+                print(
+                    f"shedman: WARNING: could not mirror limine.conf to {p}: {exc}. "
+                    "The boot volume may be full; this kernel cmdline change will not "
+                    "take effect until it is synced — free ESP space, then run: "
+                    "sudo /usr/lib/shedos/render-limine-config.sh",
+                    file=sys.stderr,
+                )
 
 
 def _read_limine_config() -> tuple[Optional[Path], Optional[str]]:

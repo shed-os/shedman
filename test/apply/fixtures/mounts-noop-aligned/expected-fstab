@@ -3,5 +3,5 @@ UUID=11111111-1111-1111-1111-111111111111	/	btrfs	rw,noatime,subvol=@	0	0
 # >>> shedos-mounts <<<
 # Managed by shedos-apply — do not edit between these markers.
 # Declarative source: /etc/shedos/system.toml ([fs.mounts]).
-UUID=44444444-4444-4444-4444-444444444444	/mnt/data	btrfs	noatime,compress=zstd:3,subvol=@data	0	0
+UUID=44444444-4444-4444-4444-444444444444	/mnt/data	btrfs	noatime,compress=zstd:3,subvol=@data,nofail,x-systemd.device-timeout=5s	0	0
 # <<< shedos-mounts >>>

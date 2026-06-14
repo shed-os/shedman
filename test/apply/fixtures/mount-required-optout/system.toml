@@ -1,0 +1,12 @@
+schema = 1
+
+# A user who genuinely wants a blocking mount opts out of the nofail
+# boot-safety default with required = true. The managed fstab line must
+# then NOT gain nofail.
+[[fs.mounts]]
+name = "scratch"
+device = "UUID=22222222-2222-2222-2222-222222222222"
+target = "/mnt/scratch"
+fstype = "btrfs"
+options = "defaults"
+required = true

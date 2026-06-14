@@ -5,11 +5,12 @@ name = "data"
 device = "UUID=44444444-4444-4444-4444-444444444444"
 target = "/mnt/data"
 fstype = "btrfs"
-options = "noatime"
+options = "noatime,nofail,x-systemd.device-timeout=5s"
 
 [[fs.mounts]]
 name = "scratch"
 device = "UUID=55555555-5555-5555-5555-555555555555"
 target = "/mnt/scratch"
 fstype = "ext4"
+options = "defaults,nofail,x-systemd.device-timeout=5s"
 pass = 2

@@ -1,0 +1,7 @@
+UUID=11111111-1111-1111-1111-111111111111 / btrfs rw,subvol=@ 0 0
+
+# >>> shedos-mounts <<<
+# Managed by shedos-apply — do not edit between these markers.
+# Declarative source: /etc/shedos/system.toml ([fs.mounts]).
+UUID=22222222-2222-2222-2222-222222222222	/mnt/scratch	btrfs	defaults	0	0
+# <<< shedos-mounts >>>
