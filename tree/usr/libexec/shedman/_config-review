@@ -576,16 +576,22 @@ def auto_resolve_identical(conflicts: list[Conflict], *,
             remaining.append(c)
             continue
         try:
-            if sha256_file(c.yours_path) == sha256_file(c.theirs_path):
-                if not dry_run:
-                    # Identical: delete .shedosnew, update manifest.
-                    c.theirs_path.unlink()
-                    _update_manifest(c.relpath, c.src_path)
-                auto_n += 1
-                continue
+            identical = sha256_file(c.yours_path) == sha256_file(c.theirs_path)
         except OSError:
-            pass
-        remaining.append(c)
+            identical = False
+        if not identical:
+            remaining.append(c)
+            continue
+        # Identical content is never surfaced. The cleanup (delete .shedosnew,
+        # bump the manifest) is best-effort: if it throws, we still drop the
+        # zero-diff file from the list rather than resurface it as a conflict.
+        if not dry_run:
+            try:
+                c.theirs_path.unlink()
+                _update_manifest(c.relpath, c.src_path)
+            except OSError:
+                pass
+        auto_n += 1
     return remaining, auto_n
 
 
@@ -2344,6 +2350,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     )
     p.add_argument("--list", action="store_true",
                    help="Print a tab-separated list of conflicts and exit.")
+    p.add_argument("--count", action="store_true",
+                   help="Print how many conflicts the resolver would open, "
+                        "then exit (read-only).")
     p.add_argument("--file", metavar="PATH",
                    help="Open merge screen for one file (relpath under $HOME).")
     p.add_argument("--dry-run", action="store_true",
@@ -2374,7 +2383,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         return 2
 
     # Acquire the process lock for any mutating operation.
-    if not args.list and not args.dry_run:
+    if not args.list and not args.dry_run and not args.count:
         try:
             lock_fd = acquire_lock()
         except LockAcquireError:
@@ -2387,7 +2396,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     # --list/--dry-run hold no lock, so they must not mutate: the tmp
     # sweep waits for a real run, and identical conflicts are counted
     # without being resolved.
-    read_only = bool(args.list or args.dry_run)
+    read_only = bool(args.list or args.dry_run or args.count)
     try:
         if not read_only:
             swept = sweep_leftover_tmps()
@@ -2398,6 +2407,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         conflicts, excluded = scan_conflicts()
         conflicts, auto_n = auto_resolve_identical(conflicts,
                                                    dry_run=read_only)
+        if args.count:
+            print(len(conflicts))
+            return 0
         if auto_n and not args.list:
             if read_only:
                 print(f"{auto_n} identical-content conflict(s) will "

@@ -506,9 +506,11 @@ fi
 # "in sync" guarantee, so surface them now.
 conflict_n=0
 if [[ -x /usr/libexec/shedman/_config-review ]]; then
-    # shellcheck disable=SC2012
-    while IFS= read -r -d '' _; do ((conflict_n++)); done \
-        < <(find "$HOME" -xdev -type f -name '*.shedosnew' -print0 2>/dev/null)
+    # Ask the reviewer for the real count — after auto-resolving identical
+    # files and skipping excluded paths — so the resolver opens only when
+    # there's actually something to merge, not for every leftover .shedosnew.
+    conflict_n=$(/usr/bin/shedman config --review --count 2>/dev/null || echo 0)
+    [[ $conflict_n =~ ^[0-9]+$ ]] || conflict_n=0
 fi
 
 echo
