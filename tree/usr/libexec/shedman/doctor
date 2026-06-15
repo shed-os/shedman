@@ -366,12 +366,11 @@ def _fix_mounts(assume_yes: bool) -> int:
 def _waybar_payload(plan: _core.Plan, findings: list, missed: list) -> dict[str, str]:
     """Waybar JSON contract: {text, tooltip, class, alt}.
 
-    Severity ladder — the highest active level wins the pill; the tooltip
-    still names drift underneath so nothing is hidden:
-      critical  a disk did not mount this boot (mount_missed)
+    The most severe active level sets the pill. The tooltip lists the rest:
+      critical  a disk did not mount this boot
       warning   an fstab mount lacks nofail and can wedge a future boot
-      drift     config drift only (the original behaviour)
-      aligned   nothing — empty text collapses the pill
+      drift     config drift only
+      aligned   nothing
     """
     drift = plan.visible_changes()
     drift_tail = f"\\n{len(drift)} drift item(s)" if drift else ""
@@ -464,9 +463,8 @@ def main() -> int:
         return 2
     assert plan is not None
 
-    # Boot-safety findings (a risky mount, or a disk that didn't mount) are an
-    # attention condition like drift → exit 1, and the waybar pill surfaces
-    # them above drift.
+    # A risky mount or a disk that didn't mount is an attention condition
+    # like drift, so exit 1.
     findings = _audit_mount_safety()
     missed = _audit_mount_missed()
     attn_rc = 1 if (rc == 1 or findings or missed) else 0
