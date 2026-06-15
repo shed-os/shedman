@@ -363,19 +363,53 @@ def _fix_mounts(assume_yes: bool) -> int:
     return 0
 
 
-def _waybar_payload(plan: _core.Plan) -> dict[str, str]:
+def _waybar_payload(plan: _core.Plan, findings: list, missed: list) -> dict[str, str]:
     """Waybar JSON contract: {text, tooltip, class, alt}.
-    Class flips to 'drift' when there's anything to reconcile.
-    Empty `text` hides the pill — same pattern as shedos-check-updates."""
-    if plan.is_empty():
+
+    Severity ladder — the highest active level wins the pill; the tooltip
+    still names drift underneath so nothing is hidden:
+      critical  a disk did not mount this boot (mount_missed)
+      warning   an fstab mount lacks nofail and can wedge a future boot
+      drift     config drift only (the original behaviour)
+      aligned   nothing — empty text collapses the pill
+    """
+    drift = plan.visible_changes()
+    drift_tail = f"\\n{len(drift)} drift item(s)" if drift else ""
+
+    if missed:
+        n = len(missed)
+        rows = [f"{m.get('target', '?')}  ({m.get('device', '?')})"
+                for m in missed[:8]]
+        body = r"\n".join(rows).replace('"', r'\"')
+        return {
+            "text": f" {n}",  #  = nf-fa-triangle_exclamation
+            "tooltip": (f"shedman doctor: {n} disk(s) did not mount this "
+                        f"boot\\n{body}{drift_tail}"),
+            "class": "critical",
+            "alt": "critical",
+        }
+
+    if findings:
+        n = len(findings)
+        rows = [f"{f.target}  ({f.device}) — {f.reason}" for f in findings[:8]]
+        body = r"\n".join(rows).replace('"', r'\"')
+        return {
+            "text": f" {n}",  #  = nf-fa-triangle_exclamation
+            "tooltip": (f"shedman doctor: {n} mount(s) can wedge boot "
+                        f"(missing nofail)\\n{body}{drift_tail}"),
+            "class": "warning",
+            "alt": "warning",
+        }
+
+    if not drift:
         return {"text": "", "tooltip": "system state aligned",
                 "class": "aligned", "alt": "aligned"}
-    visible = plan.visible_changes()
-    n = len(visible)
+
+    n = len(drift)
     # One-per-line tooltip mirroring shedos-check-health's style.
-    lines = [f"{c.kind} [{c.section}] {c.summary}" for c in visible[:8]]
-    if len(visible) > 8:
-        lines.append(f"… and {len(visible) - 8} more")
+    lines = [f"{c.kind} [{c.section}] {c.summary}" for c in drift[:8]]
+    if len(drift) > 8:
+        lines.append(f"… and {len(drift) - 8} more")
     tooltip = r"\n".join(lines).replace('"', r'\"')
     return {
         "text": f" {n}",  #  = stethoscope (nf-fa-stethoscope)
@@ -430,15 +464,16 @@ def main() -> int:
         return 2
     assert plan is not None
 
-    if args.waybar:
-        print(json.dumps(_waybar_payload(plan)))
-        return 0
-
     # Boot-safety findings (a risky mount, or a disk that didn't mount) are an
-    # attention condition like drift → exit 1.
+    # attention condition like drift → exit 1, and the waybar pill surfaces
+    # them above drift.
     findings = _audit_mount_safety()
     missed = _audit_mount_missed()
     attn_rc = 1 if (rc == 1 or findings or missed) else 0
+
+    if args.waybar:
+        print(json.dumps(_waybar_payload(plan, findings, missed)))
+        return 0
 
     if args.json:
         _emit_json(plan, findings, missed)

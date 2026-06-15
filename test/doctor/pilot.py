@@ -405,6 +405,39 @@ def case_mount_missed_tick_critical(td: Path) -> None:
     assert "critical" in fired, fired
 
 
+def case_mount_safety_waybar_warning(td: Path) -> None:
+    _setup(td, toml='schema = 1\n')
+    (td / "etc" / "fstab").write_text(_RISKY_FSTAB)
+    r = _run(td, "--waybar")
+    assert r.returncode == 0, (r.returncode, r.stderr)
+    wb = json.loads(r.stdout)
+    assert wb["class"] == "warning", wb
+    assert "/mnt/backup" in wb["tooltip"], wb
+    assert wb["text"] != ""
+
+
+def case_mount_missed_waybar_critical(td: Path) -> None:
+    _setup(td, toml='schema = 1\n')
+    (td / "mount-missed.json").write_text(_MISSED_BREADCRUMB)
+    r = _run(td, "--waybar")
+    assert r.returncode == 0, (r.returncode, r.stderr)
+    wb = json.loads(r.stdout)
+    assert wb["class"] == "critical", wb
+    assert "/mnt/data" in wb["tooltip"], wb
+
+
+def case_missed_outranks_drift_in_pill(td: Path) -> None:
+    # Drift AND a missed disk: the pill shows the more severe state, but the
+    # tooltip still names drift underneath so nothing is hidden.
+    _setup(td, toml='schema = 1\n[systemd.system]\nenable=["z.service"]\n')
+    (td / "mount-missed.json").write_text(_MISSED_BREADCRUMB)
+    r = _run(td, "--waybar")
+    assert r.returncode == 0, (r.returncode, r.stderr)
+    wb = json.loads(r.stdout)
+    assert wb["class"] == "critical", wb
+    assert "drift item(s)" in wb["tooltip"], wb
+
+
 CASES = [
     ("aligned-bare",              case_aligned_bare),
     ("aligned-json",              case_aligned_json),
@@ -429,6 +462,9 @@ CASES = [
     ("mount-missed-json",         case_mount_missed_json),
     ("mount-missed-absent-clean", case_mount_missed_absent_is_clean),
     ("mount-missed-tick-critical", case_mount_missed_tick_critical),
+    ("mount-safety-waybar",       case_mount_safety_waybar_warning),
+    ("mount-missed-waybar",       case_mount_missed_waybar_critical),
+    ("missed-outranks-drift",     case_missed_outranks_drift_in_pill),
 ]
 
 
