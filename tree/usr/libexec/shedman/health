@@ -39,6 +39,7 @@ PSI_FILE="${SHEDOS_HEALTH_PSI_FILE:-/proc/pressure/memory}"
 POWER_SUPPLY="${SHEDOS_HEALTH_POWER_SUPPLY:-/sys/class/power_supply}"
 SENSORS_CMD="${SHEDOS_HEALTH_SENSORS_CMD:-sensors -u}"
 DF_TARGETS="${SHEDOS_HEALTH_DF_TARGETS:-/ $HOME}"
+SCRUB_CMD="${SHEDOS_HEALTH_SCRUB_CMD:-btrfs scrub status /}"
 
 mode=${1:-text}
 
@@ -190,9 +191,9 @@ _scrub() {
     # Data integrity maintenance: warn when / has never been scrubbed
     # or the last scrub is older than ~5 weeks (the shipped monthly
     # timer keeps this quiet on healthy systems).
-    command -v btrfs >/dev/null 2>&1 || return 0
     local out started epoch now days
-    out=$(btrfs scrub status / 2>/dev/null) || return 0
+    # shellcheck disable=SC2086  # SCRUB_CMD intentionally word-split for args.
+    out=$($SCRUB_CMD 2>/dev/null) || return 0
     if grep -q 'no stats available' <<<"$out"; then
         printf 'warning\tbtrfs scrub: never run on / (timer will catch up)\n'
         return
