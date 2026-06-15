@@ -97,6 +97,20 @@ _run_one() {
         env_args+=("SHEDOS_HEALTH_SENSORS_CMD=cat $tmp/no-sensors")
     fi
 
+    # SMART + btrfs scrub read host state (a cache file and `btrfs scrub
+    # status /`); steer both at controlled inputs so a real btrfs root or
+    # smart cache on the harness machine can't leak into the verdict.
+    if [[ -f $fdir/smart.json ]]; then
+        env_args+=("SHEDOS_SMART_CACHE=$fdir/smart.json")
+    else
+        env_args+=("SHEDOS_SMART_CACHE=$tmp/no-smart")
+    fi
+    if [[ -f $fdir/scrub.out ]]; then
+        env_args+=("SHEDOS_HEALTH_SCRUB_CMD=cat $fdir/scrub.out")
+    else
+        env_args+=("SHEDOS_HEALTH_SCRUB_CMD=cat $tmp/no-scrub")
+    fi
+
     # Keep disk out of the equation — harness machines have varying free
     # space, so a disk-specific fixture lives in its own test (pointed at a
     # mount we control). Default: steer at a bogus path → "unavailable".
