@@ -10,6 +10,9 @@ set -uo pipefail
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 repo_root=$(cd -- "$here/../.." && pwd)
 tool=$repo_root/packaging/shedos-system/tree/usr/libexec/shedman/upgrade-history
+# The TUI imports the shared shedos_palette module from SHEDOS_LIB_ROOT
+# (default /usr/lib/shedos, the installed path); point it at the tree.
+export SHEDOS_LIB_ROOT="$repo_root/packaging/shedos-system/tree/usr/lib/shedos"
 
 if [[ ! -x $tool ]]; then
     echo "FATAL: $tool not executable" >&2
