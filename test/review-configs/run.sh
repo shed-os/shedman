@@ -228,6 +228,15 @@ _mk "$t" .config/same x x x
 _assert count-zero-when-only-identical "$(_count "$t")" 0
 rm -rf "$t"
 
+# A .shedosnew under a non-dot top-level tree (a backup, a screenshot demo)
+# is a user artifact, not a managed dotfile conflict; only the real .config
+# one counts.
+t=$(mktemp -d); mkdir -p "$t/state"
+_mk "$t" .config/real yours theirs src
+_mk "$t" shedos-shots/.merge-demo/.config/kitty/kitty.conf yours theirs src
+_assert count-ignores-non-dot-toplevel "$(_count "$t")" 1
+rm -rf "$t"
+
 echo
 echo "Summary: $pass passed, $fail failed"
 if (( fail > 0 )); then
