@@ -12,6 +12,7 @@ gives the one password prompt per ~5 min session.
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
 from datetime import datetime
@@ -20,10 +21,25 @@ from zoneinfo import ZoneInfo
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal
+from textual.theme import Theme as _TextualTheme
 from textual.validation import ValidationResult, Validator
 from textual.widgets import (
     Button, Footer, Input, Label, ListItem, ListView, Static, Switch,
 )
+
+_lib_root = os.environ.get("SHEDOS_LIB_ROOT", "/usr/lib/shedos")
+if _lib_root not in sys.path:
+    sys.path.insert(0, _lib_root)
+import shedos_palette
+
+
+def _shedos_theme(pal):
+    return _TextualTheme(
+        name="shedos", primary=pal["accent"], secondary=pal["accent_secondary"],
+        accent=pal["accent"], foreground=pal["text"], background=pal["base"],
+        success=pal["green"], warning=pal["yellow"], error=pal["red"],
+        surface=pal["surface0"], panel=pal["mantle"], dark=True,
+    )
 
 
 class DateValidator(Validator):
@@ -144,6 +160,9 @@ class DateTime(App):
     ]
 
     def __init__(self) -> None:
+        # Loaded up front so on_mount registers the ShedOS theme from it
+        # and a live `shedman theme set` is reflected.
+        self._pal = shedos_palette.load()
         super().__init__()
         self.original: dict[str, str] = {}
         self.zones: list[str] = []
@@ -208,6 +227,10 @@ class DateTime(App):
         yield Footer()
 
     def on_mount(self) -> None:
+        self.register_theme(_shedos_theme(self._pal))
+        self.theme = "shedos"
+        self._theme_stamp = shedos_palette.applied_stamp()
+        self.set_interval(1.0, self._poll_theme)
         self.original = _show()
         self.zones = _zones()
         self.tz = self.original.get("Timezone", "UTC")
@@ -220,6 +243,15 @@ class DateTime(App):
         self._nightlight_mount()
         self._refresh_manual_state()
         self._refresh_ntp_label()
+
+    def _poll_theme(self) -> None:
+        s = shedos_palette.applied_stamp()
+        if s != self._theme_stamp:
+            self._theme_stamp = s
+            self._pal = shedos_palette.load()
+            self.register_theme(_shedos_theme(self._pal))
+            self.theme = "shedos"
+            self.refresh_css()
 
     def _now_in_zone(self) -> datetime:
         try:

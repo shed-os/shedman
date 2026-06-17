@@ -2591,117 +2591,126 @@ def _load_textual_ui() -> None:
         from textual.reactive import reactive
         from rich.syntax import Syntax
         from rich.text import Text
+        _lib_root = os.environ.get("SHEDOS_LIB_ROOT", "/usr/lib/shedos")
+        if _lib_root not in sys.path:
+            sys.path.insert(0, _lib_root)
+        import shedos_palette
     except Exception as e:
         _log(f"textual import failed: {e}")
         return
 
     # PALETTE is keyed by hue; the syntax tokeniser maps Pygments token
     # classes to these keys and the renderer resolves the hex from here.
-    PALETTE = {
-        "base": "#1e1e2e", "mantle": "#181825", "surface0": "#313244",
-        "text": "#cdd6f4", "overlay0": "#6c7086",
-        "green": "#a6e3a1", "red": "#f38ba8", "yellow": "#f9e2af",
-        "blue": "#89b4fa", "mauve": "#cba6f7",
-    }
+    # THEME maps the UI roles onto those hues. Both are filled from the live
+    # ShedOS palette and mutated in place by the app's theme poll, so the
+    # closure-bound renderers below pick up a `shedman theme set` live.
+    PALETTE: dict[str, str] = {}
 
-    @dataclass(frozen=True)
+    @dataclass
     class Theme:
-        bg: str
-        panel: str
-        surface: str
-        text: str
-        dim: str
-        added: str
-        removed: str
-        warning: str
-        accent: str
-        both: str
+        bg: str = ""
+        panel: str = ""
+        surface: str = ""
+        text: str = ""
+        dim: str = ""
+        added: str = ""
+        removed: str = ""
+        warning: str = ""
+        accent: str = ""
+        both: str = ""
 
-    CATPPUCCIN_MOCHA = Theme(
-        bg=PALETTE["base"],
-        panel=PALETTE["mantle"],
-        surface=PALETTE["surface0"],
-        text=PALETTE["text"],
-        dim=PALETTE["overlay0"],
-        added=PALETTE["green"],
-        removed=PALETTE["red"],
-        warning=PALETTE["yellow"],
-        accent=PALETTE["blue"],
-        both=PALETTE["mauve"],
-    )
+    THEME = Theme()
 
-    # Active theme. Swap this assignment to drop in a new palette.
-    THEME = CATPPUCCIN_MOCHA
+    def _apply_palette(pal: dict) -> None:
+        """Refresh PALETTE + THEME in place from a loaded ShedOS palette.
 
-    APP_CSS = f"""
-    Screen {{ background: {THEME.bg}; color: {THEME.text}; }}
-    Header {{ background: {THEME.panel}; color: {THEME.accent}; }}
-    Footer {{ background: {THEME.panel}; color: {THEME.dim}; }}
+        In place so every closure that reads `THEME.x` / `PALETTE[...]` at
+        render time sees the new colours without rebinding.
+        """
+        PALETTE.clear()
+        PALETTE.update(pal)
+        THEME.bg = pal["base"]
+        THEME.panel = pal["mantle"]
+        THEME.surface = pal["surface0"]
+        THEME.text = pal["text"]
+        THEME.dim = pal["overlay0"]
+        THEME.added = pal["green"]
+        THEME.removed = pal["red"]
+        THEME.warning = pal["yellow"]
+        THEME.accent = pal["accent"]
+        THEME.both = pal["mauve"]
 
-    #banner {{ dock: top; height: 1; background: {THEME.panel}; color: {THEME.accent}; padding: 0 1; }}
-    #banner.two-way {{ background: {THEME.warning}; color: {THEME.bg}; }}
+    _apply_palette(shedos_palette.load())
 
-    #flash {{ dock: top; height: 1; background: {THEME.surface}; color: {THEME.added}; padding: 0 1; }}
+    APP_CSS = """
+    Screen { background: $sh-base; color: $sh-text; }
+    Header { background: $sh-mantle; color: $sh-accent; }
+    Footer { background: $sh-mantle; color: $sh-overlay0; }
 
-    #hunk-strip {{ dock: bottom; height: 1; background: {THEME.panel}; color: {THEME.text}; padding: 0 1; }}
+    #banner { dock: top; height: 1; background: $sh-mantle; color: $sh-accent; padding: 0 1; }
+    #banner.two-way { background: $sh-yellow; color: $sh-base; }
 
-    DecisionModal {{ align: center middle; }}
-    #decision-modal {{ width: 80; max-width: 90%; height: auto;
-            background: {THEME.panel}; border: round {THEME.accent};
-            padding: 1 2; }}
-    #modal-title {{ color: {THEME.accent}; text-style: bold; }}
-    #modal-body  {{ color: {THEME.text}; margin-top: 1; }}
-    #hint-bar  {{ dock: bottom; height: 1; background: {THEME.panel}; color: {THEME.dim}; padding: 0 1; }}
+    #flash { dock: top; height: 1; background: $sh-surface0; color: $sh-green; padding: 0 1; }
 
-    .pane {{ border: round {THEME.surface}; padding: 0; width: 1fr; height: 1fr;
-            overflow-x: auto; overflow-y: auto; }}
-    .pane.wrap {{ overflow-x: hidden; }}
-    .pane.focus {{ border: round {THEME.accent}; }}
-    .pane-title {{ background: {THEME.surface}; color: {THEME.accent}; padding: 0 1; }}
-    #merge-row {{ height: 1fr; }}
-    .pane-yours  {{ border-title-color: {THEME.added};   border-title-align: left; }}
-    .pane-base   {{ border-title-color: {THEME.warning}; border-title-align: left; }}
-    .pane-theirs {{ border-title-color: {THEME.removed}; border-title-align: left; }}
+    #hunk-strip { dock: bottom; height: 1; background: $sh-mantle; color: $sh-text; padding: 0 1; }
 
-    .add {{ color: {THEME.added}; }}
-    .del {{ color: {THEME.removed}; }}
-    .ctx {{ color: {THEME.text}; }}
-    .ctx-dim {{ color: {THEME.dim}; }}
-    .cursor-line {{ background: {THEME.surface}; }}
-    .decided-yours  {{ color: {THEME.added}; }}
-    .decided-theirs {{ color: {THEME.removed}; }}
-    .decided-both   {{ color: {THEME.both}; }}
+    DecisionModal { align: center middle; }
+    #decision-modal { width: 80; max-width: 90%; height: auto;
+            background: $sh-mantle; border: round $sh-accent;
+            padding: 1 2; }
+    #modal-title { color: $sh-accent; text-style: bold; }
+    #modal-body  { color: $sh-text; margin-top: 1; }
+    #hint-bar  { dock: bottom; height: 1; background: $sh-mantle; color: $sh-overlay0; padding: 0 1; }
 
-    DataTable {{ background: {THEME.bg}; }}
-    DataTable > .datatable--header {{ background: {THEME.panel}; color: {THEME.accent}; }}
-    DataTable > .datatable--cursor {{ background: {THEME.surface}; color: {THEME.text}; }}
+    .pane { border: round $sh-surface0; padding: 0; width: 1fr; height: 1fr;
+            overflow-x: auto; overflow-y: auto; }
+    .pane.wrap { overflow-x: hidden; }
+    .pane.focus { border: round $sh-accent; }
+    .pane-title { background: $sh-surface0; color: $sh-accent; padding: 0 1; }
+    #merge-row { height: 1fr; }
+    .pane-yours  { border-title-color: $sh-green;  border-title-align: left; }
+    .pane-base   { border-title-color: $sh-yellow; border-title-align: left; }
+    .pane-theirs { border-title-color: $sh-red;    border-title-align: left; }
 
-    ModalScreen {{ align: center middle; }}
-    .dialog {{ border: thick {THEME.accent}; background: {THEME.panel}; width: 60; height: auto;
-              padding: 1 2; }}
-    .dialog-title {{ color: {THEME.accent}; text-style: bold; }}
-    .dialog-hint {{ color: {THEME.dim}; }}
+    .add { color: $sh-green; }
+    .del { color: $sh-red; }
+    .ctx { color: $sh-text; }
+    .ctx-dim { color: $sh-overlay0; }
+    .cursor-line { background: $sh-surface0; }
+    .decided-yours  { color: $sh-green; }
+    .decided-theirs { color: $sh-red; }
+    .decided-both   { color: $sh-mauve; }
 
-    #raw-diff-scroll {{
-        border: thick {THEME.accent};
-        background: {THEME.panel};
+    DataTable { background: $sh-base; }
+    DataTable > .datatable--header { background: $sh-mantle; color: $sh-accent; }
+    DataTable > .datatable--cursor { background: $sh-surface0; color: $sh-text; }
+
+    ModalScreen { align: center middle; }
+    .dialog { border: thick $sh-accent; background: $sh-mantle; width: 60; height: auto;
+              padding: 1 2; }
+    .dialog-title { color: $sh-accent; text-style: bold; }
+    .dialog-hint { color: $sh-overlay0; }
+
+    #raw-diff-scroll {
+        border: thick $sh-accent;
+        background: $sh-mantle;
         width: 95%;
         height: 90%;
         padding: 1 2;
-    }}
+    }
 
-    #review-row     {{ layout: horizontal; height: 1fr; }}
-    FileTreePanel   {{ width: 28; border: round {THEME.surface}; padding: 0; background: {THEME.bg}; color: {THEME.text}; }}
-    FileTreePanel:focus-within {{ border: round {THEME.accent}; }}
-    FileTreePanel.hidden {{ display: none; }}
-    #conflict-tree {{ background: {THEME.bg}; color: {THEME.text}; }}
-    MergePanel      {{ width: 1fr; layout: vertical; border: round {THEME.surface}; }}
-    MergePanel:focus {{ border: round {THEME.accent}; }}
-    #merge-top      {{ layout: horizontal; height: 2fr; }}
-    #merge-top.hidden {{ display: none; }}
-    #merge-empty-state {{ width: 1fr; height: 1fr; padding: 1 2;
-                          content-align: center middle; color: {THEME.dim}; }}
-    #merge-empty-state.hidden {{ display: none; }}
+    #review-row     { layout: horizontal; height: 1fr; }
+    FileTreePanel   { width: 28; border: round $sh-surface0; padding: 0; background: $sh-base; color: $sh-text; }
+    FileTreePanel:focus-within { border: round $sh-accent; }
+    FileTreePanel.hidden { display: none; }
+    #conflict-tree { background: $sh-base; color: $sh-text; }
+    MergePanel      { width: 1fr; layout: vertical; border: round $sh-surface0; }
+    MergePanel:focus { border: round $sh-accent; }
+    #merge-top      { layout: horizontal; height: 2fr; }
+    #merge-top.hidden { display: none; }
+    #merge-empty-state { width: 1fr; height: 1fr; padding: 1 2;
+                          content-align: center middle; color: $sh-overlay0; }
+    #merge-empty-state.hidden { display: none; }
     """
 
     # ---------- Messages ----------
@@ -4033,6 +4042,10 @@ MERGE SCREEN
 
         def __init__(self, conflicts: list[Conflict], *, start_file: Optional[str],
                      force_2way: bool) -> None:
+            # Before super().__init__(): App.__init__ builds the stylesheet
+            # via get_css_variables(), which reads self._pal.
+            self._pal = shedos_palette.load()
+            _apply_palette(self._pal)
             super().__init__()
             self.conflicts = list(conflicts)
             self.start_file = start_file
@@ -4044,8 +4057,35 @@ MERGE SCREEN
             self.merge_state: Optional[MergeState] = None
             self.current_hunk: int = 0
 
+        def get_css_variables(self):
+            v = super().get_css_variables()
+            v.update({f"sh-{k}": val for k, val in self._pal.items()})
+            return v
+
         def on_mount(self) -> None:
             self.push_screen(ReviewScreen(self))
+            self._theme_stamp = shedos_palette.applied_stamp()
+            self.set_interval(1.0, self._poll_theme)
+
+        def _poll_theme(self) -> None:
+            s = shedos_palette.applied_stamp()
+            if s != self._theme_stamp:
+                self._theme_stamp = s
+                self._pal = shedos_palette.load()
+                _apply_palette(self._pal)
+                self.refresh_css()
+                self._restyle_content()
+
+        def _restyle_content(self) -> None:
+            # CSS variables cover the chrome; the diff/merge panes paint their
+            # own Rich Text from THEME/PALETTE, so re-render them so the
+            # syntax + tag colours pick up the new palette.
+            for s in self.screen_stack:
+                if isinstance(s, ReviewScreen):
+                    if s.merge.rows:
+                        s.merge._render_all()
+                    if s.state is not None:
+                        s.strip.update_from(s.state, s.current)
 
         def open_conflict(self, c: Conflict) -> None:
             if c.kind == "binary":

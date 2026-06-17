@@ -277,66 +277,65 @@ def build_app_class():
             DataTable, Footer, Header, Input, Label, RichLog, Static,
         )
         from textual import work
+        _lib_root = os.environ.get("SHEDOS_LIB_ROOT", "/usr/lib/shedos")
+        if _lib_root not in sys.path:
+            sys.path.insert(0, _lib_root)
+        import shedos_palette
     except Exception as e:
         raise RuntimeError(
             f"shedman logs: Textual not available ({e}). "
             f"Install python-textual."
         ) from e
 
-    PALETTE = {
-        "base": "#1e1e2e", "mantle": "#181825", "surface0": "#313244",
-        "text": "#cdd6f4", "overlay0": "#6c7086",
-        "green": "#a6e3a1", "red": "#f38ba8", "yellow": "#f9e2af",
-        "blue": "#89b4fa", "mauve": "#cba6f7", "peach": "#fab387",
-    }
-
     APP_CSS = """
-    Screen { background: #1e1e2e; color: #cdd6f4; }
-    Header { background: #181825; color: #89b4fa; }
-    Footer { background: #181825; color: #6c7086; }
+    Screen { background: $sh-base; color: $sh-text; }
+    Header { background: $sh-mantle; color: $sh-accent; }
+    Footer { background: $sh-mantle; color: $sh-overlay0; }
 
     #body { height: 1fr; }
     #units-pane {
         width: 40%; min-width: 32; max-width: 64;
-        border: round #313244; padding: 0;
+        border: round $sh-surface0; padding: 0;
     }
-    #units-pane.focus { border: round #89b4fa; }
+    #units-pane.focus { border: round $sh-accent; }
     #messages-pane {
-        width: 1fr; border: round #313244; padding: 0 1;
+        width: 1fr; border: round $sh-surface0; padding: 0 1;
     }
-    #messages-pane.focus { border: round #89b4fa; }
+    #messages-pane.focus { border: round $sh-accent; }
 
-    DataTable { background: #1e1e2e; }
-    DataTable > .datatable--header { background: #181825; color: #89b4fa; }
-    DataTable > .datatable--cursor { background: #313244; color: #cdd6f4; }
-    DataTable > .datatable--odd-row { background: #1e1e2e; }
+    DataTable { background: $sh-base; }
+    DataTable > .datatable--header { background: $sh-mantle; color: $sh-accent; }
+    DataTable > .datatable--cursor { background: $sh-surface0; color: $sh-text; }
+    DataTable > .datatable--odd-row { background: $sh-base; }
 
-    RichLog { background: #1e1e2e; color: #cdd6f4; scrollbar-color: #313244; }
+    RichLog { background: $sh-base; color: $sh-text; scrollbar-color: $sh-surface0; }
 
     #filter-bar {
-        dock: bottom; height: 1; background: #181825;
-        color: #cdd6f4; padding: 0 1;
+        dock: bottom; height: 1; background: $sh-mantle;
+        color: $sh-text; padding: 0 1;
     }
     #status-line {
-        dock: bottom; height: 1; background: #181825;
-        color: #6c7086; padding: 0 1;
+        dock: bottom; height: 1; background: $sh-mantle;
+        color: $sh-overlay0; padding: 0 1;
     }
-    #status-line.ok { color: #a6e3a1; }
-    #status-line.err { color: #f38ba8; }
-    #status-line.stream { color: #fab387; }
+    #status-line.ok { color: $sh-green; }
+    #status-line.err { color: $sh-red; }
+    #status-line.stream { color: $sh-peach; }
 
     ModalScreen { align: center middle; }
-    .dialog { border: thick #89b4fa; background: #181825; width: 60;
+    .dialog { border: thick $sh-accent; background: $sh-mantle; width: 60;
               height: auto; padding: 1 2; }
-    .dialog-title { color: #89b4fa; text-style: bold; }
-    .dialog-hint { color: #6c7086; }
+    .dialog-title { color: $sh-accent; text-style: bold; }
+    .dialog-hint { color: $sh-overlay0; }
     #help-box { width: 70; }
     """
 
     class HelpScreen(ModalScreen):
         BINDINGS = [Binding("escape,?,q", "app.pop_screen", "close")]
 
-        HELP = """[b]shedman logs[/b]  keybindings
+        def _help_text(self) -> str:
+            dim = self.app._pal["overlay0"]
+            return f"""[b]shedman logs[/b]  keybindings
 
   [b]j / k[/b]        cursor down / up in unit list
   [b]enter[/b]       load messages for selected unit
@@ -350,12 +349,12 @@ def build_app_class():
   [b]?[/b]           this help
   [b]q[/b]           quit
 
-[#6c7086]esc closes help.[/]
+[{dim}]esc closes help.[/]
 """
 
         def compose(self) -> ComposeResult:
             with Vertical(classes="dialog", id="help-box"):
-                yield Label(self.HELP)
+                yield Label(self._help_text())
 
     class RegexPromptScreen(ModalScreen):
         BINDINGS = [
@@ -399,6 +398,9 @@ def build_app_class():
         ]
 
         def __init__(self) -> None:
+            # Before super().__init__(): Textual's App.__init__ builds the
+            # stylesheet via get_css_variables(), which reads self._pal.
+            self._pal = shedos_palette.load()
             super().__init__()
             self.filters = FilterState()
             self.selected_unit: Optional[str] = None
@@ -406,6 +408,11 @@ def build_app_class():
             self._stream_proc: Optional[subprocess.Popen] = None
             self._ring: collections.deque[str] = collections.deque(
                 maxlen=RING_CAPACITY)
+
+        def get_css_variables(self):
+            v = super().get_css_variables()
+            v.update({f"sh-{k}": val for k, val in self._pal.items()})
+            return v
 
         # -------- layout --------------------------------------------------
 
@@ -428,6 +435,22 @@ def build_app_class():
             self.query_one(DataTable).focus()
             self._refresh_filter_bar()
             self.action_refresh_units()
+            self._theme_stamp = shedos_palette.applied_stamp()
+            self.set_interval(1.0, self._poll_theme)
+
+        def _poll_theme(self) -> None:
+            s = shedos_palette.applied_stamp()
+            if s != self._theme_stamp:
+                self._theme_stamp = s
+                self._pal = shedos_palette.load()
+                self.refresh_css()
+                self._restyle_content()
+
+        def _restyle_content(self) -> None:
+            # The status line, panes, and tables are all CSS-styled, and the
+            # help screen rebuilds its markup from the palette each time it
+            # opens, so refresh_css covers everything we paint here.
+            pass
 
         # -------- actions --------------------------------------------------
 

@@ -376,44 +376,41 @@ def build_app_class():
         )
         from textual import work
         from rich.text import Text
+        _lib_root = os.environ.get("SHEDOS_LIB_ROOT", "/usr/lib/shedos")
+        if _lib_root not in sys.path:
+            sys.path.insert(0, _lib_root)
+        import shedos_palette
     except Exception as e:
         raise RuntimeError(
             f"shedman update --history: Textual not available ({e}). "
             f"Install python-textual."
         ) from e
 
-    PALETTE = {
-        "base": "#1e1e2e", "mantle": "#181825", "surface0": "#313244",
-        "text": "#cdd6f4", "overlay0": "#6c7086",
-        "green": "#a6e3a1", "red": "#f38ba8", "yellow": "#f9e2af",
-        "blue": "#89b4fa", "mauve": "#cba6f7", "peach": "#fab387",
-    }
-
     APP_CSS = """
-    Screen { background: #1e1e2e; color: #cdd6f4; }
-    Header { background: #181825; color: #89b4fa; }
-    Footer { background: #181825; color: #6c7086; }
+    Screen { background: $sh-base; color: $sh-text; }
+    Header { background: $sh-mantle; color: $sh-accent; }
+    Footer { background: $sh-mantle; color: $sh-overlay0; }
 
     #body { height: 1fr; }
-    #runs-pane { border: round #313244; padding: 0; height: 1fr; }
-    #runs-pane.focus { border: round #89b4fa; }
-    DataTable { background: #1e1e2e; }
-    DataTable > .datatable--header { background: #181825; color: #89b4fa; }
-    DataTable > .datatable--cursor { background: #313244; color: #cdd6f4; }
+    #runs-pane { border: round $sh-surface0; padding: 0; height: 1fr; }
+    #runs-pane.focus { border: round $sh-accent; }
+    DataTable { background: $sh-base; }
+    DataTable > .datatable--header { background: $sh-mantle; color: $sh-accent; }
+    DataTable > .datatable--cursor { background: $sh-surface0; color: $sh-text; }
 
     #status-line {
-        dock: bottom; height: 1; background: #181825;
-        color: #6c7086; padding: 0 1;
+        dock: bottom; height: 1; background: $sh-mantle;
+        color: $sh-overlay0; padding: 0 1;
     }
-    #status-line.ok { color: #a6e3a1; }
-    #status-line.err { color: #f38ba8; }
-    #status-line.warn { color: #fab387; }
+    #status-line.ok { color: $sh-green; }
+    #status-line.err { color: $sh-red; }
+    #status-line.warn { color: $sh-peach; }
 
     ModalScreen { align: center middle; }
-    .dialog { border: thick #89b4fa; background: #181825; width: 60;
+    .dialog { border: thick $sh-accent; background: $sh-mantle; width: 60;
               height: auto; padding: 1 2; }
-    .dialog-title { color: #89b4fa; text-style: bold; }
-    .dialog-hint { color: #6c7086; }
+    .dialog-title { color: $sh-accent; text-style: bold; }
+    .dialog-hint { color: $sh-overlay0; }
 
     #diff-box { width: 80%; height: 80%; }
     #diff-body { height: 1fr; padding: 1 2; }
@@ -423,7 +420,9 @@ def build_app_class():
     class HelpScreen(ModalScreen):
         BINDINGS = [Binding("escape,?,q", "app.pop_screen", "close")]
 
-        HELP = """[b]shedman update --history[/b]  keybindings
+        def _help_text(self) -> str:
+            dim = self.app._pal["overlay0"]
+            return f"""[b]shedman update --history[/b]  keybindings
 
   [b]j / k[/b]        cursor down / up
   [b]enter[/b]       show package diff for the selected run
@@ -432,12 +431,12 @@ def build_app_class():
   [b]?[/b]           this help
   [b]q[/b]           quit
 
-[#6c7086]esc closes help / modals.[/]
+[{dim}]esc closes help / modals.[/]
 """
 
         def compose(self) -> ComposeResult:
             with Vertical(classes="dialog", id="help-box"):
-                yield Label(self.HELP)
+                yield Label(self._help_text())
 
     class ConfirmScreen(ModalScreen):
         BINDINGS = [
@@ -482,26 +481,27 @@ def build_app_class():
                 yield Label("[esc] close", classes="dialog-hint")
 
         def _render_body(self) -> Text:
+            pal = self.app._pal
             if not self._changes:
                 return Text("(no pacman package changes recorded)",
-                            style=PALETTE["overlay0"])
+                            style=pal["overlay0"])
             body = Text()
             added, removed, updated = summarize_changes(self._changes)
             body.append(
                 f"{added} added  {updated} updated  {removed} removed\n\n",
-                style=PALETTE["blue"],
+                style=pal["accent"],
             )
             for c in self._changes:
                 if c.kind == "added":
                     body.append(f"+ {c.name} {c.to_version}\n",
-                                style=PALETTE["green"])
+                                style=pal["green"])
                 elif c.kind == "removed":
                     body.append(f"- {c.name} {c.from_version}\n",
-                                style=PALETTE["red"])
+                                style=pal["red"])
                 else:  # updated
                     body.append(
                         f"~ {c.name} {c.from_version} → {c.to_version}\n",
-                        style=PALETTE["yellow"],
+                        style=pal["yellow"],
                     )
             return body
 
@@ -519,12 +519,20 @@ def build_app_class():
         ]
 
         def __init__(self) -> None:
+            # Before super().__init__(): Textual's App.__init__ builds the
+            # stylesheet via get_css_variables(), which reads self._pal.
+            self._pal = shedos_palette.load()
             super().__init__()
             self.view: HistoryView = HistoryView()
             self._row_lookup: dict[str, UpgradeRun] = {}
             self._manual_rows: dict[str, Snapshot] = {}
             # Set on rollback confirm; _run_app runs it after the TUI exits.
             self._pending_rollback: Optional[int] = None
+
+        def get_css_variables(self):
+            v = super().get_css_variables()
+            v.update({f"sh-{k}": val for k, val in self._pal.items()})
+            return v
 
         def compose(self) -> ComposeResult:
             yield Header(show_clock=False)
@@ -538,6 +546,22 @@ def build_app_class():
         def on_mount(self) -> None:
             self.query_one(DataTable).focus()
             self.action_refresh()
+            self._theme_stamp = shedos_palette.applied_stamp()
+            self.set_interval(1.0, self._poll_theme)
+
+        def _poll_theme(self) -> None:
+            s = shedos_palette.applied_stamp()
+            if s != self._theme_stamp:
+                self._theme_stamp = s
+                self._pal = shedos_palette.load()
+                self.refresh_css()
+                self._restyle_content()
+
+        def _restyle_content(self) -> None:
+            # Nothing to repaint by hand: the run table is CSS-styled, so
+            # refresh_css re-themes it without disturbing the cursor, and the
+            # diff/help modals rebuild their palette-driven markup on open.
+            pass
 
         # -------- refresh / populate ---------------------------------------
 

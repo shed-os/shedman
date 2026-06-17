@@ -198,13 +198,27 @@ def _run_watch(libexec: Path, interval: float) -> int:
     try:
         from textual.app import App, ComposeResult  # noqa: PLC0415
         from textual.containers import Vertical  # noqa: PLC0415
+        from textual.theme import Theme as _TextualTheme  # noqa: PLC0415
         from textual.widgets import (  # noqa: PLC0415
             DataTable, Footer, Header, Static,
         )
+        _lib_root = os.environ.get("SHEDOS_LIB_ROOT", "/usr/lib/shedos")
+        if _lib_root not in sys.path:
+            sys.path.insert(0, _lib_root)
+        import shedos_palette  # noqa: PLC0415
     except ImportError:
         print("shedman status --watch: python-textual not installed",
               file=sys.stderr)
         return 2
+
+    def _shedos_theme(pal):
+        return _TextualTheme(
+            name="shedos", primary=pal["accent"],
+            secondary=pal["accent_secondary"], accent=pal["accent"],
+            foreground=pal["text"], background=pal["base"],
+            success=pal["green"], warning=pal["yellow"], error=pal["red"],
+            surface=pal["surface0"], panel=pal["mantle"], dark=True,
+        )
 
     class StatusWatchApp(App):
         TITLE = "shedman status"
@@ -215,6 +229,7 @@ def _run_watch(libexec: Path, interval: float) -> int:
         """
 
         def __init__(self, libexec_path: Path, refresh_s: float) -> None:
+            self._pal = shedos_palette.load()
             super().__init__()
             self._libexec = libexec_path
             self._refresh_s = refresh_s
@@ -228,6 +243,10 @@ def _run_watch(libexec: Path, interval: float) -> int:
             yield Footer()
 
         def on_mount(self) -> None:
+            self.register_theme(_shedos_theme(self._pal))
+            self.theme = "shedos"
+            self._theme_stamp = shedos_palette.applied_stamp()
+            self.set_interval(1.0, self._poll_theme)
             tbl = self.query_one("#signals", DataTable)
             tbl.add_column("signal", key="signal")
             tbl.add_column("status", key="status")
@@ -235,6 +254,15 @@ def _run_watch(libexec: Path, interval: float) -> int:
                 tbl.add_row(name, "—", key=name)
             self._refresh()
             self.set_interval(self._refresh_s, self._refresh)
+
+        def _poll_theme(self) -> None:
+            s = shedos_palette.applied_stamp()
+            if s != self._theme_stamp:
+                self._theme_stamp = s
+                self._pal = shedos_palette.load()
+                self.register_theme(_shedos_theme(self._pal))
+                self.theme = "shedos"
+                self.refresh_css()
 
         def _refresh(self) -> None:
             sections = {n: _run_signal(self._libexec, n) for n in SIGNALS}
