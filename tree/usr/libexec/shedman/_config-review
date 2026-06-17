@@ -487,6 +487,12 @@ def scan_conflicts() -> tuple[list[Conflict], list[str]]:
     cfg = get_exclude_config()
     for dirpath, dirnames, filenames in os.walk(HOME, followlinks=False):
         rel_dir = os.path.relpath(dirpath, HOME)
+        # shedman only writes .shedosnew at dot-rooted paths (it mirrors
+        # /etc/skel), so skip non-dot top-level trees (~/Projects,
+        # ~/shedos-shots): a .shedosnew there is a user artifact, not a
+        # managed conflict.
+        if rel_dir == ".":
+            dirnames[:] = [d for d in dirnames if d.startswith(".")]
         # Silently prune git working trees (other than $HOME itself, so
         # users tracking their dotfiles in a HOME-level repo still scan).
         if (
