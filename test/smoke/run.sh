@@ -12,6 +12,10 @@ set -uo pipefail
 
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 repo_root=$(cd -- "$here/../.." && pwd)
+# datetime (themed TUI) imports the shared shedos_palette module from
+# SHEDOS_LIB_ROOT (default /usr/lib/shedos, the installed path); point it
+# at the tree so even `--help-summary` can load the module.
+export SHEDOS_LIB_ROOT="$repo_root/packaging/shedos-system/tree/usr/lib/shedos"
 
 pass=0 fail=0
 failures=()
