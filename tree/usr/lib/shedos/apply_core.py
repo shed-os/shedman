@@ -316,9 +316,13 @@ class SchemaError(ValueError):
     pass
 
 
+# `theme` and `login` are tolerated but never reconciled here: the
+# theme renderer owns [theme] and the greeter/lock screen own [login]
+# (set via `shedman theme` / `shedman login`). They are allowlisted so a
+# system.toml carrying them does not trip the unknown-key check.
 _ALLOWED_TOP = {"schema", "systemd", "drop-ins", "snapper",
                 "pacman", "services", "network", "security", "fs",
-                "kernel", "users", "groups", "theme"}
+                "kernel", "users", "groups", "theme", "login"}
 _ALLOWED_SYSTEMD = {"system", "user"}
 _ALLOWED_SYSTEMD_SUB = {"enable", "disable"}
 _ALLOWED_SNAPPER = {"timeline", "cleanup"}

@@ -132,7 +132,8 @@ the per-command man pages.
 *shedman-install*(1), *shedman-services*(1), *shedman-health*(1),
 *shedman-updates*(1), *shedman-conflicts*(1), *shedman-kernel*(1),
 *shedman-logs*(1), *shedman-upgrade-history*(1), *shedman-db*(1),
-*shedman-theme*(1), *shedman-lock*(1), *shedman-dock*(1),
+*shedman-theme*(1), *shedman-lock*(1), *shedman-login*(1),
+*shedman-dock*(1),
 *pacman*(8), *yay*(8).
 
 The web reference at https://shedos.org/docs/commands covers every

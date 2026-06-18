@@ -1,0 +1,11 @@
+schema = 1
+
+# [theme] and [login] are owned by `shedman theme` / `shedman login` and
+# read by the renderer and the login screens, not by apply. They must be
+# tolerated (allowlisted in _ALLOWED_TOP) so a real system.toml carrying
+# them does not trip the unknown-top-level-key check and break apply.
+[theme]
+palette = "catppuccin-mocha-blue"
+
+[login]
+show_username = false
