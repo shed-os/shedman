@@ -63,6 +63,13 @@ def boot_root() -> Path:
     return Path(os.environ.get("SHEDOS_APPLY_BOOT_ROOT", "/boot"))
 
 
+def kernel_cmdline_file() -> Path:
+    # The cmdline now lives inside the signed UKI, sourced from this file; it
+    # replaced limine.conf's kernel_cmdline: line as the reconciler's surface.
+    return Path(os.environ.get(
+        "SHEDOS_KERNEL_CMDLINE_FILE", str(etc_root() / "kernel/cmdline")))
+
+
 def ufw_cmd() -> list[str]:
     raw = os.environ.get("SHEDOS_APPLY_UFW", "ufw")
     return shlex.split(raw)
@@ -2900,88 +2907,40 @@ def _render_system_toml_with_mounts(
     return tomlkit.dumps(doc)
 
 
-# Reconciler: kernel.cmdline; declarative Limine kernel cmdline tokens
-# with baseline protection.
+# Reconciler: kernel.cmdline; declarative kernel cmdline tokens with
+# baseline protection.
 #
 # Posture: reconcile (non-baseline tokens only). Install-time tokens
 # (root=, quiet, splash, …) are baseline-protected forever.
 #
 # Identity = single token string.
 #
-# Live source: /boot/limine.conf (or $SHEDOS_APPLY_BOOT_ROOT/limine.conf).
-# We locate the default entry's `kernel_cmdline:` line and parse tokens
-# whitespace-separated. The keyword set covers Limine's modern syntax
-# (kernel_cmdline, with `:` separator) and the legacy GRUB-flavored
-# variants (cmdline / CMD_LINE / KERNEL_CMDLINE, with `=`) for tests.
+# Live source: /etc/kernel/cmdline (a single whitespace-separated line;
+# SHEDOS_KERNEL_CMDLINE_FILE overrides it for tests). The cmdline lives
+# inside the signed UKI now — on a change we rewrite this file plus the
+# quiet/splash-stripped fallback and re-sign the UKI from them.
 
 
-_LIMINE_CMDLINE_RE = re.compile(
-    r"^(?P<lead>\s*(?:kernel_cmdline|cmdline|CMD_LINE|KERNEL_CMDLINE)\s*[=:])\s*(?P<tokens>.*)$",
-    re.MULTILINE,
-)
-
-_ESP_LIMINE_MIRRORS = (
-    "/boot/efi/EFI/limine/limine.conf",
-    "/boot/efi/limine.conf",
-    "/efi/EFI/limine/limine.conf",
-    "/efi/limine.conf",
-)
-
-
-def _sync_limine_to_esp(text: str) -> None:
-    # The mirror list is real absolute ESP paths; under a test/sandbox
-    # boot-root override, writing them would touch the host's ESP.
-    if os.environ.get("SHEDOS_APPLY_BOOT_ROOT"):
+def _resign_uki() -> None:
+    # The cmdline now lives inside the signed UKI; build-uki.sh re-bundles
+    # /etc/kernel/cmdline into each kernel's UKI and re-signs it onto the ESP.
+    # Skip under a test/sandbox override (no real ESP to write).
+    if os.environ.get("SHEDOS_APPLY_BOOT_ROOT") or os.environ.get("SHEDOS_KERNEL_CMDLINE_FILE"):
         return
-    for path_str in _ESP_LIMINE_MIRRORS:
-        p = Path(path_str)
-        if p.exists():
-            try:
-                atomic_write_text(p, text, mode=0o644)
-            except OSError as exc:
-                # Don't swallow it. A full ESP means this cmdline change
-                # never reaches the FAT volume Limine actually boots from,
-                # so the next boot would silently use the old cmdline. The
-                # write to /boot already succeeded and atomic_write_text
-                # leaves the previous ESP config intact, so warn rather
-                # than report success over the miss.
-                print(
-                    f"shedman: WARNING: could not mirror limine.conf to {p}: {exc}. "
-                    "The boot volume may be full; this kernel cmdline change will not "
-                    "take effect until it is synced — free ESP space, then run: "
-                    "sudo /usr/lib/shedos/render-limine-config.sh",
-                    file=sys.stderr,
-                )
-
-
-def _read_limine_config() -> tuple[Optional[Path], Optional[str]]:
-    """Return (path, text) for the Limine config or (None, None) if
-    not present. Tries the `boot:` mount first, then the legacy
-    `/boot/limine.conf` location."""
-    root = boot_root()
-    for cand in ("limine.conf", "limine.cfg"):
-        p = root / cand
-        if p.exists():
-            try:
-                return p, p.read_text(encoding="utf-8")
-            except OSError:
-                return p, None
-    return None, None
-
-
-def _parse_limine_cmdlines_all(text: str) -> list[tuple[str, str, list[str]]]:
-    """Find every cmdline assignment line. Returns list of
-    (whole_line, lead_text, tokens) tuples in document order. The
-    first entry is the default kernel; later entries are typically
-    fallback or alternate kernels. Each entry has its own install-
-    time tokens that we preserve, but they all share the same
-    declared additions from [kernel.cmdline].append."""
-    out: list[tuple[str, str, list[str]]] = []
-    for m in _LIMINE_CMDLINE_RE.finditer(text):
-        line = m.group(0)
-        tokens = m.group("tokens").split()
-        out.append((line, m.group("lead"), tokens))
-    return out
+    builder = "/usr/lib/shedos/build-uki.sh"
+    if not os.path.exists(builder):
+        return
+    try:
+        subprocess.run([builder, "--rebuild"], check=True)
+    except (OSError, subprocess.CalledProcessError) as exc:
+        # A full ESP or a failed sign means the new cmdline never reaches the
+        # UKI the firmware boots — warn rather than report success over the miss.
+        print(
+            f"shedman: WARNING: boot-image re-sign failed: {exc}. The kernel "
+            "cmdline change will not take effect until it is re-signed — free ESP "
+            "space, then run: sudo /usr/lib/shedos/recover-esp.sh",
+            file=sys.stderr,
+        )
 
 
 def plan_kernel_cmdline(cfg: ValidatedConfig) -> list[Change]:
@@ -2993,20 +2952,18 @@ def plan_kernel_cmdline(cfg: ValidatedConfig) -> list[Change]:
     baseline_p = baseline_path(section_name)
     config_p = config_path()
 
-    limine_path, limine_text = _read_limine_config()
-    if limine_path is None or limine_text is None:
-        # No Limine config to manage; silently skip (this is a normal
-        # state on systems that use a different bootloader, or in tests
-        # without /boot fixtures).
+    cmd_path = kernel_cmdline_file()
+    try:
+        live_text = cmd_path.read_text(encoding="utf-8")
+    except OSError:
+        # No /etc/kernel/cmdline to manage (a different bootloader, or a test
+        # without the fixture). Silently skip, matching the old no-config state.
         return []
-
-    entries = _parse_limine_cmdlines_all(limine_text)
-    if not entries:
-        raise SchemaError(
-            f"could not find a kernel_cmdline: line in {limine_path}; "
-            f"unsupported Limine config format. Please file an issue."
-        )
-    live_tokens = entries[0][2]
+    # A box that has not migrated to the signed UKI still ships the placeholder;
+    # never reconcile that into a UKI before the cmdline is real.
+    if "SHEDOS_PLACEHOLDER_CMDLINE" in live_text:
+        return []
+    live_tokens = live_text.split()
 
     declared_set: set[tuple] = {(t,) for t in cfg.kernel.cmdline.append}
     live_set: set[tuple] = {(t,) for t in live_tokens}
@@ -3072,79 +3029,43 @@ def plan_kernel_cmdline(cfg: ValidatedConfig) -> list[Change]:
             primary_target.append(tok)
             seen.add(tok)
 
-    # Build new_limine_text by updating every kernel_cmdline entry.
-    # The primary entry uses the baseline-aware target above. Non-
-    # primary entries (typically fallback kernels) get a simpler pass:
-    # preserve everything they currently have except formerly-declared
-    # tokens that are no longer in the declaration, then ensure all
-    # currently-declared (or adopted) tokens are present. That way each
-    # entry keeps its own install-time tokens (e.g. the fallback's
-    # bare-essentials root=/rootflags=/rw) while sharing the declared
-    # additions like fbcon=nodefer.
-    #
-    # We use re.sub with a callable rather than str.replace because a
-    # fallback whose tokens are a strict prefix of the primary's
-    # (typical: minimal essentials vs essentials+decorations) would
-    # collide with str.replace; the fallback's full line text appears
-    # as a substring inside the primary line and replace would patch
-    # the wrong occurrence. re.sub walks matches in document order and
-    # stitches replacements by position, which sidesteps the overlap.
-    declared_strs: set[str] = {t[0] for t in declared_set} | {
-        t[0] for t in merge.to_adopt
-    }
-    formerly_declared_strs: set[str] = {
-        t[0] for t in (last_applied - declared_set)
-    }
-
-    n_entries_changed = 0
-    match_idx = [0]
-
-    def _entry_replacement(m: "re.Match[str]") -> str:
-        nonlocal n_entries_changed
-        idx = match_idx[0]
-        match_idx[0] += 1
-        line = m.group(0)
-        lead = m.group("lead")
-        entry_tokens = m.group("tokens").split()
-        if idx == 0:
-            entry_target = primary_target
-        else:
-            kept = [t for t in entry_tokens if t not in formerly_declared_strs]
-            kept_set = set(kept)
-            additions = sorted(t for t in declared_strs if t not in kept_set)
-            entry_target = kept + additions
-        if entry_target == entry_tokens:
-            return line
-        n_entries_changed += 1
-        return lead + " " + " ".join(entry_target)
-
-    new_limine_text = _LIMINE_CMDLINE_RE.sub(_entry_replacement, limine_text)
-    any_changed = new_limine_text != limine_text
+    # The cmdline is a single line in /etc/kernel/cmdline; write the merged
+    # tokens there and re-derive the fallback (primary minus quiet/splash —
+    # the same form the installer and the migration backfill write). build-uki
+    # re-bundles both into the signed UKI the firmware actually boots.
+    new_cmdline = " ".join(primary_target)
+    new_text = new_cmdline + "\n"
+    any_changed = new_text != live_text
+    fb_path = cmd_path.with_name("cmdline-fallback")
+    fb_text = " ".join(t for t in primary_target if t not in ("quiet", "splash")) + "\n"
 
     if any_changed:
         diff_iter = difflib.unified_diff(
-            limine_text.splitlines(keepends=True),
-            new_limine_text.splitlines(keepends=True),
-            fromfile=f"{limine_path.name} (current)",
-            tofile=f"{limine_path.name} (declared)",
+            live_text.splitlines(keepends=True),
+            new_text.splitlines(keepends=True),
+            fromfile=f"{cmd_path.name} (current)",
+            tofile=f"{cmd_path.name} (declared)",
             lineterm="",
         )
         diff = "".join(l if l.endswith("\n") else l + "\n" for l in diff_iter)
         n_added = len(merge.to_add)
         n_removed = len(merge.to_remove)
-        suffix = f" across {n_entries_changed} entries" if len(entries) > 1 else ""
         summary = (f"reboot to apply: cmdline +{n_added} -{n_removed} "
-                   f"token(s){suffix}")
+                   f"token(s) (re-signs the boot image)")
 
         def apply_cmdline() -> None:
             _seed_baseline()
-            atomic_write_text(limine_path, new_limine_text, mode=0o644)
-            _sync_limine_to_esp(new_limine_text)
+            atomic_write_text(cmd_path, new_text, mode=0o644)
+            atomic_write_text(fb_path, fb_text, mode=0o644)
+            _resign_uki()
             save_state_set(state_p, declared_set | merge.to_adopt)
 
         def undo_cmdline() -> None:
-            atomic_write_text(limine_path, limine_text, mode=0o644)
-            _sync_limine_to_esp(limine_text)
+            atomic_write_text(cmd_path, live_text, mode=0o644)
+            old_fb = " ".join(
+                t for t in live_tokens if t not in ("quiet", "splash")) + "\n"
+            atomic_write_text(fb_path, old_fb, mode=0o644)
+            _resign_uki()
 
         changes.append(Change(
             kind="~", section="kernel.cmdline",

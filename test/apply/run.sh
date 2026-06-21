@@ -233,6 +233,8 @@ STUB
     _file_eq   "SYSTEM_TOML" "$fdir/expected-system.toml"     "$etc/shedos/system.toml"    || bad=1
     _file_eq   "FSTAB"       "$fdir/expected-fstab"           "$etc/fstab"                 || bad=1
     _file_eq   "LIMINE_CONF" "$fdir/expected-limine.conf"     "$boot_dir/limine.conf"      || bad=1
+    _file_eq   "KERNEL_CMDLINE"    "$fdir/expected-kernel-cmdline"          "$etc/kernel/cmdline"          || bad=1
+    _file_eq   "KERNEL_CMDLINE_FB" "$fdir/expected-kernel-cmdline-fallback" "$etc/kernel/cmdline-fallback" || bad=1
     _file_eq   "USERS"       "$fdir/expected-users.txt"       "$tmp/users.log"             || bad=1
 
     if (( bad )); then

@@ -1,0 +1,1 @@
+root=PARTUUID=11111111 rw quiet ipv6.disable=1 nvidia_drm.modeset=1

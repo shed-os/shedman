@@ -16,8 +16,9 @@ declared section against the live system. Reconcilers in scope:
 *[snapper]* (timeline + cleanup), *[pacman.repos]* (/etc/pacman.conf
 fence), *[services.postgresql]* (auto-init + per-user-db),
 *[network.firewall]* (ufw), *[security.keyring]* (pacman-key trust),
-*[fs.mounts]* (/etc/fstab fence), *[kernel.cmdline]* (Limine append
-tokens), *[[users]] / [[groups]]* (additive only).
+*[fs.mounts]* (/etc/fstab fence), *[kernel.cmdline]* (kernel
+command-line append tokens, baked into the signed boot image),
+*[[users]] / [[groups]]* (additive only).
 
 Each section can be edited via either the TOML file or the underlying
 tool (e.g. *ufw allow*, *pacman-key --lsign-key*). Hand-made changes
@@ -66,8 +67,12 @@ reconciler thereafter.
 *SHEDOS_APPLY_STATE_ROOT*
 	Override /var/lib/shedos.
 
+*SHEDOS_KERNEL_CMDLINE_FILE*
+	Override /etc/kernel/cmdline (the *[kernel.cmdline]* surface; its
+	tokens are baked into the signed boot image from there).
+
 *SHEDOS_APPLY_BOOT_ROOT*
-	Override /boot (used by *[kernel.cmdline]*).
+	Override /boot; also suppresses the boot-image re-sign under tests.
 
 *SHEDOS_APPLY_UFW*, *SHEDOS_APPLY_PACMAN_KEY*, *SHEDOS_APPLY_SYSTEMCTL*, *SHEDOS_APPLY_FSTAB_PATH*
 	Override the corresponding tool / file path for fixture-driven
@@ -82,8 +87,7 @@ reconciler thereafter.
 	Apply failed and was rolled back, or user aborted at the prompt.
 
 *2*
-	Schema or environment-shape error (TOML invalid, fstab malformed,
-	limine.conf parser failure).
+	Schema or environment-shape error (TOML invalid, fstab malformed).
 
 # SEE ALSO
 
