@@ -97,6 +97,10 @@ The headline set:
 	Manage TPM2-backed passwordless unlock for the encrypted disk. See
 	*shedman-tpm2*(1).
 
+*shedman key*
+	Change the passphrase, rotate the recovery key, and add or remove
+	keyslots on the encrypted disk. See *shedman-key*(1).
+
 *shedman tour*
 	Replay the first-run welcome tour overlay. See
 	*shedos-tour*(1).
@@ -142,7 +146,7 @@ the per-command man pages.
 *shedman-logs*(1), *shedman-upgrade-history*(1), *shedman-db*(1),
 *shedman-theme*(1), *shedman-lock*(1), *shedman-login*(1),
 *shedman-dock*(1), *shedman-secureboot*(1), *shedman-tpm2*(1),
-*pacman*(8), *yay*(8).
+*shedman-key*(1), *pacman*(8), *yay*(8).
 
 The web reference at https://shedos.org/docs/commands covers every
 subcommand and flag with examples.
