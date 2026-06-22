@@ -28,6 +28,8 @@ PAGES=(
     shedman-rollback.1
     shedman-config.1
     shedman-status.1
+    shedman-secureboot.1
+    shedman-tpm2.1
 )
 
 # Skip gracefully if scdoc isn't installed (mirrors the T6 zsh -n

@@ -111,4 +111,4 @@ _BOOT_ROOT.
 
 # SEE ALSO
 
-*shedman*(1), *shedman-apply*(1).
+*shedman*(1), *shedman-apply*(1), *shedman-secureboot*(1).
