@@ -438,6 +438,129 @@ def case_missed_outranks_drift_in_pill(td: Path) -> None:
     assert "drift item(s)" in wb["tooltip"], wb
 
 
+_SIGNING_UKI_CONF = (
+    "[UKI]\n"
+    "Stub=/usr/lib/systemd/boot/efi/linuxx64.efi.stub\n"
+    "SecureBootPrivateKey=/var/lib/sbctl/keys/db/db.key\n"
+    "SecureBootCertificate=/var/lib/sbctl/keys/db/db.pem\n"
+)
+_KEYLESS_UKI_CONF = "[UKI]\nStub=/usr/lib/systemd/boot/efi/linuxx64.efi.stub\n"
+
+
+def _sb_env(td: Path, *, conf: str, sb_on: bool, setup: bool = False
+            ) -> dict[str, str]:
+    """Stub a uki.conf + SecureBoot/SetupMode efivars (a 4-byte attribute
+    prefix + a 1-byte value) and point doctor at them. Defaults the db cert to
+    an unreadable path so the signature half stays empty unless a case sets it."""
+    conf_path = td / "uki.conf"; conf_path.write_text(conf)
+    sb = td / "efivar-SecureBoot"
+    sb.write_bytes(b"\x06\x00\x00\x00" + bytes([1 if sb_on else 0]))
+    sm = td / "efivar-SetupMode"
+    sm.write_bytes(b"\x06\x00\x00\x00" + bytes([1 if setup else 0]))
+    return {
+        "SHEDOS_DOCTOR_UKI_CONF":          str(conf_path),
+        "SHEDOS_DOCTOR_SECUREBOOT_EFIVAR": str(sb),
+        "SHEDOS_DOCTOR_SETUPMODE_EFIVAR":  str(sm),
+        "SHEDOS_DOCTOR_DB_CERT":           str(td / "no-such-db.pem"),
+    }
+
+
+def case_secureboot_off_warns(td: Path) -> None:
+    _setup(td, toml='schema = 1\n')
+    r = _run(td, env_extra=_sb_env(td, conf=_SIGNING_UKI_CONF, sb_on=False))
+    assert r.returncode == 1, (r.returncode, r.stdout, r.stderr)
+    assert "Secure Boot is set up" in r.stdout, r.stdout
+    assert "currently off" in r.stdout, r.stdout
+
+
+def case_secureboot_off_waybar(td: Path) -> None:
+    _setup(td, toml='schema = 1\n')
+    r = _run(td, "--waybar",
+             env_extra=_sb_env(td, conf=_SIGNING_UKI_CONF, sb_on=False))
+    assert r.returncode == 0
+    wb = json.loads(r.stdout)
+    assert wb["class"] == "bootsec", wb
+    assert "Secure Boot" in wb["tooltip"], wb
+    assert wb["text"] != ""
+
+
+def case_secureboot_on_is_clean(td: Path) -> None:
+    _setup(td, toml='schema = 1\n')
+    r = _run(td, env_extra=_sb_env(td, conf=_SIGNING_UKI_CONF, sb_on=True))
+    assert r.returncode == 0, (r.returncode, r.stdout)
+    assert "Secure Boot" not in r.stdout, r.stdout
+
+
+def case_secureboot_keyless_is_clean(td: Path) -> None:
+    # Keyless uki.conf = box never enrolled; SB off is normal, never flagged.
+    _setup(td, toml='schema = 1\n')
+    r = _run(td, env_extra=_sb_env(td, conf=_KEYLESS_UKI_CONF, sb_on=False))
+    assert r.returncode == 0, (r.returncode, r.stdout)
+    assert "Secure Boot" not in r.stdout, r.stdout
+
+
+def case_secureboot_setup_mode(td: Path) -> None:
+    _setup(td, toml='schema = 1\n')
+    r = _run(td, env_extra=_sb_env(td, conf=_SIGNING_UKI_CONF,
+                                   sb_on=False, setup=True))
+    assert r.returncode == 1, (r.returncode, r.stderr)
+    assert "Setup Mode" in r.stdout, r.stdout
+
+
+def case_secureboot_json(td: Path) -> None:
+    _setup(td, toml='schema = 1\n')
+    r = _run(td, "--json",
+             env_extra=_sb_env(td, conf=_SIGNING_UKI_CONF, sb_on=False))
+    assert r.returncode == 1
+    doc = json.loads(r.stdout)
+    assert any("currently off" in s for s in doc.get("secure_boot", [])), doc
+
+
+def _sig_env(td: Path, *, sbverify_rc: int) -> dict[str, str]:
+    """SB on + a readable stub db cert + a placed UKI + a stub sbverify, so the
+    signature backstop runs hermetically and non-root."""
+    env = _sb_env(td, conf=_SIGNING_UKI_CONF, sb_on=True)
+    db = td / "db.pem"; db.write_text("stub cert\n")
+    esp = td / "esp" / "EFI" / "Linux"; esp.mkdir(parents=True)
+    (esp / "shedos-linux-zen.efi").write_text("uki\n")
+    sv = td / "stubs" / "sbverify"
+    sv.write_text(f"#!/usr/bin/env bash\nexit {sbverify_rc}\n")
+    sv.chmod(0o755)
+    env.update({
+        "SHEDOS_DOCTOR_DB_CERT":   str(db),
+        "SHEDOS_DOCTOR_ESP_DIRS":  str(td / "esp"),
+        "SHEDOS_DOCTOR_SBVERIFY":  str(sv),
+    })
+    return env
+
+
+def case_uki_signature_bad_warns(td: Path) -> None:
+    _setup(td, toml='schema = 1\n')
+    r = _run(td, env_extra=_sig_env(td, sbverify_rc=1))
+    assert r.returncode == 1, (r.returncode, r.stdout, r.stderr)
+    assert "shedos-linux-zen.efi" in r.stdout, r.stdout
+    assert "not validly signed" in r.stdout, r.stdout
+
+
+def case_uki_signature_ok_is_clean(td: Path) -> None:
+    _setup(td, toml='schema = 1\n')
+    r = _run(td, env_extra=_sig_env(td, sbverify_rc=0))
+    assert r.returncode == 0, (r.returncode, r.stdout)
+    assert "not validly signed" not in r.stdout, r.stdout
+
+
+def case_missed_outranks_bootsec(td: Path) -> None:
+    # A disk that did not mount is more boot-urgent than SB-off: the pill shows
+    # critical even with a bootsec condition also active.
+    _setup(td, toml='schema = 1\n')
+    (td / "mount-missed.json").write_text(_MISSED_BREADCRUMB)
+    r = _run(td, "--waybar",
+             env_extra=_sb_env(td, conf=_SIGNING_UKI_CONF, sb_on=False))
+    assert r.returncode == 0
+    wb = json.loads(r.stdout)
+    assert wb["class"] == "critical", wb
+
+
 CASES = [
     ("aligned-bare",              case_aligned_bare),
     ("aligned-json",              case_aligned_json),
@@ -465,6 +588,15 @@ CASES = [
     ("mount-safety-waybar",       case_mount_safety_waybar_warning),
     ("mount-missed-waybar",       case_mount_missed_waybar_critical),
     ("missed-outranks-drift",     case_missed_outranks_drift_in_pill),
+    ("secureboot-off-warns",      case_secureboot_off_warns),
+    ("secureboot-off-waybar",     case_secureboot_off_waybar),
+    ("secureboot-on-clean",       case_secureboot_on_is_clean),
+    ("secureboot-keyless-clean",  case_secureboot_keyless_is_clean),
+    ("secureboot-setup-mode",     case_secureboot_setup_mode),
+    ("secureboot-json",           case_secureboot_json),
+    ("uki-signature-bad",         case_uki_signature_bad_warns),
+    ("uki-signature-ok",          case_uki_signature_ok_is_clean),
+    ("missed-outranks-bootsec",   case_missed_outranks_bootsec),
 ]
 
 

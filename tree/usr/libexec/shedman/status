@@ -53,7 +53,7 @@ ATTENTION_CLASSES = {
     "updates":   {"has-updates"},
     "conflicts": {"has-conflicts"},
     "health":    {"warning", "critical"},
-    "doctor":    {"drift"},
+    "doctor":    {"drift", "bootsec"},
 }
 
 
@@ -136,6 +136,10 @@ def _humanize(name: str, doc: dict[str, Any]) -> str:
     if name == "doctor":
         if klass == "aligned":
             return "aligned"
+        if klass == "bootsec":
+            return "Secure Boot"
+        if klass in ("warning", "critical"):
+            return "boot safety"
         m = _COUNT_RE.search(text)
         n = m.group(1) if m else "?"
         return f"{n} drift item(s)"

@@ -1,0 +1,2 @@
+#!/bin/sh
+printf '{"text":"\357\200\243 1","tooltip":"shedman doctor: Secure Boot needs attention","class":"bootsec","alt":"bootsec"}\n'

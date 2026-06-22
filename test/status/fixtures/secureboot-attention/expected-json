@@ -1,0 +1,31 @@
+{
+  "conflicts": {
+    "class": "no-conflicts",
+    "text": "",
+    "tooltip": "No unresolved dotfile conflicts"
+  },
+  "doctor": {
+    "alt": "bootsec",
+    "class": "bootsec",
+    "text": "\uf023 1",
+    "tooltip": "shedman doctor: Secure Boot needs attention"
+  },
+  "health": {
+    "class": "ok",
+    "text": "",
+    "tooltip": "All systems nominal"
+  },
+  "schema": 1,
+  "summary": {
+    "attention": [
+      "doctor"
+    ],
+    "status": "attention",
+    "unavailable": []
+  },
+  "updates": {
+    "class": "no-updates",
+    "text": "",
+    "tooltip": "System is up to date"
+  }
+}
