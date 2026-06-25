@@ -89,6 +89,10 @@ The headline set:
 	Per-project PostgreSQL databases (create/drop/list) on the
 	per-user setup. See *shedman-db*(1).
 
+*shedman encrypt*
+	Encrypt this machine's existing unencrypted disk in place, across a
+	reboot. See *shedman-encrypt*(1).
+
 *shedman secureboot*
 	Manage this machine's Secure Boot keys and the signed boot images
 	Limine chainloads. See *shedman-secureboot*(1).
@@ -146,7 +150,7 @@ the per-command man pages.
 *shedman-logs*(1), *shedman-upgrade-history*(1), *shedman-db*(1),
 *shedman-theme*(1), *shedman-lock*(1), *shedman-login*(1),
 *shedman-dock*(1), *shedman-secureboot*(1), *shedman-tpm2*(1),
-*shedman-key*(1), *pacman*(8), *yay*(8).
+*shedman-key*(1), *shedman-encrypt*(1), *pacman*(8), *yay*(8).
 
 The web reference at https://shedos.org/docs/commands covers every
 subcommand and flag with examples.

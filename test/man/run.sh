@@ -31,6 +31,7 @@ PAGES=(
     shedman-secureboot.1
     shedman-tpm2.1
     shedman-key.1
+    shedman-encrypt.1
 )
 
 # Skip gracefully if scdoc isn't installed (mirrors the T6 zsh -n
