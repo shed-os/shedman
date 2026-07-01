@@ -239,7 +239,7 @@ def _emit_human(plan: _core.Plan) -> None:
 
 
 def _emit_json(plan: _core.Plan, findings: list, missed: list,
-               bootsec: list) -> None:
+               bootsec: list, dkms: list) -> None:
     doc = plan.to_json()
     doc["plan_hash"] = _core.plan_hash(plan)
     doc["mount_safety"] = [
@@ -249,6 +249,7 @@ def _emit_json(plan: _core.Plan, findings: list, missed: list,
     ]
     doc["mount_missed"] = missed
     doc["secure_boot"] = bootsec
+    doc["dkms_coverage"] = dkms
     print(json.dumps(doc, indent=2, sort_keys=True))
 
 
@@ -409,6 +410,41 @@ def _emit_secureboot_human(bootsec: list) -> None:
         print(f"  {_core.colorize('!', 'yellow')} {b}")
 
 
+def _audit_dkms_coverage() -> list:
+    """A DKMS module (e.g. nvidia) not built for an installed kernel — that
+    kernel boots without the driver. Read-only; asks dkms-coverage per installed
+    kernel. Empty when every module is built for every kernel."""
+    cov = os.path.join(_LIB_ROOT, "dkms-coverage")
+    if not os.access(cov, os.X_OK):
+        return []
+    modules_dir = os.environ.get("SHEDOS_DOCTOR_MODULES_DIR", "/usr/lib/modules")
+    out = []
+    for pkgbase_file in sorted(Path(modules_dir).glob("*/pkgbase")):
+        release = pkgbase_file.parent.name
+        try:
+            pkgbase = pkgbase_file.read_text().strip()
+            res = subprocess.run([cov, release], capture_output=True, text=True)
+        except OSError:
+            return []
+        if res.returncode == 1:
+            for mod in res.stdout.split():
+                out.append(
+                    f"DKMS module {mod} is not built for {pkgbase} ({release}) — "
+                    f"that kernel boots without it; install its headers with "
+                    f"`shedman install {pkgbase}-headers`")
+    return out
+
+
+def _emit_dkms_human(dkms: list) -> None:
+    if not dkms:
+        return
+    print()
+    print(_core.colorize(
+        "kernel drivers — a DKMS module is missing for a kernel:", "yellow"))
+    for d in dkms:
+        print(f"  {_core.colorize('!', 'yellow')} {d}")
+
+
 def _fix_mounts(assume_yes: bool) -> int:
     """Add `nofail` to risky fstab mounts, with a backup and confirmation.
     Distinct from --fix (which delegates to `shedman apply` and only touches
@@ -460,7 +496,7 @@ def _fix_mounts(assume_yes: bool) -> int:
 
 
 def _waybar_payload(plan: _core.Plan, findings: list, missed: list,
-                    bootsec: list) -> dict[str, str]:
+                    bootsec: list, dkms: list) -> dict[str, str]:
     """Waybar JSON contract: {text, tooltip, class, alt}.
 
     The most severe active level sets the pill. The tooltip lists the rest:
@@ -507,6 +543,17 @@ def _waybar_payload(plan: _core.Plan, findings: list, missed: list,
                         f"\\n{body}{drift_tail}"),
             "class": "bootsec",
             "alt": "bootsec",
+        }
+
+    if dkms:
+        n = len(dkms)
+        body = (r"\n".join(dkms[:8])).replace('"', r'\"')
+        return {
+            "text": f"\uf085 {n}",  # \uf085 = nf-fa-gears
+            "tooltip": ("shedman doctor: a DKMS module is missing for a kernel"
+                        f"\\n{body}{drift_tail}"),
+            "class": "warning",
+            "alt": "warning",
         }
 
     if not drift:
@@ -577,14 +624,15 @@ def main() -> int:
     findings = _audit_mount_safety()
     missed = _audit_mount_missed()
     bootsec = _audit_secureboot() + _audit_uki_signatures()
-    attn_rc = 1 if (rc == 1 or findings or missed or bootsec) else 0
+    dkms = _audit_dkms_coverage()
+    attn_rc = 1 if (rc == 1 or findings or missed or bootsec or dkms) else 0
 
     if args.waybar:
-        print(json.dumps(_waybar_payload(plan, findings, missed, bootsec)))
+        print(json.dumps(_waybar_payload(plan, findings, missed, bootsec, dkms)))
         return 0
 
     if args.json:
-        _emit_json(plan, findings, missed, bootsec)
+        _emit_json(plan, findings, missed, bootsec, dkms)
         return attn_rc
 
     if args.diff:
@@ -592,6 +640,7 @@ def main() -> int:
         _emit_mount_safety_human(findings)
         _emit_mount_missed_human(missed)
         _emit_secureboot_human(bootsec)
+        _emit_dkms_human(dkms)
         return attn_rc
 
     if args.notify_if_new or args.tick:
@@ -637,6 +686,7 @@ def main() -> int:
     _emit_mount_safety_human(findings)
     _emit_mount_missed_human(missed)
     _emit_secureboot_human(bootsec)
+    _emit_dkms_human(dkms)
     return attn_rc
 
 

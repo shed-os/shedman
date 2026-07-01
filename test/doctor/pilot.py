@@ -75,6 +75,9 @@ def _make_env(td: Path, *, notify_log: Path, refresh_log: Path,
         "SHEDOS_DOCTOR_APPLY_CMD":   f"sh -c 'echo FIXED: \"$@\" >> {apply_log}'",
         # Sandbox the post-boot breadcrumb so cases never read the real one.
         "SHEDOS_MOUNT_REPORT_STATE": str(td / "mount-missed.json"),
+        # Empty by default so the DKMS audit finds no kernels (inert); the dkms
+        # cases populate td/modules and stub SHEDOS_DKMS.
+        "SHEDOS_DOCTOR_MODULES_DIR": str(td / "modules"),
     })
     return env
 
@@ -561,6 +564,67 @@ def case_missed_outranks_bootsec(td: Path) -> None:
     assert wb["class"] == "critical", wb
 
 
+def _dkms_env(td: Path, *, status: str,
+              kernels: list[tuple[str, str]]) -> dict[str, str]:
+    """Populate a fake modules dir + a stub `dkms status` so the DKMS audit runs
+    hermetically. kernels is a list of (release, pkgbase)."""
+    mods = td / "modules"
+    for release, pkgbase in kernels:
+        d = mods / release
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "pkgbase").write_text(pkgbase + "\n")
+    statusf = td / "dkms-status.txt"
+    statusf.write_text(status)
+    dkms = td / "stubs" / "dkms"
+    dkms.write_text(
+        f"#!/usr/bin/env bash\n[[ ${{1:-}} == status ]] && cat {statusf}\nexit 0\n")
+    dkms.chmod(0o755)
+    return {"SHEDOS_DKMS": str(dkms)}
+
+
+# nvidia built for shedos-kernel only — the exact real-box gap.
+_DKMS_STATUS_GAP = "nvidia/610.43.02, 7.0.5-shedos, x86_64: installed\n"
+_DKMS_KERNELS = [("7.0.14-zen", "linux-zen")]
+
+
+def case_dkms_missing_warns(td: Path) -> None:
+    _setup(td, toml='schema = 1\n')
+    r = _run(td, env_extra=_dkms_env(td, status=_DKMS_STATUS_GAP,
+                                     kernels=_DKMS_KERNELS))
+    assert r.returncode == 1, (r.returncode, r.stdout, r.stderr)
+    assert "DKMS module nvidia" in r.stdout, r.stdout
+    assert "linux-zen" in r.stdout, r.stdout
+
+
+def case_dkms_json(td: Path) -> None:
+    _setup(td, toml='schema = 1\n')
+    r = _run(td, "--json", env_extra=_dkms_env(td, status=_DKMS_STATUS_GAP,
+                                               kernels=_DKMS_KERNELS))
+    assert r.returncode == 1, (r.returncode, r.stderr)
+    doc = json.loads(r.stdout)
+    cov = doc.get("dkms_coverage", [])
+    assert any("nvidia" in c and "linux-zen" in c for c in cov), doc
+
+
+def case_dkms_clean(td: Path) -> None:
+    _setup(td, toml='schema = 1\n')
+    # nvidia IS built for the installed linux-zen release -> no finding.
+    status = "nvidia/610.43.02, 7.0.14-zen, x86_64: installed\n"
+    r = _run(td, env_extra=_dkms_env(td, status=status, kernels=_DKMS_KERNELS))
+    assert r.returncode == 0, (r.returncode, r.stdout)
+    assert "DKMS module" not in r.stdout, r.stdout
+
+
+def case_dkms_waybar(td: Path) -> None:
+    _setup(td, toml='schema = 1\n')
+    r = _run(td, "--waybar", env_extra=_dkms_env(td, status=_DKMS_STATUS_GAP,
+                                                 kernels=_DKMS_KERNELS))
+    assert r.returncode == 0
+    wb = json.loads(r.stdout)
+    assert wb["class"] == "warning", wb
+    assert "DKMS module nvidia" in wb["tooltip"], wb
+
+
 CASES = [
     ("aligned-bare",              case_aligned_bare),
     ("aligned-json",              case_aligned_json),
@@ -597,6 +661,10 @@ CASES = [
     ("uki-signature-bad",         case_uki_signature_bad_warns),
     ("uki-signature-ok",          case_uki_signature_ok_is_clean),
     ("missed-outranks-bootsec",   case_missed_outranks_bootsec),
+    ("dkms-missing-warns",        case_dkms_missing_warns),
+    ("dkms-json",                 case_dkms_json),
+    ("dkms-clean",                case_dkms_clean),
+    ("dkms-waybar",               case_dkms_waybar),
 ]
 
 
