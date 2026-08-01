@@ -18,7 +18,7 @@ take effect.
 
 The model:
 
-. The current *@* is renamed to @.rollback-_<timestamp>_ (safety
+. The current *@* is renamed to @.rollback-<timestamp> (safety
   net; nothing is deleted).
 . A new *@* is snapshotted from the chosen snapper snapshot.
 . On reboot, the new *@* is mounted at /.
@@ -38,7 +38,7 @@ _N_
 	right _N_.
 
 *-u*, *--undo*
-	Promote the most recent @.rollback-_<ts>_ backup back to *@*.
+	Promote the most recent @.rollback-<ts> backup back to *@*.
 	Reboot to apply.
 
 *-y*, *--yes*
