@@ -52,9 +52,17 @@ if [[ "$1" == "list-unit-files" ]]; then
     [[ "$scope" == "user" ]] && list={user_path!s}
     while IFS= read -r u; do
         [[ -z "$u" ]] && continue
+        inst="${{u#*@}}"
+        [[ "$u" == *@* && "$inst" != .* ]] && continue
         printf '%s enabled enabled\\n' "$u"
     done <"$list"
     exit 0
+fi
+if [[ "$1" == "is-enabled" ]]; then
+    list={enabled_path!s}
+    [[ "$scope" == "user" ]] && list={user_path!s}
+    grep -qxF "$2" "$list" && {{ echo enabled; exit 0; }}
+    echo disabled; exit 1
 fi
 exit 0
 """)

@@ -1416,6 +1416,23 @@ def _enabled_units(scope: str) -> set[str]:
     return names
 
 
+def _unit_enabled(scope: str, unit: str, listed: set[str]) -> bool:
+    """Whether a unit counts as enabled for drift purposes.
+
+    list-unit-files only knows real unit files; an enabled template
+    instance (name@inst.type) exists solely as a .wants/ symlink and never
+    appears there, so the audit would re-plan it forever. Ask is-enabled
+    for those instead."""
+    if unit in listed:
+        return True
+    _, sep, rest = unit.partition("@")
+    if not sep or rest.startswith("."):
+        return False
+    scope_args = ["--user", "--global"] if scope == "user" else []
+    rc, _ = _systemctl_run(scope_args + ["is-enabled", unit], check=False)
+    return rc == 0
+
+
 def _systemd_change(scope: str, unit: str, action: str) -> Change:
     """Build a Change that enables/disables a single unit."""
     kind = "+" if action == "enable" else "-"
@@ -1440,10 +1457,10 @@ def plan_systemd(cfg: ValidatedConfig) -> list[Change]:
         disable = getattr(cfg.systemd, f"{scope}_disable")
         current = _enabled_units(scope)
         for unit in sorted(enable):
-            if unit not in current:
+            if not _unit_enabled(scope, unit, current):
                 out.append(_systemd_change(scope, unit, "enable"))
         for unit in sorted(disable):
-            if unit in current:
+            if _unit_enabled(scope, unit, current):
                 out.append(_systemd_change(scope, unit, "disable"))
     return out
 
@@ -1744,11 +1761,11 @@ def plan_services(cfg: ValidatedConfig) -> list[Change]:
     for desired, unit, label in flags:
         if desired is None:
             continue
-        if desired and unit not in current:
+        if desired and not _unit_enabled("system", unit, current):
             c = _systemd_change("system", unit, "enable")
             c.section = label
             out.append(c)
-        elif not desired and unit in current:
+        elif not desired and _unit_enabled("system", unit, current):
             c = _systemd_change("system", unit, "disable")
             c.section = label
             out.append(c)

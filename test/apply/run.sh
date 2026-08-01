@@ -158,15 +158,29 @@ fi
 if [[ "\$1" == "list-unit-files" ]]; then
     # Response is based on --state=enabled and scope. We emit one-per-line
     # with a trailing "enabled" column, mirroring real systemctl --plain.
+    # Template instances (name@inst.type) are filtered out like the real
+    # thing: enabled instances are .wants/ symlinks, never unit files.
     list_file="$stubdir/enabled.txt"
     if [[ "\$scope" == "user" ]]; then
         list_file="$stubdir/user-enabled.txt"
     fi
     while IFS= read -r unit; do
         [[ -z "\$unit" ]] && continue
+        inst="\${unit#*@}"
+        [[ "\$unit" == *@* && "\$inst" != .* ]] && continue
         printf '%s enabled enabled\n' "\$unit"
     done <"\$list_file"
     exit 0
+fi
+
+if [[ "\$1" == "is-enabled" ]]; then
+    # Read query, not logged. Answered from the same fixture list.
+    list_file="$stubdir/enabled.txt"
+    [[ "\$scope" == "user" ]] && list_file="$stubdir/user-enabled.txt"
+    if grep -qxF "\$2" "\$list_file"; then
+        echo enabled; exit 0
+    fi
+    echo disabled; exit 1
 fi
 
 # Record mutation invocations. Format one per line, scope-prefixed.
