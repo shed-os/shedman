@@ -412,27 +412,6 @@ if (( pac_n > 0 )); then
     }
 fi
 
-# Bundled vendor AUR packages (fingerprint TOD stack). Shipped by
-# shedos-system itself at /usr/share/shedos/aur-pkgs/; pacman -Syu won't
-# touch them because they're not in shedos-repo.db (license-restricted),
-# so we layer this pacman -U step on top. --needed keeps it idempotent
-# across runs; --ask=4 auto-accepts conflict-remove (libfprint-tod
-# replaces libfprint). Failure is non-fatal — the yay step that follows
-# is the fallback path.
-if [[ -d /usr/share/shedos/aur-pkgs ]]; then
-    shopt -s nullglob
-    _aur_pkgs=(/usr/share/shedos/aur-pkgs/*.pkg.tar.zst)
-    shopt -u nullglob
-    if (( ${#_aur_pkgs[@]} > 0 )); then
-        echo
-        _hr
-        echo "Installing bundled vendor drivers (${#_aur_pkgs[@]} pkgs)…"
-        _hr
-        sudo pacman -U --noconfirm --needed --ask=4 "${_aur_pkgs[@]}" \
-            || echo "pacman -U on bundled drivers exited non-zero; continuing." >&2
-    fi
-fi
-
 if (( aur_n > 0 )); then
     aur_helper=""
     if command -v yay >/dev/null 2>&1; then
