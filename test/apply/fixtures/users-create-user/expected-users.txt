@@ -1,1 +1,1 @@
-useradd -m -s /usr/bin/zsh -G wheel newuser
+useradd -m -s /usr/bin/bash -G wheel newuser
