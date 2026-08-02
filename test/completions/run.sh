@@ -23,7 +23,7 @@ set -uo pipefail
 
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 repo_root=$(cd -- "$here/../.." && pwd)
-bash_file=$repo_root/packaging/shedos-system/tree/etc/bash_completion.d/shedman
+bash_file=$repo_root/packaging/shedos-system/tree/usr/share/bash-completion/completions/shedman
 zsh_file=$repo_root/packaging/shedos-system/tree/usr/share/zsh/site-functions/_shedman
 
 if [[ ! -f $bash_file ]]; then
