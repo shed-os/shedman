@@ -1,0 +1,4 @@
+name = "logs"
+package = "shedman"
+man = "shedman-logs.1"
+description = "two-pane journalctl browser TUI"

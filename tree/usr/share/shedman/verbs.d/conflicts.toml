@@ -1,0 +1,4 @@
+name = "conflicts"
+package = "shedman"
+man = "shedman-conflicts.1"
+description = "report unresolved .shedosnew dotfile conflicts"

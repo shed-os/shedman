@@ -1,8 +1,8 @@
 # fish completion for the shedman unified CLI.
 #
-# Subcommand list is discovered at completion time by globbing the libexec
-# directory /etc/shedman/shedman.toml names; same pattern as the bash + zsh
-# completers. Filenames prefixed with `_` (internal helpers) are hidden.
+# Subcommand list is read at completion time from the verb declarations
+# /etc/shedman/shedman.toml points at; same pattern as the bash + zsh
+# completers. Names prefixed with `_` (internal helpers) are hidden.
 #
 # Per-subcommand flag completion defers to `shedman <cmd>
 # --complete-fish` if the subcommand honors it. Other subcommands fall
@@ -26,19 +26,18 @@ function __shedman_config
     test -n "$value"; and echo $value; or echo $argv[2]
 end
 
+function __shedman_verbs
+    # find rather than a glob: fish reports a wildcard that matches nothing
+    # instead of expanding to nothing, and a box with no declarations yet is
+    # not an error worth printing at every tab press.
+    set -l dir (__shedman_config verbs /usr/share/shedman/verbs.d)
+    find $dir -maxdepth 1 -name '*.toml' -exec \
+        sed -n 's/^[ \t]*name[ \t]*=[ \t]*"\([^_"][^"]*\)".*/\1/p' {} + 2>/dev/null \
+        | env LC_ALL=C sort -u
+end
+
 function __shedman_subcommands
-    set -l libexec (__shedman_config libexec /usr/libexec/shedman)
-    if test -d $libexec
-        for f in $libexec/*
-            if test -x "$f" -a -f "$f"
-                set name (basename "$f")
-                # Hide _* internal helpers.
-                if not string match -q '_*' -- "$name"
-                    echo "$name"
-                end
-            end
-        end
-    end
+    __shedman_verbs
     echo help
     echo version
 end
@@ -71,8 +70,9 @@ function __shedman_subcmd_flags
     end
 end
 
-# Bind per-subcommand to the dynamic flag emitter.
-for sub in apply update doctor rollback uninstall dock kernel fingerprint theme snapshot power updates conflicts health lock login config db install services status logs upgrade-history
+# Bind per-subcommand to the dynamic flag emitter. The declarations are the
+# roster, so a verb another package ships binds itself.
+for sub in (__shedman_verbs)
     complete -c shedman -n "__fish_seen_subcommand_from $sub" \
         -a '(__shedman_subcmd_flags)'
 end

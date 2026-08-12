@@ -1,0 +1,4 @@
+name = "apply"
+package = "shedman"
+man = "shedman-apply.1"
+description = "reconcile /etc/shedos/system.toml against live state"

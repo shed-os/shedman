@@ -1,0 +1,4 @@
+name = "rollback"
+package = "shedman"
+man = "shedman-rollback.1"
+description = "restore root subvolume from a snapper snapshot (reboot required)"

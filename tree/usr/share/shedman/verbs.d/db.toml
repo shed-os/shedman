@@ -1,0 +1,4 @@
+name = "db"
+package = "shedman"
+man = "shedman-db.1"
+description = "database-service bootstrap/admin tools"

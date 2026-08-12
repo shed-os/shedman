@@ -1,0 +1,4 @@
+name = "_config-sync"
+package = "shedman"
+man = "shedman-config.1"
+description = "3-way merge packaged defaults into $HOME dotfiles"

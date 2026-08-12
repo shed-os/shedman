@@ -1,0 +1,4 @@
+name = "upgrade-history"
+package = "shedman"
+man = "shedman-upgrade-history.1"
+description = "browse ShedOS upgrade history and roll back"

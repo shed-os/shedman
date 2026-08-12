@@ -622,6 +622,50 @@ def case_dkms_missing_warns(td: Path) -> None:
     assert "linux-zen" in r.stdout, r.stdout
 
 
+def _verbs_env(td: Path, *, declared: list[str], shipped: list[str]
+               ) -> dict[str, str]:
+    """A libexec dir and a declaration dir of the case's own, so the audit
+    reads a namespace the harness controls rather than the machine's."""
+    libexec = td / "libexec"; libexec.mkdir(exist_ok=True)
+    verbs = td / "verbs.d"; verbs.mkdir(exist_ok=True)
+    for name in shipped:
+        exe = libexec / name
+        exe.write_text("#!/usr/bin/env bash\nexit 0\n")
+        exe.chmod(0o755)
+    for name in declared:
+        (verbs / f"{name}.toml").write_text(
+            f'name = "{name}"\npackage = "harness"\n')
+    conf = td / "shedman.toml"
+    conf.write_text(f'libexec = "{libexec}"\nverbs = "{verbs}"\n')
+    return {"SHEDMAN_CONFIG": str(conf)}
+
+
+def case_verb_undeclared_warns(td: Path) -> None:
+    _setup(td, toml='schema = 1\n')
+    r = _run(td, env_extra=_verbs_env(td, declared=["known"],
+                                      shipped=["known", "stowaway"]))
+    # Reported, but a packaging fault on the box is not the box in trouble.
+    assert r.returncode == 0, (r.returncode, r.stdout, r.stderr)
+    reported = [ln for ln in r.stdout.splitlines() if "no declaration" in ln]
+    assert len(reported) == 1, r.stdout
+    assert "stowaway" in reported[0], reported
+
+
+def case_verb_declared_clean(td: Path) -> None:
+    _setup(td, toml='schema = 1\n')
+    r = _run(td, env_extra=_verbs_env(td, declared=["known"], shipped=["known"]))
+    assert r.returncode == 0, (r.returncode, r.stdout, r.stderr)
+    assert "nobody declared" not in r.stdout, r.stdout
+
+
+def case_verb_json(td: Path) -> None:
+    _setup(td, toml='schema = 1\n')
+    r = _run(td, "--json", env_extra=_verbs_env(td, declared=[],
+                                                shipped=["stowaway"]))
+    doc = json.loads(r.stdout)
+    assert any("stowaway" in v for v in doc["undeclared_verbs"]), doc
+
+
 def case_dkms_json(td: Path) -> None:
     _setup(td, toml='schema = 1\n')
     r = _run(td, "--json", env_extra=_dkms_env(td, status=_DKMS_STATUS_GAP,
@@ -691,6 +735,9 @@ CASES = [
     ("dkms-json",                 case_dkms_json),
     ("dkms-clean",                case_dkms_clean),
     ("dkms-waybar",               case_dkms_waybar),
+    ("verb-undeclared-warns",     case_verb_undeclared_warns),
+    ("verb-declared-clean",       case_verb_declared_clean),
+    ("verb-json",                 case_verb_json),
 ]
 
 

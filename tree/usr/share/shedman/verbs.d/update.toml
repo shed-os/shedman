@@ -1,0 +1,5 @@
+name = "update"
+package = "shedman"
+man = "shedman-update.1"
+description = "interactive ShedOS upgrade (pacman + AUR + config sync)"
+requires = ["migrate"]

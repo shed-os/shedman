@@ -4,12 +4,15 @@
 # Every executable file under the configured libexec directory is a
 # subcommand. `shedman foo args…` execs <libexec>/foo with argv preserved.
 # Packages drop additional subcommands by installing files to that
-# directory; `shedman help` lists everything it finds at runtime.
+# directory and a declaration beside it saying whose it is; `shedman help`
+# lists what has been declared.
 #
-# Filenames starting with `_` are considered internal implementation
-# helpers and are hidden from `shedman help`, but are still invokable
-# via `shedman _name`. Subcommands with a `--help-summary` handler get
-# their summary shown next to their name.
+# Names starting with `_` are internal implementation helpers: declared,
+# invokable as `shedman _name`, and kept out of `shedman help`.
+#
+# An executable nobody declared still runs — the dispatcher is not the place
+# to break a machine over metadata — but it is not listed, and
+# `shedman doctor` names it.
 
 set -uo pipefail
 
@@ -27,6 +30,7 @@ _config() {
 
 LIBEXEC=$(_config libexec /usr/libexec/shedman)
 PACKAGE=$(_config package shedman)
+VERBS=$(_config verbs /usr/share/shedman/verbs.d)
 PROG=$(basename "$0")
 
 _usage() {
@@ -39,35 +43,53 @@ Run '$PROG help' to list all subcommands.
 EOF
 }
 
-_summary() {
-    # Print the one-line summary for a subcommand. Tries --help-summary
-    # first; falls back to the first non-blank line of --help output.
-    local bin=$1 line
-    if line=$("$bin" --help-summary 2>/dev/null); then
-        [[ -n $line ]] && { printf '%s\n' "$line"; return; }
-    fi
-    # --help fallback; strip usage prefixes so a "Usage: …" line doesn't
-    # become the summary.
-    if line=$("$bin" --help 2>/dev/null \
-            | awk 'NF && !/^[Uu]sage:/ { print; exit }'); then
-        [[ -n $line ]] && printf '%s\n' "$line"
-    fi
+_declarations() {
+    # `<name><TAB><description>` per declared verb. The file name is not the
+    # verb name — the declaration says which verb it is — so two packages
+    # claiming one name is a disagreement no install order settles, and it
+    # goes to stderr rather than being decided here.
+    local -a decls=("$VERBS"/*.toml)
+    [[ -e ${decls[0]} ]] || return 0
+    awk -v prog="$PROG" '
+        function value(line,   v) {
+            v = line
+            sub(/^[^=]*=[[:space:]]*/, "", v)
+            gsub(/^"|"$/, "", v)
+            return v
+        }
+        function emit(   a, b) {
+            if (name == "") return
+            if (name in owner) {
+                # Named in a fixed order: which declaration the directory
+                # listing reached first says nothing about the problem.
+                a = owner[name]; b = pkg
+                if (a > b) { a = pkg; b = owner[name] }
+                printf "%s: %s is declared by both %s and %s\n",
+                    prog, name, a, b > "/dev/stderr"
+            }
+            else
+                printf "%s\t%s\n", name, desc
+            owner[name] = pkg
+        }
+        FILENAME != file { if (file != "") emit(); file = FILENAME; name = pkg = desc = "" }
+        /^[[:space:]]*name[[:space:]]*=/        { name = value($0) }
+        /^[[:space:]]*package[[:space:]]*=/     { pkg  = value($0) }
+        /^[[:space:]]*description[[:space:]]*=/ { desc = value($0) }
+        END { emit() }
+    ' "${decls[@]}" | LC_ALL=C sort
 }
 
 _list() {
-    local f name summary
+    local name desc
     printf 'Available subcommands:\n'
-    for f in "$LIBEXEC"/*; do
-        [[ -x $f && -f $f ]] || continue
-        name=$(basename "$f")
+    while IFS=$'\t' read -r name desc; do
         [[ $name == _* ]] && continue
-        summary=$(_summary "$f")
-        if [[ -n $summary ]]; then
-            printf '  %-16s  %s\n' "$name" "$summary"
+        if [[ -n $desc ]]; then
+            printf '  %-16s  %s\n' "$name" "$desc"
         else
             printf '  %s\n' "$name"
         fi
-    done
+    done < <(_declarations)
 }
 
 _did_you_mean() {
@@ -75,15 +97,13 @@ _did_you_mean() {
     # substring match; if the user typed `updat` we want to suggest
     # `update` and `updates`. A full edit-distance pass isn't worth the
     # awk dance for a handful of names.
-    local needle=$1 f name hits=()
-    for f in "$LIBEXEC"/*; do
-        [[ -x $f && -f $f ]] || continue
-        name=$(basename "$f")
+    local needle=$1 name hits=()
+    while IFS=$'\t' read -r name _; do
         [[ $name == _* ]] && continue
         if [[ $name == *"$needle"* || $needle == *"$name"* ]]; then
             hits+=("$name")
         fi
-    done
+    done < <(_declarations)
     if (( ${#hits[@]} > 0 )); then
         printf '\nDid you mean:\n'
         printf '  %s\n' "${hits[@]}"

@@ -1,0 +1,4 @@
+name = "snapshot"
+package = "shedman"
+man = "shedman-snapshot.1"
+description = "create a manual btrfs checkpoint (snapper) you can roll back to"

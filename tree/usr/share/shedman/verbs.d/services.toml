@@ -1,0 +1,4 @@
+name = "services"
+package = "shedman"
+man = "shedman-services.1"
+description = "verify ShedOS expected services are enabled + running"

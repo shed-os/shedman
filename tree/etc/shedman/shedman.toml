@@ -10,3 +10,7 @@ libexec = "/usr/libexec/shedman"
 
 # The package `shedman version` reports the version of.
 package = "shedman"
+
+# Where verb declarations live. A package shipping a verb puts one here
+# naming itself, and `shedman help` lists what it finds.
+verbs = "/usr/share/shedman/verbs.d"

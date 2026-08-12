@@ -1,9 +1,9 @@
 # bash completion for the shedman unified CLI.
 #
-# Subcommand list discovered at completion time by globbing the libexec
-# directory /etc/shedman/shedman.toml names. Packages dropping new
-# subcommands there become completable without reinstalling this file.
-# Filenames prefixed with `_` (internal helpers) are hidden.
+# Subcommand list read at completion time from the verb declarations
+# /etc/shedman/shedman.toml points at. Packages dropping new subcommands
+# there become completable without reinstalling this file. Names prefixed
+# with `_` (internal helpers) are hidden.
 #
 # Per-subcommand flag completion defers to `shedman <cmd>
 # --complete-bash` if the subcommand honors it. Every other subcommand
@@ -21,6 +21,14 @@ _shedman_config() {
     printf '%s\n' "${value:-$2}"
 }
 
+_shedman_verbs() {
+    # Every declared verb name, internals left out.
+    local dir
+    dir=$(_shedman_config verbs /usr/share/shedman/verbs.d)
+    sed -n 's/^[[:space:]]*name[[:space:]]*=[[:space:]]*"\([^_"][^"]*\)".*/\1/p' \
+        "$dir"/*.toml 2>/dev/null | LC_ALL=C sort -u
+}
+
 _shedman() {
     local cur prev cword libexec
     libexec=$(_shedman_config libexec /usr/libexec/shedman)
@@ -31,15 +39,7 @@ _shedman() {
     # Position 1: enumerate subcommands + built-ins.
     if (( cword == 1 )); then
         local -a subcmds=()
-        local f name
-        if [[ -d $libexec ]]; then
-            for f in "$libexec"/*; do
-                [[ -x $f && -f $f ]] || continue
-                name=${f##*/}
-                [[ $name == _* ]] && continue
-                subcmds+=("$name")
-            done
-        fi
+        mapfile -t subcmds < <(_shedman_verbs)
         subcmds+=(help version)
         COMPREPLY=( $(compgen -W "${subcmds[*]}" -- "$cur") )
         return 0
@@ -50,15 +50,7 @@ _shedman() {
     # `shedman help <tab>` completes with subcommand names.
     if [[ $cmd == help && $cword == 2 ]]; then
         local -a subcmds=()
-        local f name
-        if [[ -d $libexec ]]; then
-            for f in "$libexec"/*; do
-                [[ -x $f && -f $f ]] || continue
-                name=${f##*/}
-                [[ $name == _* ]] && continue
-                subcmds+=("$name")
-            done
-        fi
+        mapfile -t subcmds < <(_shedman_verbs)
         COMPREPLY=( $(compgen -W "${subcmds[*]}" -- "$cur") )
         return 0
     fi

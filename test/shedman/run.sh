@@ -14,6 +14,8 @@
 #   T9  dispatcher `version` prints *something* (falls back to "unknown" off-system).
 #   T10 a config file that is not there leaves the compiled defaults in charge.
 #   T11 the shipped config file says exactly what those defaults say.
+#   T12 an executable nobody declared is not listed and still runs.
+#   T13 two declarations claiming one name is reported.
 
 set -uo pipefail
 
@@ -76,12 +78,21 @@ done
 PROBE
 chmod +x "$stage/_probe"
 
-# The dispatcher reads where its verbs live out of its config file, so the
-# stage is named there and the dispatcher itself runs exactly as shipped.
+# Declarations for the staged tree: the repo's, plus one for the probe. An
+# extra executable is left undeclared on purpose — T12 is what it is for.
+verbs=$(mktemp -d -t shedman-verbs.XXXXXX)
+cp "$repo_root"/tree/usr/share/shedman/verbs.d/*.toml "$verbs/"
+printf 'name = "_probe"\npackage = "harness"\n' > "$verbs/_probe.toml"
+
+cp "$stage/_probe" "$stage/stowaway"
+
+# The dispatcher reads where its verbs live and what has been declared out of
+# its config file, so the stage is named there and the dispatcher itself runs
+# exactly as shipped.
 conf=$(mktemp -t shedman-conf.XXXXXX)
-printf 'libexec = "%s"\n' "$stage" > "$conf"
+printf 'libexec = "%s"\nverbs = "%s"\n' "$stage" "$verbs" > "$conf"
 export SHEDMAN_CONFIG=$conf
-trap 'rm -rf "$stage" "$conf"' EXIT
+trap 'rm -rf "$stage" "$verbs" "$conf"' EXIT
 
 # ---------------------------------------------------------------------------
 # T1: bare `shedman` lists subcommands
@@ -206,6 +217,40 @@ for key in libexec package; do
         _fail "T11_default_$key" "shipped '$want' but the dispatcher defaults to '$got'"
     fi
 done
+
+# ---------------------------------------------------------------------------
+# T12: an undeclared executable stays out of the listing and out of the
+# suggestions, and still dispatches — the dispatcher does not break a machine
+# over metadata.
+# ---------------------------------------------------------------------------
+
+if ! grep -q 'stowaway' <<<"$out" \
+        && ! grep -q 'stowaway' <<<"$("$dispatcher" stoway 2>&1)"; then
+    _ok T12_undeclared_not_listed
+else
+    _fail T12_undeclared_not_listed "an undeclared executable was advertised"
+fi
+
+if "$dispatcher" stowaway >/dev/null 2>&1; then
+    _ok T12b_undeclared_still_runs
+else
+    _fail T12b_undeclared_still_runs "an undeclared executable stopped working"
+fi
+
+# ---------------------------------------------------------------------------
+# T13: two declarations claiming one name is an error, because no install
+# order settles which package owns the verb.
+# ---------------------------------------------------------------------------
+
+sed 's/package = "shedman"/package = "other"/' "$verbs/update.toml" \
+    > "$verbs/also-update.toml"
+err=$("$dispatcher" 2>&1 >/dev/null)
+rm -f "$verbs/also-update.toml"
+if grep -q 'update is declared by both other and shedman' <<<"$err"; then
+    _ok T13_collision_reported
+else
+    _fail T13_collision_reported "got: $err"
+fi
 
 # ---------------------------------------------------------------------------
 # Summary

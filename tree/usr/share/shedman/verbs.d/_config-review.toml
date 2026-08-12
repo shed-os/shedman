@@ -1,0 +1,4 @@
+name = "_config-review"
+package = "shedman"
+man = "shedman-config.1"
+description = "resolve .shedosnew dotfile conflicts with a merge TUI"

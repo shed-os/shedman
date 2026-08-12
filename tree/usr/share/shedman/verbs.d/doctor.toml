@@ -1,0 +1,4 @@
+name = "doctor"
+package = "shedman"
+man = "shedman-doctor.1"
+description = "report drift between /etc/shedos/system.toml and live state"

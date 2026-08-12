@@ -1,0 +1,4 @@
+name = "updates"
+package = "shedman"
+man = "shedman-updates.1"
+description = "report pending pacman + AUR updates"

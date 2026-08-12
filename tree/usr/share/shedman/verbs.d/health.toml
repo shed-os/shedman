@@ -1,0 +1,4 @@
+name = "health"
+package = "shedman"
+man = "shedman-health.1"
+description = "aggregate hardware health signals (battery, temp, storage, …)"

@@ -47,9 +47,10 @@ _fail() {
 }
 
 # ---------------------------------------------------------------------------
-# Stage a libexec dir with stub subcommands. `cmd-a` honors
-# --complete-bash (returns a fixed flag list); `cmd-b` does not.
-# `_hidden` must never appear in a completion result.
+# Stage a libexec dir with stub subcommands and the declarations that put them
+# in the namespace. `cmd-a` honors --complete-bash (returns a fixed flag list);
+# `cmd-b` does not. `_hidden` must never appear in a completion result, and
+# `cmd-undeclared` ships no declaration so nothing may complete it.
 # ---------------------------------------------------------------------------
 
 stage=$(mktemp -d -t shedman-completion-test.XXXXXX)
@@ -78,12 +79,23 @@ cat >"$stage/_hidden" <<'EOF'
 echo "_hidden invoked"
 EOF
 
-chmod +x "$stage/cmd-a" "$stage/cmd-b" "$stage/_hidden"
+cat >"$stage/cmd-undeclared" <<'EOF'
+#!/usr/bin/env bash
+echo "cmd-undeclared invoked"
+EOF
+
+chmod +x "$stage/cmd-a" "$stage/cmd-b" "$stage/_hidden" "$stage/cmd-undeclared"
+
+verbs=$stage/verbs.d
+mkdir -p "$verbs"
+for v in cmd-a cmd-b _hidden; do
+    printf 'name = "%s"\npackage = "harness"\n' "$v" > "$verbs/$v.toml"
+done
 
 # The completers read where the verbs live out of shedman's config file, so
 # the stage is named there and the shipped files are what run.
 conf=$(mktemp -t shedman-conf.XXXXXX)
-printf 'libexec = "%s"\n' "$stage" > "$conf"
+printf 'libexec = "%s"\nverbs = "%s"\n' "$stage" "$verbs" > "$conf"
 export SHEDMAN_CONFIG=$conf
 
 # Helper: drive the bash completion function, print COMPREPLY lines.
@@ -113,7 +125,8 @@ if grep -qx 'cmd-a' <<<"$out" \
         && grep -qx 'cmd-b' <<<"$out" \
         && grep -qx 'help' <<<"$out" \
         && grep -qx 'version' <<<"$out" \
-        && ! grep -qx '_hidden' <<<"$out"; then
+        && ! grep -qx '_hidden' <<<"$out" \
+        && ! grep -qx 'cmd-undeclared' <<<"$out"; then
     _ok T1_bash_position1_lists_subcommands
 else
     _fail T1_bash_position1_lists_subcommands "got:\n$out"

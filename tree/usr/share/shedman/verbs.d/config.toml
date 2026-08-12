@@ -1,0 +1,4 @@
+name = "config"
+package = "shedman"
+man = "shedman-config.1"
+description = "sync packaged defaults into $HOME and review merge conflicts"

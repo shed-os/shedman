@@ -1,0 +1,4 @@
+name = "status"
+package = "shedman"
+man = "shedman-status.1"
+description = "aggregate dashboard: updates, conflicts, health, doctor"

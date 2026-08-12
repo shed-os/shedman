@@ -1,0 +1,4 @@
+name = "uninstall"
+package = "shedman"
+man = "shedman-uninstall.1"
+description = "uninstall packages, routing pacman vs yay by installed source"

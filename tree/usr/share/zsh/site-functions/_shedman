@@ -1,10 +1,10 @@
 #compdef shedman
 # zsh completion for the shedman unified CLI.
 #
-# Subcommand list discovered at completion time by globbing the libexec
-# directory /etc/shedman/shedman.toml names. Packages dropping new
-# subcommands there become completable without reinstalling this file.
-# Filenames prefixed with `_` (internal helpers) are hidden.
+# Subcommand list read at completion time from the verb declarations
+# /etc/shedman/shedman.toml points at, descriptions included. Packages
+# dropping new subcommands there become completable without reinstalling this
+# file. Names prefixed with `_` (internal helpers) are hidden.
 #
 # Per-subcommand argument completion defers to `shedman <cmd>
 # --complete-zsh` if the subcommand honors it. Every other subcommand
@@ -30,21 +30,15 @@ _shedman() {
         'version:print the installed shedman version'
     )
 
-    _subcmds=()
-    if [[ -d $libexec ]]; then
-        local f name summary
-        for f in $libexec/*(N); do
-            [[ -x $f && -f $f ]] || continue
-            name=${f:t}
-            [[ $name == _* ]] && continue
-            summary=$("$f" --help-summary 2>/dev/null)
-            if [[ -n $summary ]]; then
-                _subcmds+=("$name:$summary")
-            else
-                _subcmds+=("$name:")
-            fi
-        done
-    fi
+    local verbs
+    verbs=$(_shedman_config verbs /usr/share/shedman/verbs.d)
+    _subcmds=( ${(f)"$(awk -F'"' '
+        function emit() { if (name != "" && name !~ /^_/) print name ":" desc }
+        FILENAME != file { if (file != "") emit(); file = FILENAME; name = desc = "" }
+        /^[[:space:]]*name[[:space:]]*=/        { name = $2 }
+        /^[[:space:]]*description[[:space:]]*=/ { desc = $2 }
+        END { emit() }
+    ' $verbs/*.toml(N) 2>/dev/null | LC_ALL=C sort)"} )
 
     _arguments -C \
         '1: :->command' \

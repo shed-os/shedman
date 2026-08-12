@@ -1,0 +1,4 @@
+name = "install"
+package = "shedman"
+man = "shedman-install.1"
+description = "install packages from official, shedos, or AUR repos"

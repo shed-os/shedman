@@ -83,6 +83,8 @@ if len(sys.argv) > 1 and sys.argv[1] == "--complete-fish":
         print(f"{_flag}\t{_desc}")
     sys.exit(0)
 
+import tomllib  # noqa: E402
+
 _LIB_ROOT = os.environ.get("SHEDOS_LIB_ROOT", "/usr/lib/shedos")
 if _LIB_ROOT not in sys.path:
     sys.path.insert(0, _LIB_ROOT)
@@ -91,6 +93,18 @@ import apply_core as _core  # noqa: E402
 
 
 DOCTOR_STATE = "doctor.state.json"
+
+
+def _shedman_config(key: str, default: str) -> str:
+    """One key out of shedman's own config, with the compiled-in default when
+    the file is absent, unreadable or silent about it."""
+    path = os.environ.get("SHEDMAN_CONFIG", "/etc/shedman/shedman.toml")
+    try:
+        with open(path, "rb") as fh:
+            value = tomllib.load(fh).get(key)
+    except (OSError, tomllib.TOMLDecodeError):
+        return default
+    return value if isinstance(value, str) and value else default
 
 
 # Hysteresis: remember which drift fingerprint we last notified about
@@ -239,7 +253,7 @@ def _emit_human(plan: _core.Plan) -> None:
 
 
 def _emit_json(plan: _core.Plan, findings: list, missed: list,
-               bootsec: list, dkms: list) -> None:
+               bootsec: list, dkms: list, verbs: list) -> None:
     doc = plan.to_json()
     doc["plan_hash"] = _core.plan_hash(plan)
     doc["mount_safety"] = [
@@ -250,6 +264,7 @@ def _emit_json(plan: _core.Plan, findings: list, missed: list,
     doc["mount_missed"] = missed
     doc["secure_boot"] = bootsec
     doc["dkms_coverage"] = dkms
+    doc["undeclared_verbs"] = verbs
     print(json.dumps(doc, indent=2, sort_keys=True))
 
 
@@ -433,6 +448,39 @@ def _audit_dkms_coverage() -> list:
                     f"that kernel boots without it; install its headers with "
                     f"`shedman install {pkgbase}-headers`")
     return out
+
+
+def _audit_verb_declarations() -> list:
+    """An executable in the verb directory that no declaration claims. It still
+    runs, but nothing lists it and no package owns it on paper, so a verb that
+    shipped without its declaration is visible here rather than only at the
+    moment someone goes looking for it."""
+    libexec = Path(_shedman_config("libexec", "/usr/libexec/shedman"))
+    verbs = Path(_shedman_config("verbs", "/usr/share/shedman/verbs.d"))
+    if not libexec.is_dir():
+        return []
+    declared = set()
+    for decl in sorted(verbs.glob("*.toml")):
+        try:
+            with decl.open("rb") as fh:
+                name = tomllib.load(fh).get("name")
+        except (OSError, tomllib.TOMLDecodeError):
+            continue
+        if isinstance(name, str):
+            declared.add(name)
+    return [f"{p.name} is in {libexec} and no declaration in {verbs} claims it"
+            for p in sorted(libexec.iterdir())
+            if p.is_file() and os.access(p, os.X_OK) and p.name not in declared]
+
+
+def _emit_verbs_human(verbs: list) -> None:
+    if not verbs:
+        return
+    print()
+    print(_core.colorize(
+        "shedman verbs — an executable nobody declared:", "yellow"))
+    for v in verbs:
+        print(f"  {_core.colorize('!', 'yellow')} {v}")
 
 
 def _emit_dkms_human(dkms: list) -> None:
@@ -625,6 +673,9 @@ def main() -> int:
     missed = _audit_mount_missed()
     bootsec = _audit_secureboot() + _audit_uki_signatures()
     dkms = _audit_dkms_coverage()
+    # An undeclared verb is a packaging fault on the box, not a fault of the
+    # box, so it is reported without moving the exit code or the waybar pill.
+    verbs = _audit_verb_declarations()
     attn_rc = 1 if (rc == 1 or findings or missed or bootsec or dkms) else 0
 
     if args.waybar:
@@ -632,7 +683,7 @@ def main() -> int:
         return 0
 
     if args.json:
-        _emit_json(plan, findings, missed, bootsec, dkms)
+        _emit_json(plan, findings, missed, bootsec, dkms, verbs)
         return attn_rc
 
     if args.diff:
@@ -641,6 +692,7 @@ def main() -> int:
         _emit_mount_missed_human(missed)
         _emit_secureboot_human(bootsec)
         _emit_dkms_human(dkms)
+        _emit_verbs_human(verbs)
         return attn_rc
 
     if args.notify_if_new or args.tick:
@@ -687,6 +739,7 @@ def main() -> int:
     _emit_mount_missed_human(missed)
     _emit_secureboot_human(bootsec)
     _emit_dkms_human(dkms)
+    _emit_verbs_human(verbs)
     return attn_rc
 
 
