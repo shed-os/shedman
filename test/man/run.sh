@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # run.sh — sanity tests for the shedman man pages.
 #
-# Source of truth lives at packaging/shedos-system/man/*.scd.
+# Source of truth lives at man/*.scd.
 # At build time PKGBUILD's prepare() renders these via scdoc into
 # /usr/share/man/man1/*.1. This harness mirrors the same render
 # step at test time, then validates that each rendered page:
@@ -18,7 +18,7 @@ set -uo pipefail
 
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 repo_root=$(cd -- "$here/../.." && pwd)
-srcdir=$repo_root/packaging/shedos-system/man
+srcdir=$repo_root/man
 
 PAGES=(
     shedman.1

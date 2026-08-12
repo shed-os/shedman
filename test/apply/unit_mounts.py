@@ -9,7 +9,7 @@ import sys
 import pathlib
 
 _TREE = pathlib.Path(__file__).resolve().parents[2] / \
-    "packaging/shedos-system/tree/usr/lib/shedos"
+    "tree/usr/lib/shedos"
 sys.path.insert(0, str(_TREE))
 import apply_core as ac  # noqa: E402
 

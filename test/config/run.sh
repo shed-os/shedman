@@ -8,8 +8,8 @@ set -uo pipefail
 
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 repo_root=$(cd -- "$here/../.." && pwd)
-tool=$repo_root/packaging/shedos-system/tree/usr/libexec/shedman/config
-libexec=$repo_root/packaging/shedos-system/tree/usr/libexec/shedman
+tool=$repo_root/tree/usr/libexec/shedman/config
+libexec=$repo_root/tree/usr/libexec/shedman
 
 if [[ ! -x $tool ]]; then
     echo "FATAL: $tool not executable" >&2

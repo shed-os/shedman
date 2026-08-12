@@ -38,7 +38,7 @@ set -uo pipefail
 
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 repo_root=$(cd -- "$here/../.." && pwd)
-tool=$repo_root/packaging/shedos-system/tree/usr/libexec/shedman/apply
+tool=$repo_root/tree/usr/libexec/shedman/apply
 
 if [[ ! -x $tool ]]; then
     echo "FATAL: $tool not executable" >&2
@@ -223,7 +223,7 @@ STUB
         SHEDOS_APPLY_FSTAB_PATH="$etc/fstab" \
         SHEDOS_APPLY_BOOT_ROOT="$boot_dir" \
         PATH="$stubdir:$PATH" \
-        SHEDOS_LIB_ROOT="$repo_root/packaging/shedos-system/tree/usr/lib/shedos" \
+        SHEDOS_LIB_ROOT="$repo_root/tree/usr/lib/shedos" \
         NO_COLOR=1 \
         "$tool" --config "$etc/shedos/system.toml" $APPLY_ARGS 2>&1
     )

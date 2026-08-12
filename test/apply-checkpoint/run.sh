@@ -12,7 +12,7 @@ set -uo pipefail
 
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 repo_root=$(cd -- "$here/../.." && pwd)
-apply_core=$repo_root/packaging/shedos-system/tree/usr/lib/shedos
+apply_core=$repo_root/tree/usr/lib/shedos
 
 if [[ ! -f $apply_core/apply_core.py ]]; then
     echo "FATAL: $apply_core/apply_core.py missing" >&2

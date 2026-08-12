@@ -29,8 +29,8 @@ from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-TOOL = REPO_ROOT / "packaging/shedos-system/tree/usr/libexec/shedman/doctor"
-LIB_ROOT = REPO_ROOT / "packaging/shedos-system/tree/usr/lib/shedos"
+TOOL = REPO_ROOT / "tree/usr/libexec/shedman/doctor"
+LIB_ROOT = REPO_ROOT / "tree/usr/lib/shedos"
 
 
 def _write_stub_systemctl(dst: Path, enabled: list[str],

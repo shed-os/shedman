@@ -23,8 +23,8 @@ set -uo pipefail
 
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 repo_root=$(cd -- "$here/../.." && pwd)
-bash_file=$repo_root/packaging/shedos-system/tree/usr/share/bash-completion/completions/shedman
-zsh_file=$repo_root/packaging/shedos-system/tree/usr/share/zsh/site-functions/_shedman
+bash_file=$repo_root/tree/usr/share/bash-completion/completions/shedman
+zsh_file=$repo_root/tree/usr/share/zsh/site-functions/_shedman
 
 if [[ ! -f $bash_file ]]; then
     echo "FATAL: $bash_file missing" >&2
@@ -152,7 +152,7 @@ fi
 # T5b: Each of those subcommands emits at least one single-letter short
 #      flag, so `shedman <cmd> -<tab>` works alongside long flags.
 for cmd in update apply doctor rollback; do
-    real=$repo_root/packaging/shedos-system/tree/usr/libexec/shedman/$cmd
+    real=$repo_root/tree/usr/libexec/shedman/$cmd
     if [[ ! -x $real ]]; then
         _fail T5_real_"$cmd" "missing binary"
         continue
@@ -189,7 +189,7 @@ else
 fi
 
 # T8: fish completion file parses cleanly under `fish -n`.
-fish_file=$repo_root/packaging/shedos-system/tree/usr/share/fish/vendor_completions.d/shedman.fish
+fish_file=$repo_root/tree/usr/share/fish/vendor_completions.d/shedman.fish
 if [[ ! -f $fish_file ]]; then
     _fail T8_fish_file_present "fish completion file missing: $fish_file"
 elif command -v fish >/dev/null 2>&1; then
@@ -204,7 +204,7 @@ fi
 
 # T9: every opt-in subcommand emits non-empty output for --complete-fish.
 for cmd in update apply doctor rollback; do
-    real=$repo_root/packaging/shedos-system/tree/usr/libexec/shedman/$cmd
+    real=$repo_root/tree/usr/libexec/shedman/$cmd
     if [[ ! -x $real ]]; then
         _fail T9_fish_"$cmd" "missing binary"
         continue

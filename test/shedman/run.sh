@@ -22,15 +22,15 @@ set -uo pipefail
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 repo_root=$(cd -- "$here/../.." && pwd)
 
-dispatcher=$repo_root/packaging/shedos-system/tree/usr/bin/shedman
-libexec_sys=$repo_root/packaging/shedos-system/tree/usr/libexec/shedman
+dispatcher=$repo_root/tree/usr/bin/shedman
+libexec_sys=$repo_root/tree/usr/libexec/shedman
 libexec_hypr=$repo_root/packaging/shedos-hyprland/tree/usr/libexec/shedman
-bin_sys=$repo_root/packaging/shedos-system/tree/usr/bin
+bin_sys=$repo_root/tree/usr/bin
 bin_hypr=$repo_root/packaging/shedos-hyprland/tree/usr/bin
 
 # apply/doctor import apply_core at module load; point them at the in-repo copy
 # so their --help / --help-summary don't ImportError when invoked from the tree.
-export SHEDOS_LIB_ROOT=$repo_root/packaging/shedos-system/tree/usr/lib/shedos
+export SHEDOS_LIB_ROOT=$repo_root/tree/usr/lib/shedos
 
 if [[ ! -x $dispatcher ]]; then
     echo "FATAL: $dispatcher not executable" >&2

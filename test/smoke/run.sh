@@ -15,7 +15,7 @@ repo_root=$(cd -- "$here/../.." && pwd)
 # datetime (themed TUI) imports the shared shedos_palette module from
 # SHEDOS_LIB_ROOT (default /usr/lib/shedos, the installed path); point it
 # at the tree so even `--help-summary` can load the module.
-export SHEDOS_LIB_ROOT="$repo_root/packaging/shedos-system/tree/usr/lib/shedos"
+export SHEDOS_LIB_ROOT="$repo_root/tree/usr/lib/shedos"
 
 pass=0 fail=0
 failures=()
@@ -23,11 +23,11 @@ _ok()   { echo "ok: $1"; ((pass++)); }
 _fail() { echo "FAIL: $1: $2" >&2; failures+=("$1"); ((fail++)); }
 
 TOOLS=(
-    packaging/shedos-system/tree/usr/libexec/shedman/datetime
-    packaging/shedos-system/tree/usr/libexec/shedman/db
-    packaging/shedos-system/tree/usr/libexec/shedman/dock
-    packaging/shedos-system/tree/usr/libexec/shedman/fingerprint
-    packaging/shedos-system/tree/usr/libexec/shedman/theme
+    tree/usr/libexec/shedman/datetime
+    tree/usr/libexec/shedman/db
+    tree/usr/libexec/shedman/dock
+    tree/usr/libexec/shedman/fingerprint
+    tree/usr/libexec/shedman/theme
     packaging/shedos-hyprland/tree/usr/libexec/shedman/browser
     packaging/shedos-hyprland/tree/usr/libexec/shedman/launcher
     packaging/shedos-hyprland/tree/usr/libexec/shedman/power
