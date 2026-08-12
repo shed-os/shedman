@@ -24,4 +24,4 @@ something" checkpoint. Checkpoints use the same conventions as
 
 # SEE ALSO
 
-*shedman-rollback*(1), *shedman-upgrade-history*(1)
+*shedman*(1), *shedman-rollback*(1), *shedman-upgrade-history*(1)

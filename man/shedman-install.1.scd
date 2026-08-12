@@ -24,4 +24,4 @@ nothing is installed sight-unseen.
 
 # SEE ALSO
 
-*shedman-uninstall*(1), *shedman-update*(1)
+*shedman*(1), *shedman-uninstall*(1), *shedman-update*(1)

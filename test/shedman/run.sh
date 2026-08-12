@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
-# run.sh — test harness for the `shedman` unified dispatcher and its silent
-# back-compat shims.
+# run.sh — test harness for the `shedman` unified dispatcher.
 #
-# No fixture tree — the dispatcher is a tiny script and the shims are
-# 2-liners, so every check is a self-contained assertion.
+# No fixture tree — the dispatcher is a tiny script, so every check is a
+# self-contained assertion.
 #
 # Covers:
 #   T1  bare `shedman` lists subcommands (and does not list hidden _* helpers).
@@ -12,9 +11,6 @@
 #   T4  `shedman <cmd> --help` is accepted.
 #   T5  argv is preserved across dispatch (via a synthetic probe subcommand).
 #   T6  unknown command → exit 2 + did-you-mean output.
-#   T7  every legacy shim points at an existing shedman path
-#       (catches divergence between /usr/bin/shedos-* and /usr/libexec/shedman/*).
-#   T8  every shim is +x and a valid shell script.
 #   T9  dispatcher `version` prints *something* (falls back to "unknown" off-system).
 
 set -uo pipefail
@@ -23,10 +19,7 @@ here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 repo_root=$(cd -- "$here/../.." && pwd)
 
 dispatcher=$repo_root/tree/usr/bin/shedman
-libexec_sys=$repo_root/tree/usr/libexec/shedman
-libexec_hypr=$repo_root/packaging/shedos-hyprland/tree/usr/libexec/shedman
-bin_sys=$repo_root/tree/usr/bin
-bin_hypr=$repo_root/packaging/shedos-hyprland/tree/usr/bin
+libexec=$repo_root/tree/usr/libexec/shedman
 
 # apply/doctor import apply_core at module load; point them at the in-repo copy
 # so their --help / --help-summary don't ImportError when invoked from the tree.
@@ -63,16 +56,14 @@ _run_dispatcher() {
 }
 
 # ---------------------------------------------------------------------------
-# Stage a merged /usr/libexec/shedman/ dir from both package trees so the
-# dispatcher has the full roster available. Also drop a probe subcommand for
-# T5 (argv preservation).
+# Stage a /usr/libexec/shedman/ dir from the package tree so the dispatcher has
+# the roster available. Also drop a probe subcommand for T5 (argv preservation).
 # ---------------------------------------------------------------------------
 
 stage=$(mktemp -d -t shedman-test.XXXXXX)
 trap 'rm -rf "$stage"' EXIT
 mkdir -p "$stage"
-cp -a "$libexec_sys"/. "$stage/"
-cp -a "$libexec_hypr"/. "$stage/"
+cp -a "$libexec"/. "$stage/"
 
 # Probe subcommand: prints argv one-per-line so we can assert it was
 # forwarded verbatim (no dispatcher-level re-escaping).
@@ -181,47 +172,6 @@ if (( rc_unknown == 2 )) \
 else
     _fail T6_unknown_did_you_mean "rc=$rc_unknown out=$out_unknown"
 fi
-
-# ---------------------------------------------------------------------------
-# T7 + T8: every shim points at a valid subcommand (and is +x, valid bash).
-#
-# A shim looks like:
-#   #!/usr/bin/env bash
-#   exec /usr/bin/shedman <word> [<word> ...] "$@"
-# We grep out the <word>s, verify the leading word (subcommand) exists in
-# the libexec tree and the remaining words are known flags/modes.
-# ---------------------------------------------------------------------------
-
-known_subcmds=$(find "$libexec_sys" "$libexec_hypr" -maxdepth 1 -type f \
-    -executable ! -name '_*' -printf '%f\n' | sort -u)
-
-_check_shims() {
-    local root=$1 label=$2 shim
-    for shim in "$root"/shedos-*; do
-        [[ -f $shim ]] || continue
-        # Only validate files that are actually shedman shims. Some files
-        # under /usr/bin/ that happen to share the shedos- prefix are
-        # genuine binaries (e.g. shedos-user-session, a hyprland autostart
-        # helper) and not part of the shedman dispatcher surface.
-        grep -q '^exec /usr/bin/shedman ' "$shim" 2>/dev/null || continue
-        if [[ ! -x $shim ]]; then
-            _fail "T8_${label}_$(basename "$shim")" "shim not +x: $shim"
-            continue
-        fi
-        local line subcmd
-        line=$(awk '/^exec \/usr\/bin\/shedman /{print; exit}' "$shim")
-        subcmd=$(awk '{print $3}' <<<"$line")
-        if ! grep -qx "$subcmd" <<<"$known_subcmds"; then
-            _fail "T7_${label}_$(basename "$shim")" \
-                "shim $(basename "$shim") points at missing subcmd '$subcmd'"
-            continue
-        fi
-        _ok "T7_${label}_$(basename "$shim")"
-    done
-}
-
-_check_shims "$bin_sys" system
-_check_shims "$bin_hypr" hypr
 
 # ---------------------------------------------------------------------------
 # T9: `shedman version` prints something. Off-system this should fall back

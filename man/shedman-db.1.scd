@@ -36,4 +36,4 @@ so project databases need no superuser and no pg_hba edits.
 
 # SEE ALSO
 
-*shedman-services*(1)
+*shedman*(1), *shedman-services*(1)

@@ -47,4 +47,4 @@ actions only.
 
 # SEE ALSO
 
-*timedatectl*(1), *systemd-timesyncd*(8).
+*shedman*(1), *timedatectl*(1), *systemd-timesyncd*(8).

@@ -24,4 +24,4 @@ line; *r* refreshes units; *?* help; *q* quits.
 
 # SEE ALSO
 
-*shedman-upgrade-history*(1)
+*shedman*(1), *shedman-upgrade-history*(1)

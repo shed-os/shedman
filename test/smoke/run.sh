@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# run.sh — contract smoke tests for shedman tools without a dedicated
-# suite (datetime, db, dock, fingerprint, theme, browser, launcher,
-# power). Asserts the cheap invariants every subcommand must honor:
+# run.sh — contract smoke tests for the shedman verbs without a dedicated
+# suite (datetime, db). Asserts the cheap invariants every subcommand must
+# honor:
 #   - --help-summary prints one nonempty line, exit 0
 #   - -h/--help exits 0 and mentions usage
 #   - completion contract answers exit 0 and never hang
@@ -12,10 +12,9 @@ set -uo pipefail
 
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 repo_root=$(cd -- "$here/../.." && pwd)
-# datetime (themed TUI) imports the shared shedos_palette module from
-# SHEDOS_LIB_ROOT (default /usr/lib/shedos, the installed path); point it
-# at the tree so even `--help-summary` can load the module.
-export SHEDOS_LIB_ROOT="$repo_root/tree/usr/lib/shedos"
+# datetime (themed TUI) imports shedos_palette at module load, and that module
+# ships with another package, so SHEDOS_LIB_ROOT is left at its default and the
+# installed copy is what answers.
 
 pass=0 fail=0
 failures=()
@@ -25,13 +24,6 @@ _fail() { echo "FAIL: $1: $2" >&2; failures+=("$1"); ((fail++)); }
 TOOLS=(
     tree/usr/libexec/shedman/datetime
     tree/usr/libexec/shedman/db
-    tree/usr/libexec/shedman/dock
-    tree/usr/libexec/shedman/fingerprint
-    tree/usr/libexec/shedman/theme
-    packaging/shedos-hyprland/tree/usr/libexec/shedman/browser
-    packaging/shedos-hyprland/tree/usr/libexec/shedman/launcher
-    packaging/shedos-hyprland/tree/usr/libexec/shedman/power
-    packaging/shedos-tour/tree/usr/libexec/shedman/tour
 )
 
 for tool in "${TOOLS[@]}"; do

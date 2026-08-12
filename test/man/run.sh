@@ -20,19 +20,8 @@ here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 repo_root=$(cd -- "$here/../.." && pwd)
 srcdir=$repo_root/man
 
-PAGES=(
-    shedman.1
-    shedman-update.1
-    shedman-apply.1
-    shedman-doctor.1
-    shedman-rollback.1
-    shedman-config.1
-    shedman-status.1
-    shedman-secureboot.1
-    shedman-tpm2.1
-    shedman-key.1
-    shedman-encrypt.1
-)
+# Every page the repo ships, so a new one is covered the moment it lands.
+mapfile -t PAGES < <(cd "$srcdir" && printf '%s\n' *.scd | sed 's/\.scd$//')
 
 # Skip gracefully if scdoc isn't installed (mirrors the T6 zsh -n
 # pattern in test/completions/run.sh). Hard rule: never silently

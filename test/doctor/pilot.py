@@ -31,6 +31,24 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 TOOL = REPO_ROOT / "tree/usr/libexec/shedman/doctor"
 LIB_ROOT = REPO_ROOT / "tree/usr/lib/shedos"
+# The DKMS audit shells out to dkms-coverage, which ships with another package,
+# so the lib root the cases run against is this repo's over the installed one.
+INSTALLED_LIB_ROOT = Path("/usr/lib/shedos")
+
+
+def _lib_root(td: Path) -> Path:
+    """A lib root holding this repo's modules and whatever else is installed."""
+    root = td / "lib"
+    root.mkdir(exist_ok=True)
+    for src in (INSTALLED_LIB_ROOT, LIB_ROOT):
+        if not src.is_dir():
+            continue
+        for f in src.iterdir():
+            dst = root / f.name
+            if dst.is_symlink() or dst.exists():
+                dst.unlink()
+            dst.symlink_to(f)
+    return root
 
 
 def _write_stub_systemctl(dst: Path, enabled: list[str],
@@ -76,7 +94,7 @@ def _make_env(td: Path, *, notify_log: Path, refresh_log: Path,
         "SHEDOS_APPLY_ETC_ROOT":     str(td / "etc"),
         "SHEDOS_APPLY_STATE_ROOT":   str(td / "state"),
         "SHEDOS_APPLY_SYSTEMCTL":    str(td / "stubs" / "systemctl"),
-        "SHEDOS_LIB_ROOT":           str(LIB_ROOT),
+        "SHEDOS_LIB_ROOT":           str(_lib_root(td)),
         "NO_COLOR":                  "1",
         "SHEDOS_DOCTOR_NOTIFY_CMD":  f"sh -c 'printf \"%s\\t%s\\n\" \"$0\" \"$1\" >> {notify_log}'",
         "SHEDOS_DOCTOR_REFRESH_CMD": f"sh -c 'echo REFRESHED >> {refresh_log}'",

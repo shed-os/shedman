@@ -37,4 +37,4 @@ database, so it never touches pacman's real sync state.
 
 # SEE ALSO
 
-*shedman-update*(1), *shedman-status*(1)
+*shedman*(1), *shedman-update*(1), *shedman-status*(1)

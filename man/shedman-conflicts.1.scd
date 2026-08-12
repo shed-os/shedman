@@ -34,4 +34,4 @@ Resolve conflicts with *shedman config --review*.
 
 # SEE ALSO
 
-*shedman-config*(1), *shedman-status*(1)
+*shedman*(1), *shedman-config*(1), *shedman-status*(1)

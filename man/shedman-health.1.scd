@@ -51,4 +51,4 @@ prints the per-metric table.
 
 # SEE ALSO
 
-*shedman-status*(1)
+*shedman*(1), *shedman-status*(1)
