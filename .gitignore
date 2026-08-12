@@ -1,0 +1,17 @@
+# makepkg byproducts: pkg/ is what package() installs into and src/ is where
+# makepkg would extract sources. Neither holds anything of ours — the PKGBUILD
+# sits at the root and the tracked tree is tree/.
+pkg/
+src/
+*.pkg.tar.zst
+*.pkg.tar.zst.sig
+*.log
+
+# scdoc renders man/*.scd here at build time
+man/build/
+
+# python byte-cache from running the verbs out of the tree
+__pycache__/
+
+# where the shared pipeline collects what it built
+dist/
