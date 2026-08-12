@@ -2,3 +2,4 @@ name = "datetime"
 package = "shedman"
 man = "shedman-datetime.1"
 description = "set timezone, network time, and the system clock"
+completes = false

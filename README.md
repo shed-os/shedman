@@ -24,6 +24,10 @@ description = "interactive ShedOS upgrade (pacman + AUR + config sync)"
 requires = ["migrate"]
 ```
 
+A verb with no flags of its own says `completes = false` and answers the
+completion contract with nothing. Silence has to be declared: otherwise a verb
+that never read the flag reads exactly like one that has nothing to offer.
+
 The dispatcher reads the declarations at startup. Two packages claiming one
 name is an error rather than a race the last install wins; an executable with
 no declaration is ignored and `shedman doctor` says whose it is. `shedman help`
