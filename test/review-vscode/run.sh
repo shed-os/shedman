@@ -34,7 +34,7 @@ set -uo pipefail
 
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 repo_root=$(cd -- "$here/../.." && pwd)
-tool=$repo_root/packaging/shedos-system/tree/usr/libexec/shedman/_config-review
+tool=$repo_root/tree/usr/libexec/shedman/_config-review
 fake_code=$here/fake-code
 
 if [[ ! -x $tool ]]; then

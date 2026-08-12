@@ -33,7 +33,7 @@ from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-TOOL_PATH = REPO_ROOT / "packaging/shedos-system/tree/usr/libexec/shedman/upgrade-history"
+TOOL_PATH = REPO_ROOT / "tree/usr/libexec/shedman/upgrade-history"
 
 
 def _load_module():
