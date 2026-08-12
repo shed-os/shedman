@@ -86,6 +86,25 @@ def pacman_fence_path() -> Path:
                                "/usr/lib/shedos/pacman-fence"))
 
 
+# The repository names shedos-system owns. Asked of the library rather than
+# repeated here, because a box may have renamed its channels and the answer has
+# to follow; the names ShedOS ships stand in when the library cannot be
+# reached, so a declaration of one is refused either way.
+DEFAULT_RESERVED_REPOS = ("shedos", "shedostest")
+
+
+def reserved_repo_names() -> set[str]:
+    try:
+        proc = subprocess.run(["bash", str(pacman_fence_path()), "reserved"],
+                              capture_output=True, text=True)
+    except OSError:
+        return set(DEFAULT_RESERVED_REPOS)
+    if proc.returncode != 0:
+        return set(DEFAULT_RESERVED_REPOS)
+    names = {line.strip() for line in proc.stdout.splitlines() if line.strip()}
+    return names or set(DEFAULT_RESERVED_REPOS)
+
+
 def fstab_path() -> Path:
     raw = os.environ.get("SHEDOS_APPLY_FSTAB_PATH")
     if raw:
@@ -780,7 +799,13 @@ def validate_doc(doc: dict) -> ValidatedConfig:
         if not isinstance(repos_raw, dict):
             raise SchemaError("[pacman.repos] must be a table")
         cfg.pacman.managed = True
+        reserved = reserved_repo_names() if repos_raw else set()
         for name, stanza in repos_raw.items():
+            if name in reserved:
+                raise SchemaError(
+                    f"[pacman.repos.{name}] is a ShedOS channel and "
+                    f"shedos-system writes it; remove the table"
+                )
             if not REPO_NAME_RE.match(name):
                 raise SchemaError(
                     f"[pacman.repos.{name}] is not a valid pacman repo name "

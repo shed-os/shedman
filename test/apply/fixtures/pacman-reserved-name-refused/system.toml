@@ -1,0 +1,5 @@
+schema = 1
+
+[pacman.repos.shedostest]
+server   = "https://repo.shedos.org/test/$arch"
+siglevel = "Required DatabaseRequired"
