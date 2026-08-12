@@ -1,0 +1,12 @@
+# shedman configuration.
+#
+# Every key here has the same value compiled into the dispatcher and the shell
+# completions, so an edited, missing or unreadable file changes nothing about
+# how shedman behaves out of the box.
+
+# Where the verbs live. `shedman <verb>` execs <libexec>/<verb>, and any
+# package may install one there.
+libexec = "/usr/libexec/shedman"
+
+# The package `shedman version` reports the version of.
+package = "shedman"

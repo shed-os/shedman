@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # shedman; unified dispatcher for ShedOS utilities.
 #
-# Every executable file under /usr/libexec/shedman/ is a subcommand.
-# `shedman foo args…` execs /usr/libexec/shedman/foo with argv preserved.
+# Every executable file under the configured libexec directory is a
+# subcommand. `shedman foo args…` execs <libexec>/foo with argv preserved.
 # Packages drop additional subcommands by installing files to that
 # directory; `shedman help` lists everything it finds at runtime.
 #
@@ -13,7 +13,20 @@
 
 set -uo pipefail
 
-LIBEXEC=/usr/libexec/shedman
+CONFIG=${SHEDMAN_CONFIG:-/etc/shedman/shedman.toml}
+
+_config() {
+    # One `key = "value"` line out of the config file. The default is the
+    # answer whenever the file is absent, unreadable or silent about the key,
+    # so nothing here can leave shedman unable to run.
+    local key=$1 value
+    value=$(sed -n "s/^[[:space:]]*${key}[[:space:]]*=[[:space:]]*\"\([^\"]*\)\".*/\1/p" \
+        "$CONFIG" 2>/dev/null | head -1)
+    printf '%s\n' "${value:-$2}"
+}
+
+LIBEXEC=$(_config libexec /usr/libexec/shedman)
+PACKAGE=$(_config package shedman)
 PROG=$(basename "$0")
 
 _usage() {
@@ -78,10 +91,10 @@ _did_you_mean() {
 }
 
 _version() {
-    # Read pkgver from the installed shedos-system package. Fall back to
-    # "unknown" in development when running from the repo tree.
+    # Read pkgver from the installed package. Fall back to "unknown" in
+    # development when running from the repo tree.
     local v
-    if v=$(pacman -Qi shedos-system 2>/dev/null | awk -F' *: *' '$1=="Version"{print $2; exit}'); then
+    if v=$(pacman -Qi "$PACKAGE" 2>/dev/null | awk -F' *: *' '$1=="Version"{print $2; exit}'); then
         [[ -n $v ]] && { printf '%s\n' "$v"; return; }
     fi
     printf 'unknown\n'

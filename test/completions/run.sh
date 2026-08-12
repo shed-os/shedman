@@ -8,9 +8,8 @@
 #   * falls back to filename completion otherwise
 #
 # Every check builds a disposable libexec stage dir with a handful of
-# stub subcommands, rewrites the hardcoded `libexec=/usr/libexec/shedman`
-# line in the completion file to point at the stage, and sources it in
-# a subshell. For bash we invoke `_shedman` with a simulated COMP_WORDS
+# stub subcommands, names the stage as the libexec directory in a config
+# file of its own, and sources the completion file in a subshell. For bash we invoke `_shedman` with a simulated COMP_WORDS
 # and read COMPREPLY. zsh uses a scripted completion driver (`compinit`
 # + `compdef` + programmatic invocation) that's brittle across zsh
 # versions, so we instead syntax-check the file with `zsh -n` and trust
@@ -54,7 +53,7 @@ _fail() {
 # ---------------------------------------------------------------------------
 
 stage=$(mktemp -d -t shedman-completion-test.XXXXXX)
-trap 'rm -rf "$stage"' EXIT
+trap 'rm -rf "$stage" "$conf"' EXIT
 
 cat >"$stage/cmd-a" <<'EOF'
 #!/usr/bin/env bash
@@ -81,10 +80,11 @@ EOF
 
 chmod +x "$stage/cmd-a" "$stage/cmd-b" "$stage/_hidden"
 
-# Rewrite the completion file's libexec path to point at the stage.
-bash_wrapper=$(mktemp -t shedman-bash-comp.XXXXXX)
-sed "s#^    libexec=/usr/libexec/shedman\$#    libexec=$stage#" \
-    "$bash_file" >"$bash_wrapper"
+# The completers read where the verbs live out of shedman's config file, so
+# the stage is named there and the shipped files are what run.
+conf=$(mktemp -t shedman-conf.XXXXXX)
+printf 'libexec = "%s"\n' "$stage" > "$conf"
+export SHEDMAN_CONFIG=$conf
 
 # Helper: drive the bash completion function, print COMPREPLY lines.
 # The completion file is self-contained (no _init_completion /
@@ -95,7 +95,7 @@ _drive_bash() {
     local cword=$((${#comp_words[@]} - 1))
     (
         # shellcheck disable=SC1090
-        source "$bash_wrapper"
+        source "$bash_file"
         COMP_WORDS=( "${comp_words[@]}" )
         COMP_CWORD=$cword
         _shedman

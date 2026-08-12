@@ -1,9 +1,9 @@
 # bash completion for the shedman unified CLI.
 #
-# Subcommand list discovered at completion time by globbing
-# /usr/libexec/shedman/*. Packages dropping new subcommands there
-# become completable without reinstalling this file. Filenames
-# prefixed with `_` (internal helpers) are hidden.
+# Subcommand list discovered at completion time by globbing the libexec
+# directory /etc/shedman/shedman.toml names. Packages dropping new
+# subcommands there become completable without reinstalling this file.
+# Filenames prefixed with `_` (internal helpers) are hidden.
 #
 # Per-subcommand flag completion defers to `shedman <cmd>
 # --complete-bash` if the subcommand honors it. Every other subcommand
@@ -12,9 +12,18 @@
 # Self-contained: no dependency on the bash-completion package's
 # _init_completion / _filedir helpers.
 
+_shedman_config() {
+    # One `key = "value"` line out of shedman's config file, or the default
+    # when the file is absent, unreadable or silent about the key.
+    local value
+    value=$(sed -n "s/^[[:space:]]*${1}[[:space:]]*=[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p" \
+        "${SHEDMAN_CONFIG:-/etc/shedman/shedman.toml}" 2>/dev/null | head -1)
+    printf '%s\n' "${value:-$2}"
+}
+
 _shedman() {
     local cur prev cword libexec
-    libexec=/usr/libexec/shedman
+    libexec=$(_shedman_config libexec /usr/libexec/shedman)
     cword=$COMP_CWORD
     cur=${COMP_WORDS[cword]}
     prev=${COMP_WORDS[cword-1]-}

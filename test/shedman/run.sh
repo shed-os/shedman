@@ -12,6 +12,8 @@
 #   T5  argv is preserved across dispatch (via a synthetic probe subcommand).
 #   T6  unknown command → exit 2 + did-you-mean output.
 #   T9  dispatcher `version` prints *something* (falls back to "unknown" off-system).
+#   T10 a config file that is not there leaves the compiled defaults in charge.
+#   T11 the shipped config file says exactly what those defaults say.
 
 set -uo pipefail
 
@@ -47,14 +49,6 @@ _ok() {
     ((pass++))
 }
 
-_run_dispatcher() {
-    # Run the dispatcher with LIBEXEC pointed at a staged merged tree so we
-    # exercise both system + hyprland subcommands. We don't rely on the
-    # system having /usr/libexec/shedman/ populated.
-    local stage=$1; shift
-    env PATH="$stage:$PATH" "$dispatcher" "$@"
-}
-
 # ---------------------------------------------------------------------------
 # Stage a /usr/libexec/shedman/ dir from the package tree so the dispatcher has
 # the roster available. Also drop a probe subcommand for T5 (argv preservation).
@@ -82,18 +76,18 @@ done
 PROBE
 chmod +x "$stage/_probe"
 
-# The dispatcher scans /usr/libexec/shedman, not $stage — so for T1..T6 we
-# override the hardcoded path via a drop-in wrapper.
-wrapper=$(mktemp -t shedman-wrapper.XXXXXX)
-sed "s#^LIBEXEC=/usr/libexec/shedman#LIBEXEC=$stage#" "$dispatcher" >"$wrapper"
-chmod +x "$wrapper"
-trap 'rm -rf "$stage" "$wrapper"' EXIT
+# The dispatcher reads where its verbs live out of its config file, so the
+# stage is named there and the dispatcher itself runs exactly as shipped.
+conf=$(mktemp -t shedman-conf.XXXXXX)
+printf 'libexec = "%s"\n' "$stage" > "$conf"
+export SHEDMAN_CONFIG=$conf
+trap 'rm -rf "$stage" "$conf"' EXIT
 
 # ---------------------------------------------------------------------------
 # T1: bare `shedman` lists subcommands
 # ---------------------------------------------------------------------------
 
-out=$("$wrapper" 2>&1) || true
+out=$("$dispatcher" 2>&1) || true
 if grep -q '^Available subcommands:' <<<"$out" \
         && grep -q '^  apply ' <<<"$out" \
         && grep -q '^  update ' <<<"$out" \
@@ -116,7 +110,7 @@ fi
 # T2: `shedman help` same as bare
 # ---------------------------------------------------------------------------
 
-out_help=$("$wrapper" help 2>&1) || true
+out_help=$("$dispatcher" help 2>&1) || true
 if [[ "$out" == "$out_help" ]]; then
     _ok T2_help_equals_bare
 else
@@ -127,8 +121,8 @@ fi
 # T3: `shedman help <cmd>` forwards to --help
 # ---------------------------------------------------------------------------
 
-out_help_apply=$("$wrapper" help apply 2>&1) || true
-out_apply_help=$("$wrapper" apply --help 2>&1) || true
+out_help_apply=$("$dispatcher" help apply 2>&1) || true
+out_apply_help=$("$dispatcher" apply --help 2>&1) || true
 if [[ "$out_help_apply" == "$out_apply_help" && -n "$out_help_apply" ]]; then
     _ok T3_help_cmd_forwards
 else
@@ -139,7 +133,7 @@ fi
 # T4: `shedman <cmd> --help` works
 # ---------------------------------------------------------------------------
 
-if "$wrapper" apply --help >/dev/null 2>&1; then
+if "$dispatcher" apply --help >/dev/null 2>&1; then
     _ok T4_cmd_help_ok
 else
     _fail T4_cmd_help_ok "'apply --help' failed"
@@ -149,7 +143,7 @@ fi
 # T5: argv preservation via the probe
 # ---------------------------------------------------------------------------
 
-out_probe=$("$wrapper" _probe hello 'a b c' --flag=value 2>&1) || true
+out_probe=$("$dispatcher" _probe hello 'a b c' --flag=value 2>&1) || true
 if grep -q '^argv\[1\]=hello$' <<<"$out_probe" \
         && grep -q '^argv\[2\]=a b c$' <<<"$out_probe" \
         && grep -q '^argv\[3\]=--flag=value$' <<<"$out_probe"; then
@@ -162,7 +156,7 @@ fi
 # T6: unknown command → exit 2 + did-you-mean
 # ---------------------------------------------------------------------------
 
-out_unknown=$("$wrapper" updat 2>&1)
+out_unknown=$("$dispatcher" updat 2>&1)
 rc_unknown=$?
 if (( rc_unknown == 2 )) \
         && grep -q 'unknown command' <<<"$out_unknown" \
@@ -175,16 +169,43 @@ fi
 
 # ---------------------------------------------------------------------------
 # T9: `shedman version` prints something. Off-system this should fall back
-# to "unknown" (pacman -Qi shedos-system fails); on-system it should print
+# to "unknown" (pacman -Qi shedman fails); on-system it should print
 # a version string.
 # ---------------------------------------------------------------------------
 
-out_version=$("$wrapper" version 2>&1) || true
+out_version=$("$dispatcher" version 2>&1) || true
 if [[ -n $out_version ]]; then
     _ok T9_version_prints
 else
     _fail T9_version_prints "empty output"
 fi
+
+# ---------------------------------------------------------------------------
+# T10: no config file — the compiled defaults answer and nothing breaks.
+# ---------------------------------------------------------------------------
+
+out_nocfg=$(SHEDMAN_CONFIG=$stage/not-a-file "$dispatcher" version 2>&1)
+if [[ -n $out_nocfg ]]; then
+    _ok T10_missing_config_falls_back
+else
+    _fail T10_missing_config_falls_back "empty output"
+fi
+
+# ---------------------------------------------------------------------------
+# T11: the shipped file and the compiled defaults agree, which is what makes
+# the config layer behaviour-preserving.
+# ---------------------------------------------------------------------------
+
+shipped=$repo_root/tree/etc/shedman/shedman.toml
+for key in libexec package; do
+    want=$(sed -n "s/^$key = \"\(.*\)\"$/\1/p" "$shipped")
+    got=$(sed -n "s/.*_config $key \([^)]*\))/\1/p" "$dispatcher" | head -1)
+    if [[ -n $want && $want == "$got" ]]; then
+        _ok "T11_default_$key"
+    else
+        _fail "T11_default_$key" "shipped '$want' but the dispatcher defaults to '$got'"
+    fi
+done
 
 # ---------------------------------------------------------------------------
 # Summary

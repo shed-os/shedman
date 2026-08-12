@@ -1,28 +1,39 @@
 #compdef shedman
 # zsh completion for the shedman unified CLI.
 #
-# Subcommand list discovered at completion time by globbing
-# /usr/libexec/shedman/*. Packages dropping new subcommands there
-# become completable without reinstalling this file. Filenames
-# prefixed with `_` (internal helpers) are hidden.
+# Subcommand list discovered at completion time by globbing the libexec
+# directory /etc/shedman/shedman.toml names. Packages dropping new
+# subcommands there become completable without reinstalling this file.
+# Filenames prefixed with `_` (internal helpers) are hidden.
 #
 # Per-subcommand argument completion defers to `shedman <cmd>
 # --complete-zsh` if the subcommand honors it. Every other subcommand
 # falls back to filename completion.
 
+_shedman_config() {
+    # One `key = "value"` line out of shedman's config file, or the default
+    # when the file is absent, unreadable or silent about the key.
+    local value
+    value=$(sed -n "s/^[[:space:]]*${1}[[:space:]]*=[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p" \
+        "${SHEDMAN_CONFIG:-/etc/shedman/shedman.toml}" 2>/dev/null | head -1)
+    printf '%s\n' "${value:-$2}"
+}
+
 _shedman() {
     local -a _subcmds _builtin _flags
     local state line
+    local libexec
+    libexec=$(_shedman_config libexec /usr/libexec/shedman)
 
     _builtin=(
         'help:list subcommands or show --help for <cmd>'
-        'version:print the installed shedos-system version'
+        'version:print the installed shedman version'
     )
 
     _subcmds=()
-    if [[ -d /usr/libexec/shedman ]]; then
+    if [[ -d $libexec ]]; then
         local f name summary
-        for f in /usr/libexec/shedman/*(N); do
+        for f in $libexec/*(N); do
             [[ -x $f && -f $f ]] || continue
             name=${f:t}
             [[ $name == _* ]] && continue
@@ -54,7 +65,7 @@ _shedman() {
                 version|--help|-h|--version|-V)
                     ;;
                 *)
-                    local bin=/usr/libexec/shedman/$cmd
+                    local bin=$libexec/$cmd
                     if [[ -x $bin ]]; then
                         local prev_word=""
                         if (( CURRENT > 2 )); then

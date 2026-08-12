@@ -1,8 +1,8 @@
 # fish completion for the shedman unified CLI.
 #
-# Subcommand list is discovered at completion time by globbing
-# /usr/libexec/shedman/*; same pattern as the bash + zsh completers.
-# Filenames prefixed with `_` (internal helpers) are hidden.
+# Subcommand list is discovered at completion time by globbing the libexec
+# directory /etc/shedman/shedman.toml names; same pattern as the bash + zsh
+# completers. Filenames prefixed with `_` (internal helpers) are hidden.
 #
 # Per-subcommand flag completion defers to `shedman <cmd>
 # --complete-fish` if the subcommand honors it. Other subcommands fall
@@ -16,9 +16,20 @@
 # Subcommand discovery (position 1).
 # ---------------------------------------------------------------------------
 
+function __shedman_config
+    # One `key = "value"` line out of shedman's config file, or the default
+    # when the file is absent, unreadable or silent about the key.
+    set -l conf $SHEDMAN_CONFIG
+    test -n "$conf"; or set conf /etc/shedman/shedman.toml
+    set -l value (sed -n "s/^[ \t]*$argv[1][ \t]*=[ \t]*\"\\([^\"]*\\)\".*/\\1/p" \
+        "$conf" 2>/dev/null | head -1)
+    test -n "$value"; and echo $value; or echo $argv[2]
+end
+
 function __shedman_subcommands
-    if test -d /usr/libexec/shedman
-        for f in /usr/libexec/shedman/*
+    set -l libexec (__shedman_config libexec /usr/libexec/shedman)
+    if test -d $libexec
+        for f in $libexec/*
             if test -x "$f" -a -f "$f"
                 set name (basename "$f")
                 # Hide _* internal helpers.
@@ -53,7 +64,7 @@ function __shedman_subcmd_flags
     set tokens (commandline -opc)
     if test (count $tokens) -ge 2
         set sub $tokens[2]
-        set bin /usr/libexec/shedman/$sub
+        set bin (__shedman_config libexec /usr/libexec/shedman)/$sub
         if test -x "$bin"
             "$bin" --complete-fish 2>/dev/null
         end
