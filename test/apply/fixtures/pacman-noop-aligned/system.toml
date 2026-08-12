@@ -1,5 +1,5 @@
 schema = 1
 
-[pacman.repos.shedos]
-server   = "https://repo.shedos.org/stable/$arch"
+[pacman.repos.my-mirror]
+server   = "https://pkgs.example.org/$repo/$arch"
 siglevel = "Required DatabaseRequired"

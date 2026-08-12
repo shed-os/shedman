@@ -28,6 +28,13 @@
 #   fixture.sh                 (optional) — shell vars:
 #                                   APPLY_ARGS    default "--yes"
 #                                   EXIT_CODE     default 0
+#                                   EXPECT_OUTPUT a pattern the tool's own
+#                                                 output has to carry, for
+#                                                 the refusals whose whole
+#                                                 point is what they say
+#                                   FIXTURE_FENCE the pacman fence library to
+#                                                 use, for the case that is
+#                                                 about not having one
 #
 # Usage: test/apply/run.sh [fixture-name ...]
 #        (no args = run every fixture)
@@ -114,6 +121,8 @@ _run_one() {
 
     local APPLY_ARGS="--yes"
     local EXIT_CODE=0
+    local EXPECT_OUTPUT=
+    local FIXTURE_FENCE=
     if [[ -f $fdir/fixture.sh ]]; then
         # shellcheck disable=SC1091
         source "$fdir/fixture.sh"
@@ -221,6 +230,7 @@ STUB
         SHEDOS_APPLY_UFW="$stubdir/ufw" \
         SHEDOS_APPLY_PACMAN_KEY="$stubdir/pacman-key" \
         SHEDOS_APPLY_FSTAB_PATH="$etc/fstab" \
+        SHEDOS_APPLY_PACMAN_FENCE="${FIXTURE_FENCE:-${SHEDOS_APPLY_PACMAN_FENCE:-/usr/lib/shedos/pacman-fence}}" \
         SHEDOS_APPLY_BOOT_ROOT="$boot_dir" \
         PATH="$stubdir:$PATH" \
         SHEDOS_LIB_ROOT="$repo_root/tree/usr/lib/shedos" \
@@ -231,6 +241,15 @@ STUB
 
     if (( rc != EXIT_CODE )); then
         echo "FAIL $name: exit $rc (expected $EXIT_CODE)"
+        echo "  output:"
+        printf '    %s\n' "${out//$'\n'/$'\n    '}"
+        failures+=("$name")
+        ((fail++))
+        return
+    fi
+
+    if [[ -n $EXPECT_OUTPUT ]] && ! grep -qF "$EXPECT_OUTPUT" <<<"$out"; then
+        echo "FAIL $name: the output does not carry '$EXPECT_OUTPUT'"
         echo "  output:"
         printf '    %s\n' "${out//$'\n'/$'\n    '}"
         failures+=("$name")

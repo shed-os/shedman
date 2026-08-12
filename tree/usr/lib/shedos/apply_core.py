@@ -21,6 +21,7 @@ Env vars (all shared with shedos-apply):
     SHEDOS_APPLY_UFW            replaces "ufw" (shlex-split)
     SHEDOS_APPLY_PACMAN_KEY     replaces "pacman-key" (shlex-split)
     SHEDOS_APPLY_FSTAB_PATH     replaces /etc/fstab
+    SHEDOS_APPLY_PACMAN_FENCE   replaces /usr/lib/shedos/pacman-fence
 """
 
 from __future__ import annotations
@@ -78,6 +79,11 @@ def ufw_cmd() -> list[str]:
 def pacman_key_cmd() -> list[str]:
     raw = os.environ.get("SHEDOS_APPLY_PACMAN_KEY", "pacman-key")
     return shlex.split(raw)
+
+
+def pacman_fence_path() -> Path:
+    return Path(os.environ.get("SHEDOS_APPLY_PACMAN_FENCE",
+                               "/usr/lib/shedos/pacman-fence"))
 
 
 def fstab_path() -> Path:
@@ -1647,55 +1653,47 @@ def plan_snapper(cfg: ValidatedConfig) -> list[Change]:
 
 # Reconciler: pacman repos; fence-block rewrite of /etc/pacman.conf
 #
-# The fence markers below match those emitted by shedos-system.install so
-# existing installs upgrade smoothly: the install hook writes an initial
-# fence on first install, and shedos-apply takes over subsequent edits.
-
-
-PACMAN_FENCE_OPEN = "# >>> shedos <<<"
-PACMAN_FENCE_CLOSE = "# <<< shedos >>>"
-PACMAN_FENCE_PREAMBLE = (
-    "# Managed by shedos-apply — do not edit between these markers.\n"
-    "# Declarative source: /etc/shedos/system.toml ([pacman.repos]).\n"
-)
+# The blocks are not written here. shedos-system ships the one writer of a
+# managed block, /usr/lib/shedos/pacman-fence, and its install scriptlet is the
+# other caller; two renderers of one file is how a repository declared here
+# used to vanish on the next pacman transaction. The library takes the current
+# file on stdin and hands back the file it should be, which keeps this planner
+# the pure text-to-text shape it needs to diff before it applies.
 
 
 def _pacman_conf_path() -> Path:
     return etc_root() / "pacman.conf"
 
 
-def _render_pacman_fence(repos: dict[str, PacmanRepo]) -> str:
-    """Generate the exact text (including open/close fence lines) that the
-    managed block should contain, given the declared repos."""
-    out = [PACMAN_FENCE_OPEN, PACMAN_FENCE_PREAMBLE.rstrip()]
+def _fence_argv(repos: dict[str, PacmanRepo]) -> list[str]:
+    # A Server URL is allowed an equals sign of its own, so each field is its
+    # own argument rather than packed into one.
+    argv = ["bash", str(pacman_fence_path()), "rewrite-repos"]
     for name in sorted(repos):
         repo = repos[name]
-        out.append("")
-        out.append(f"[{name}]")
-        out.append(f"SigLevel = {repo.siglevel}")
-        out.append(f"Server = {repo.server}")
-    out.append(PACMAN_FENCE_CLOSE)
-    return "\n".join(out) + "\n"
+        argv += ["--repo", name, repo.server, repo.siglevel]
+    return argv
 
 
-def _rewrite_pacman_conf(text: str, new_fence: str) -> str:
-    """Replace the existing fenced block in ``text`` (if any) with
-    ``new_fence``. If no fence exists, append one after a blank line."""
-    lines = text.splitlines(keepends=True)
-    start = end = None
-    for i, line in enumerate(lines):
-        if line.strip() == PACMAN_FENCE_OPEN and start is None:
-            start = i
-        elif line.strip() == PACMAN_FENCE_CLOSE and start is not None:
-            end = i
-            break
-    if start is not None and end is not None:
-        before = "".join(lines[:start])
-        after = "".join(lines[end + 1:])
-        return before + new_fence + after
-    base = text if text.endswith("\n") or not text else text + "\n"
-    sep = "\n" if base and not base.endswith("\n\n") else ""
-    return base + sep + new_fence
+def _rewrite_pacman_conf(text: str, repos: dict[str, PacmanRepo]) -> str:
+    """The file the declared repositories say /etc/pacman.conf should be."""
+    fence = pacman_fence_path()
+    if not fence.is_file():
+        raise SchemaError(
+            f"{fence} is missing; shedos-system ships the one writer of "
+            f"the managed blocks in /etc/pacman.conf"
+        )
+    try:
+        proc = subprocess.run(_fence_argv(repos), input=text,
+                              capture_output=True, text=True)
+    except OSError as e:
+        raise SchemaError(f"{fence} could not be run: {e}") from e
+    if proc.returncode != 0:
+        raise SchemaError(
+            f"{fence} refused to rewrite pacman.conf: "
+            f"{proc.stderr.strip() or proc.returncode}"
+        )
+    return proc.stdout
 
 
 def plan_pacman(cfg: ValidatedConfig) -> list[Change]:
@@ -1703,8 +1701,7 @@ def plan_pacman(cfg: ValidatedConfig) -> list[Change]:
         return []
     conf = _pacman_conf_path()
     current_text = conf.read_text(encoding="utf-8") if conf.exists() else ""
-    desired_fence = _render_pacman_fence(cfg.pacman.repos)
-    desired_text = _rewrite_pacman_conf(current_text, desired_fence)
+    desired_text = _rewrite_pacman_conf(current_text, cfg.pacman.repos)
     if current_text == desired_text:
         return []
     repo_names = sorted(cfg.pacman.repos) or ["(none)"]

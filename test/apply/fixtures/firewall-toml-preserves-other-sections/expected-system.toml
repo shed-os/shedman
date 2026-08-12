@@ -6,8 +6,8 @@ enable = ["snapper-timeline.timer", "snapper-cleanup.timer"]
 [systemd.user]
 enable = ["shedos-update-check.timer"]
 
-[pacman.repos.shedos]
-server = "https://repo.shedos.org/stable/$arch"
+[pacman.repos.my-mirror]
+server = "https://pkgs.example.org/$repo/$arch"
 siglevel = "Required DatabaseRequired"
 
 [network.firewall]
