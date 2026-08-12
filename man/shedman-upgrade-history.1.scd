@@ -27,5 +27,4 @@ checkpoint with *shedman rollback* and its snapshot number.
 
 # SEE ALSO
 
-*shedman*(1), *shedman-update*(1), *shedman-rollback*(1),
-*shedman-snapshot*(1)
+*shedman*(1), *shedman-update*(1), *shedman-rollback*(1), *shedman-snapshot*(1)
