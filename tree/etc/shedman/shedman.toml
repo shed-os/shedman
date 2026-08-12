@@ -14,3 +14,12 @@ package = "shedman"
 # Where verb declarations live. A package shipping a verb puts one here
 # naming itself, and `shedman help` lists what it finds.
 verbs = "/usr/share/shedman/verbs.d"
+
+# The ShedOS package channels. The one writer of the managed blocks in
+# /etc/pacman.conf reads these — `shedman apply` and the shedos-system install
+# scriptlet both go through it — and a name here is a name no declaration may
+# take for itself.
+repo = "shedos"
+repo-url = "https://repo.shedos.org/stable/$arch"
+canary-repo = "shedostest"
+canary-url = "https://repo.shedos.org/test/$arch"

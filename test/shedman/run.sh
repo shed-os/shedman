@@ -253,6 +253,30 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# T14: the four channel keys say what the fence library already believes.
+# The library ships with shedos-system and compiles today's channels in as
+# defaults, so the shipped config file and a box with no config file have to
+# render the same block — the same agreement T11 asks of the dispatcher, for
+# the keys whose reader lives in another package.
+# ---------------------------------------------------------------------------
+
+fence=${SHEDOS_APPLY_PACMAN_FENCE:-/usr/lib/shedos/pacman-fence}
+if [[ ! -f $fence ]]; then
+    _fail T14_channel_keys_agree "$fence is not installed"
+else
+    for channel in stable canary; do
+        if [[ "$(SHEDMAN_CONFIG=$shipped bash "$fence" render $channel)" \
+              == "$(SHEDMAN_CONFIG=/nonexistent bash "$fence" render $channel)" ]]; then
+            _ok "T14_channel_keys_agree_$channel"
+        else
+            _fail "T14_channel_keys_agree_$channel" \
+                "$(diff <(SHEDMAN_CONFIG=$shipped bash "$fence" render $channel) \
+                        <(SHEDMAN_CONFIG=/nonexistent bash "$fence" render $channel))"
+        fi
+    done
+fi
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 
