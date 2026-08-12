@@ -12,7 +12,6 @@ jobs:
     uses: shed-os/shedos-ci/.github/workflows/package-pipeline.yml@main
     with:
       packages: '["."]'
-      ci_ref: completion-contract-strictness
       # The suites run the verbs rather than mocking them, so the container
       # needs what the verbs import and shell out to. zsh, fish, scdoc and
       # man-db are what the completions and man suites check their files
