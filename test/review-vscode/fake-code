@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# fake-code — drop-in replacement for `code` / `codium` used by the VS
+# Code backend integration tests. Records argv to
+# $SHEDOS_FAKE_CODE_ARGV_FILE (one invocation per line) so the test can
+# assert that the workspace was opened correctly. If
+# $SHEDOS_FAKE_CODE_ACTION points at a readable script, the fake sources
+# it with WORKSPACE exported so the fixture can simulate the user
+# editing files inside the workspace before "closing" VS Code.
+#
+# The production invocation shape is:
+#   code --new-window --wait <workspace>
+#
+# Other code invocations (probing PATH, version checks, etc.) are
+# recorded but otherwise ignored.
+
+set -uo pipefail
+
+if [[ -n "${SHEDOS_FAKE_CODE_ARGV_FILE:-}" ]]; then
+    printf '%s\n' "$*" >> "$SHEDOS_FAKE_CODE_ARGV_FILE"
+fi
+
+# If --wait is in argv, the last positional is the workspace.
+if [[ "$*" == *"--wait"* ]]; then
+    args=("$@")
+    WORKSPACE="${args[-1]}"
+    export WORKSPACE
+    if [[ -n "${SHEDOS_FAKE_CODE_ACTION:-}" && -r "$SHEDOS_FAKE_CODE_ACTION" ]]; then
+        bash "$SHEDOS_FAKE_CODE_ACTION"
+    fi
+fi
+exit 0

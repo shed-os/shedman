@@ -1,0 +1,2 @@
+# test-fixture sync-exclude
+.config/excluded.conf
