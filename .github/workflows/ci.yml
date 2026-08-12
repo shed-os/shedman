@@ -16,12 +16,13 @@ jobs:
       # needs what the verbs import and shell out to. zsh, fish, scdoc and
       # man-db are what the completions and man suites check their files
       # with, and a suite that cannot find them bows out instead of running.
-      # shedos-system carries two files this repo does not own and two of the
-      # suites reach: the shared palette module the TUIs import, and the DKMS
-      # helper the doctor audit asks.
+      # Two packages carry files this repo does not own and the suites reach:
+      # shedos-system holds the DKMS helper the doctor audit asks and the one
+      # writer of the pacman blocks that apply hands its plan to, and the theme
+      # engine holds the palette module five of the TUIs import.
       test_packages: >-
         zsh fish scdoc man-db python-textual python-rich python-pygments
         python-tomlkit snapper btrfs-progs lm_sensors smartmontools
-        shedos-system
+        shedos-system shedos-theme-engine
     secrets:
       SHEDOS_DISPATCH_TOKEN: ${{ secrets.SHEDOS_DISPATCH_TOKEN }}
