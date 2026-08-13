@@ -105,6 +105,22 @@ def reserved_repo_names() -> set[str]:
     return names or set(DEFAULT_RESERVED_REPOS)
 
 
+# Every box installed before the channels became reserved carries
+# [pacman.repos.shedos] in its /etc/shedos/system.toml, because ShedOS shipped
+# the file that way and pacman leaves a backup= file alone. Refusing it would
+# fail the whole apply on a declaration nobody made, so the first plan that
+# meets one removes it and says so; the marker is what makes that the first
+# plan and not every plan, so a table declared after it is refused.
+
+
+def reserved_migration_path() -> Path:
+    return state_root() / "pacman-reserved.migrated"
+
+
+def reserved_migration_done() -> bool:
+    return reserved_migration_path().exists()
+
+
 def fstab_path() -> Path:
     raw = os.environ.get("SHEDOS_APPLY_FSTAB_PATH")
     if raw:
@@ -503,6 +519,7 @@ class PacmanRepo:
 class PacmanSection:
     repos: dict[str, PacmanRepo] = field(default_factory=dict)
     managed: bool = False  # True once [pacman.repos] appears at all
+    retired: list[str] = field(default_factory=list)  # tables the migration removes
 
     def is_empty(self) -> bool:
         return not self.managed
@@ -800,7 +817,11 @@ def validate_doc(doc: dict) -> ValidatedConfig:
             raise SchemaError("[pacman.repos] must be a table")
         cfg.pacman.managed = True
         reserved = reserved_repo_names() if repos_raw else set()
+        retiring = set() if reserved_migration_done() else reserved
         for name, stanza in repos_raw.items():
+            if name in retiring:
+                cfg.pacman.retired.append(name)
+                continue
             if name in reserved:
                 raise SchemaError(
                     f"[pacman.repos.{name}] is a ShedOS channel and "
@@ -831,6 +852,10 @@ def validate_doc(doc: dict) -> ValidatedConfig:
             cfg.pacman.repos[name] = PacmanRepo(
                 name=name, server=server.strip(), siglevel=siglevel.strip(),
             )
+        # The migration takes the emptied [pacman] table with it, so the run
+        # that removes the last table plans the same fence as the run after.
+        if cfg.pacman.retired and not cfg.pacman.repos:
+            cfg.pacman.managed = False
 
     svc_raw = doc.get("services", {})
     if svc_raw:
@@ -1749,6 +1774,124 @@ def plan_pacman(cfg: ValidatedConfig) -> list[Change]:
 
     return [Change(
         kind="~", section="pacman", summary=summary,
+        diff=diff, apply_fn=apply_fn, undo_fn=undo_fn,
+    )]
+
+
+# Migration: the reserved channel tables out of system.toml.
+
+
+def _cut_table(lines: list[str], header: str) -> list[str]:
+    """The lines without one table: its header, the comment block written
+    above it and its keys. What sits between its last key and the next header
+    introduces that one and stays where it is."""
+    try:
+        at = next(i for i, line in enumerate(lines) if line.strip() == header)
+    except StopIteration:
+        return lines
+    top = at
+    while top > 0 and lines[top - 1].lstrip().startswith("#"):
+        top -= 1
+    end = at + 1
+    while end < len(lines) and not lines[end].lstrip().startswith("["):
+        end += 1
+    while end > at + 1 and (not lines[end - 1].strip()
+                            or lines[end - 1].lstrip().startswith("#")):
+        end -= 1
+    # The blank line above the table and the one below it would both survive
+    # a cut between them, leaving a gap twice the size of every other.
+    if (top > 0 and not lines[top - 1].strip()
+            and end < len(lines) and not lines[end].strip()):
+        end += 1
+    return lines[:top] + lines[end:]
+
+
+def _repos_removed(doc: dict, names: list[str]) -> dict:
+    """The document the removal has to produce, as data."""
+    pacman = doc.get("pacman", {})
+    repos = pacman.get("repos", {})
+    for name in names:
+        repos.pop(name, None)
+    if not repos:
+        pacman.pop("repos", None)
+    if not pacman:
+        doc.pop("pacman", None)
+    return doc
+
+
+def _system_toml_without_repos(text: str, names: list[str]) -> str:
+    """The config with the named repository tables gone and the comments
+    written above them with them. Cut out of the text, because tomlkit reads
+    the comments written under a table as part of it and they belong to the
+    table below. The cut is held to what the removal means as data, and a
+    file it cannot express that way is rewritten by tomlkit instead."""
+    import tomlkit  # noqa: PLC0415
+
+    lines = text.splitlines(keepends=True)
+    for name in names:
+        lines = _cut_table(lines, f"[pacman.repos.{name}]")
+    cut = "".join(lines)
+
+    want = _repos_removed(tomllib.loads(text), names)
+    try:
+        if tomllib.loads(cut) == want:
+            return cut
+    except tomllib.TOMLDecodeError:
+        pass
+
+    doc = tomlkit.parse(text)
+    for name in names:
+        del doc["pacman"]["repos"][name]
+    if not doc["pacman"]["repos"]:
+        del doc["pacman"]["repos"]
+    if not doc["pacman"]:
+        del doc["pacman"]
+    return tomlkit.dumps(doc)
+
+
+def _write_migration_marker(names: list[str]) -> None:
+    atomic_write_text(reserved_migration_path(),
+                      "".join(f"{name}\n" for name in names))
+
+
+def plan_config_migration(cfg: ValidatedConfig) -> list[Change]:
+    marker = reserved_migration_path()
+
+    if not cfg.pacman.retired:
+        if marker.exists():
+            return []
+
+        def mark() -> None:
+            _write_migration_marker([])
+
+        return [Change(kind="~", section="system.toml",
+                       summary="record that there was nothing to retire",
+                       apply_fn=mark, quiet=True)]
+
+    path = config_path()
+    current_text = path.read_text(encoding="utf-8")
+    desired_text = _system_toml_without_repos(current_text, cfg.pacman.retired)
+    tables = ", ".join(f"[pacman.repos.{n}]" for n in cfg.pacman.retired)
+    diff_iter = difflib.unified_diff(
+        current_text.splitlines(keepends=True),
+        desired_text.splitlines(keepends=True),
+        fromfile="system.toml (current)",
+        tofile="system.toml (migrated)",
+        lineterm="",
+    )
+    diff = "".join(l if l.endswith("\n") else l + "\n" for l in diff_iter)
+
+    def apply_fn() -> None:
+        atomic_write_system_toml(path, desired_text)
+        _write_migration_marker(cfg.pacman.retired)
+
+    def undo_fn() -> None:
+        atomic_write_text(path, current_text, mode=0o644)
+        marker.unlink(missing_ok=True)
+
+    return [Change(
+        kind="-", section="system.toml",
+        summary=f"remove {tables} — shedos-system writes the ShedOS channels",
         diff=diff, apply_fn=apply_fn, undo_fn=undo_fn,
     )]
 
@@ -3643,6 +3786,7 @@ def build_plan(cfg: ValidatedConfig,
                manifest: Manifest) -> tuple[Plan, Manifest]:
     _PLAN_NOTES.clear()
     changes: list[Change] = []
+    changes.extend(plan_config_migration(cfg))
     changes.extend(plan_systemd(cfg))
     dropin_changes, new_manifest = plan_dropins(cfg, manifest)
     changes.extend(dropin_changes)

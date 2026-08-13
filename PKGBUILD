@@ -32,8 +32,9 @@ depends=(
     'python-rich'      # transitive dep of textual, declared for clarity
     'python-pygments'  # syntax highlighting in the merge TUI hunk panes
     'python-tomlkit'   # format-preserving system.toml writes
-    'shedos-theme-engine'  # shedos_palette, which the datetime, logs and
-                       # upgrade-history TUIs import to colour themselves
+    'shedos-theme-engine'  # shedos_palette, which the datetime, logs, status,
+                       # upgrade-history and _config-review TUIs import to
+                       # colour themselves
     'snapper'          # the pre/post snapshots rollback restores from
     'btrfs-progs'      # rollback and health call `btrfs subvolume`
     'lm_sensors'       # the health CPU-temp metric

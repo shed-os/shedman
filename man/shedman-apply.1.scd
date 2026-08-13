@@ -31,6 +31,14 @@ chain, pre-existing fstab entries) is snapshotted to per-section
 baseline files on first apply and permanently invisible to the
 reconciler thereafter.
 
+The ShedOS channels are not declarable: shedos-system writes
+*[shedos]* and *[shedostest]* in /etc/pacman.conf, and a
+*[pacman.repos]* table naming either is refused. Every box installed
+before that shipped with the table in its own
+/etc/shedos/system.toml, so the first plan that meets one removes it
+and shows the removal like any other change. /var/lib/shedos records
+that the removal ran; a table declared after it is refused.
+
 # OPTIONS
 
 *-c* _PATH_, *--config* _PATH_
@@ -58,6 +66,11 @@ reconciler thereafter.
 /var/lib/shedos/
 	Per-section state files (.state.json + .baseline.json) used by
 	the bidirectional adoption merge.
+
+/var/lib/shedos/pacman-reserved.migrated
+	Written by the apply that removed the reserved channel tables,
+	naming the ones it removed. It is what makes that removal the
+	first plan's and not every plan's.
 
 # ENVIRONMENT
 
