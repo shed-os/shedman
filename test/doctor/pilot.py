@@ -261,6 +261,36 @@ def case_schema_error(td: Path) -> None:
     assert "99" in r.stderr, r.stderr
 
 
+_RESERVED_TOML = (
+    'schema = 1\n'
+    '\n'
+    '# The channel every box shipped with.\n'
+    '[pacman.repos.shedos]\n'
+    'server   = "https://repo.shedos.org/stable/$arch"\n'
+    'siglevel = "Required DatabaseRequired"\n'
+)
+
+
+def case_reserved_stanza_reported(td: Path) -> None:
+    # The table nobody declared, on every box installed before the channels
+    # were the packages' own. Doctor reports it as the drift it is instead of
+    # dying on the refusal the declaration would otherwise get.
+    _setup(td, toml=_RESERVED_TOML)
+    r = _run(td)
+    assert r.returncode == 1, (r.returncode, r.stdout, r.stderr)
+    assert "[pacman.repos.shedos]" in r.stdout, r.stdout
+
+
+def case_reserved_stanza_refused_after_migration(td: Path) -> None:
+    # Once the migration has run, the table is a declaration someone made,
+    # and the answer to that is the refusal rather than another removal.
+    _setup(td, toml=_RESERVED_TOML)
+    (td / "state" / "pacman-reserved.migrated").write_text("shedos\n")
+    r = _run(td)
+    assert r.returncode == 2, (r.returncode, r.stdout, r.stderr)
+    assert "shedos-system writes it" in r.stderr, r.stderr
+
+
 def case_diff_renders(td: Path) -> None:
     _setup(td,
            toml='schema = 1\n[drop-ins]\n"sysctl.d/99.conf"="vm.swappiness=10\\n"\n')
@@ -707,6 +737,8 @@ CASES = [
     ("tick-clears-on-resolve",    case_tick_clears_when_drift_resolved),
     ("fix-delegates",             case_fix_delegates),
     ("schema-error",              case_schema_error),
+    ("reserved-stanza-reported",  case_reserved_stanza_reported),
+    ("reserved-stanza-refused",   case_reserved_stanza_refused_after_migration),
     ("diff-renders",              case_diff_renders),
     ("reset-notify-state",        case_reset_notify_state),
     ("plan-side-effect-free",     case_plan_is_side_effect_free),

@@ -1,0 +1,12 @@
+schema = 1
+
+# The [shedos] repo stanza in /etc/pacman.conf. The install scriptlet
+# writes an initial fence on first install; ongoing edits flow through
+# `shedman apply` so you can add extra repos or tweak SigLevel here.
+[pacman.repos.shedos]
+server   = "https://repo.shedos.org/stable/$arch"
+siglevel = "Required DatabaseRequired"
+
+# PostgreSQL bootstrap; mirrors what the install scriptlet enables.
+[services.postgresql]
+auto-init = true

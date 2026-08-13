@@ -1,0 +1,9 @@
+schema = 1
+
+# A repository of my own, with the spacing I gave it.
+[pacman.repos.my-mirror]
+server   = "https://pkgs.example.org/$repo/$arch"
+
+# Docker; left exactly as written.
+[services.docker]
+enable = true

@@ -27,6 +27,11 @@
 #                                           round-trip cleanly.
 #   fixture.sh                 (optional) — shell vars:
 #                                   APPLY_ARGS    default "--yes"
+#                                   APPLY_RUNS    how many applies the fixture
+#                                                 is, default 1; the last one
+#                                                 is the one asserted, for a
+#                                                 change that has to happen
+#                                                 once and not again
 #                                   EXIT_CODE     default 0
 #                                   EXPECT_OUTPUT a pattern the tool's own
 #                                                 output has to carry, for
@@ -120,6 +125,7 @@ _run_one() {
     [[ -f $fdir/system.toml ]] || { echo "skip $name (missing system.toml)"; return; }
 
     local APPLY_ARGS="--yes"
+    local APPLY_RUNS=1
     local EXIT_CODE=0
     local EXPECT_OUTPUT=
     local FIXTURE_FENCE=
@@ -221,7 +227,8 @@ STUB
         cp -a "$fdir/initial-boot/." "$boot_dir/"
     fi
 
-    local rc out
+    local rc out run
+    for (( run = 0; run < APPLY_RUNS; run++ )); do
     # shellcheck disable=SC2086
     out=$(
         SHEDOS_APPLY_ETC_ROOT=$etc \
@@ -238,6 +245,7 @@ STUB
         "$tool" --config "$etc/shedos/system.toml" $APPLY_ARGS 2>&1
     )
     rc=$?
+    done
 
     if (( rc != EXIT_CODE )); then
         echo "FAIL $name: exit $rc (expected $EXIT_CODE)"
