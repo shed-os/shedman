@@ -1,0 +1,12 @@
+schema = 1
+
+# The [shedos] repo stanza in /etc/pacman.conf. The install scriptlet
+# writes an initial fence on first install.
+[pacman.repos.shedos]
+server   = "https://repo.shedos.org/stable/$arch"
+siglevel = "Required DatabaseRequired"
+
+# A repository of my own, which the migration has no business touching.
+[pacman.repos.my-mirror]
+server   = "https://pkgs.example.org/$repo/$arch"
+siglevel = "Required DatabaseRequired"
