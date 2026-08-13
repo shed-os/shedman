@@ -7,7 +7,7 @@
 
 pkgname=shedman
 pkgver=2026.08.13.1
-pkgrel=1
+pkgrel=2
 pkgdesc='The ShedOS package manager and system CLI'
 arch=('any')
 url='https://github.com/shed-os/shedman'
