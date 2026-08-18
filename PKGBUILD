@@ -1,4 +1,4 @@
-# Maintainer: ShedOS <https://github.com/Theshedman/shedos>
+# Maintainer: ShedOS <https://github.com/shed-os/shedman>
 #
 # The shedman dispatcher and the verbs it was built around: installing and
 # removing packages, the interactive upgrade, the declared-state reconciler,
