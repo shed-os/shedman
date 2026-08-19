@@ -6,7 +6,7 @@
 # from their own package with a declaration beside them.
 
 pkgname=shedman
-pkgver=2026.08.19
+pkgver=2026.08.19.1
 pkgrel=1
 pkgdesc='The ShedOS package manager and system CLI'
 arch=('any')
