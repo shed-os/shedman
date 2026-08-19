@@ -107,7 +107,7 @@ The headline set:
 
 *shedman tour*
 	Replay the first-run welcome tour overlay. See
-	*shedos-tour*(1).
+	*shedman-tour*(1).
 
 # BUILT-INS
 
