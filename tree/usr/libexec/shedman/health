@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# shedos-check-health; aggregate hardware health signals for waybar.
+# shedman health; aggregate hardware health signals for waybar.
 #
 # Modes mirror shedos-check-updates:
 #   (no args)            Human summary.
@@ -67,6 +67,9 @@ EOF
         exit 0
         ;;
     -h|--help)
+        echo 'Usage: shedman health [--waybar] [--refresh-waybar] [--notify-if-new]'
+        echo '                      [--tick] [--reset-notify-state] [-h|--help]'
+        echo
         sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'
         exit 0
         ;;
